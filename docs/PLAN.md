@@ -49,7 +49,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | M0 Foundations | T-001…T-006 | 6/6 |
 | M1 Record | T-101…T-114 | 5/14 |
 | M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
-| M3 Editor shell | T-301…T-313 | 2/13 |
+| M3 Editor shell | T-301…T-313 | 4/13 |
 | M4 Timeline | T-401…T-418 | 5/18 |
 | M5 Ship | T-501…T-509 | 0/9 |
 | M6 Polish | T-601…T-609 | 0/9 |
@@ -283,12 +283,14 @@ Update the "Done" column whenever you tick a task.
 
 ## M2 — Record+  (SPEC §4.6, §4.7, §4.4 resize)
 
-- [ ] **T-201 Camera capture + bubble** · SPEC §4.6
+- [~] **T-201 Camera capture + bubble** · SPEC §4.6
+  - WAITING ON HUMAN: built + merged (lane-capture). Select a camera in the toolbar → bubble appears, drags, snaps to corners; AC-CAM-1 (bubble never in `screen.mov`) and the AC-CAM-2 clap test need T-111 recording flow first.
   - Files: `Recording/CameraCapture.swift`, `Recording/CameraBubblePanel.swift`.
   - Do: `AVCaptureSession` (preset `.high`) with the selected device; `AVCaptureVideoPreviewLayer` in a 200×200 `FloatingPanel` (mirrored via `connection.isVideoMirrored`, `cornerRadius 40`, `cornerCurve .continuous`), draggable, snaps to the nearest corner (24 pt margin) on mouse-up. `AVCaptureVideoDataOutput` → a fourth `TrackWriter` (`camera.mov`, H.264) using the **same** `t0`/`pausedSoFar` as `CaptureSession` (expose them). Buffers before `t0` are dropped. Store the bubble's final corner into `project.camera.corner`.
   - HUMAN: AC-CAM-1; clap test for AC-CAM-2 (compare `camera.mov` and `mic.m4a` in QuickTime).
 
-- [ ] **T-202 Countdown** · SPEC §4.7 — File `Recording/CountdownOverlay.swift`. SwiftUI number in a panel centred on the target rect, scale+fade per second, `Esc` cancels back to the picker. `RecordingController.begin` awaits it when `countdown > 0`.
+- [~] **T-202 Countdown** · SPEC §4.7 — File `Recording/CountdownOverlay.swift`. SwiftUI number in a panel centred on the target rect, scale+fade per second, `Esc` cancels back to the picker. `RecordingController.begin` awaits it when `countdown > 0`.
+  - PARTIAL: `CountdownOverlay.run(seconds:over:) async -> Bool` merged; `RecordingController.begin` must await it (T-111), then HUMAN check.
   - HUMAN: 3/5/10 work; Esc cancels.
 
 - [ ] **T-203 Recording widget** · SPEC §4.7 mockup — File `Recording/RecordingWidgetPanel.swift`. `FloatingPanel` with timer (`Theme.timecodeFont`), Finish / Pause⇄Resume / Restart / Delete (confirm alert). Right-click → Hide. Replaces the M1 status-item-only UI (status item keeps the same actions).
@@ -359,7 +361,7 @@ Update the "Done" column whenever you tick a task.
   - Do: undo/redo = two `[Project]` stacks (cap 200). `// ponytail: whole-struct snapshots; Project is a few KB.` Autosave: cancel+reschedule a 0.5 s `DispatchWorkItem` on every mutation → `project.save`; also on window close and `applicationWillTerminate`. SwiftUI sliders use `beginGesture/commitGesture` through `onEditingChanged`.
   - Selftest `model`: edit → undo → redo equality; gesture with 10 updates = 1 undo step; file on disk updated after 0.6 s. (AC-INS-2, AC-PRJ-3 partially.)
 
-- [ ] **T-304 Shaders + Compositor v1 (background, frame, shadow, crop, aspect)** · SPEC §6.2 passes 1–2
+- [x] **T-304 Shaders + Compositor v1 (background, frame, shadow, crop, aspect)** · SPEC §6.2 passes 1–2
   - Files: `Sources/Recorder/Render/Shaders.swift` (one `let shaderSource = """ … """`), `Render/Compositor.swift`, `Render/FrameState.swift`.
   ```swift
   struct FrameState {                       // built by pure code; the compositor never reads EditorModel
@@ -382,7 +384,7 @@ Update the "Done" column whenever you tick a task.
   - Selftest `render <package> <out.png>`: renders output frame 0 at 1920 long edge to PNG; OK if file exists and the centre pixel ≠ the corner pixel.
   - HUMAN: open the PNG — rounded corners, shadow, padding, background look like SPEC §6.1's preview.
 
-- [ ] **T-305 FrameSource + composition**
+- [x] **T-305 FrameSource + composition**
   - File: `Sources/Recorder/Render/FrameSource.swift`
   ```swift
   /// Builds the AVMutableComposition from project.clips (insertTimeRange + scaleTimeRange per clip) for screen, camera, mic, system.
@@ -545,7 +547,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 
 - [ ] **T-414 Inspector: selection panels + Cursor tab (basic)** · SPEC §6.6 — Files `Inspector/ZoomPanel.swift`, `ClipPanel.swift`, `CursorTab.swift`. Selection replaces tabs; `‹ Back`/`Esc` deselects (AC-INS-3). Zoom panel: Level 1.2–5, Auto/Manual, Instant, Disable, Remove. Clip panel: speed presets + custom slider 0.25–16, duration readout, Remove. Cursor tab: Hide, Size 0.5–4, Movement picker, Hide when idle (others disabled with "M6").
 - [ ] **T-415 Manual zoom target in preview** — when a `.manual` zoom is selected, `PreviewView` shows the **un-zoomed** frame with a draggable accent rectangle (size = 1/scale) — reuse `SelectionRectView` with `aspect` locked and resize disabled (`allowsResize = false`, add that flag). Drag = `update { zoom.center }`.
-- [ ] **T-416 Waveform** — File `Render/Waveform.swift`: `AVAssetReader` over mic (else system) → min/max peaks at 200/s → `[Float]` cached in memory; drawn inside clip blocks mapped through `TimeMap`. `// ponytail: computed on open, not cached on disk.`
+- [~] **T-416 Waveform** — File `Render/Waveform.swift`: `AVAssetReader` over mic (else system) → min/max peaks at 200/s → `[Float]` cached in memory; drawn inside clip blocks mapped through `TimeMap`. `// ponytail: computed on open, not cached on disk.`
+  - PARTIAL: `Waveform.peaks(for:)` + `--selftest waveform` merged and verified (aiff + m4a); drawing inside clip blocks happens after the timeline lane (T-404…) merges.
 - [ ] **T-417 Accessibility** · AC-TL-8 — `accessibilityChildren()` returns one `NSAccessibilityElement` per block, role `.button`, label per SPEC, `accessibilityPerformIncrement/Decrement` move by one frame. HUMAN: VoiceOver reads blocks.
 - [ ] **T-418 M4 gate** — `make test` all green; HUMAN walks SPEC §7.2 paragraph by paragraph and §7.3 key by key; deviations into §Log. AC-TL-3 on a 30-min recording.
 
@@ -581,7 +584,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 
 - [ ] **T-601 Masks & highlights** · SPEC §7.1 lane, §6.6 Mask panel — lane on; rect edited in preview with `SelectionRectView`; mask = solid fill at `opacity`, highlight = dim everything outside the rect by `opacity`. Keys: only those in SPEC §7.3.
 - [ ] **T-602 Keyboard-shortcut overlay** — render `.key` events as rounded chips (`⌘ ⇧ K`) bottom-centre for 1.2 s; text rendered to a texture with Core Text, cached per string. Keys tab.
-- [ ] **T-603 Speed up typing** — Edit ▸ Speed Up Typing: find runs of `.typing` events (gap < 1 s, length > 3 s), split clips around them, set 2×. Core fn `typingRanges(events:) -> [TimeRange]` + test.
+- [~] **T-603 Speed up typing** — Edit ▸ Speed Up Typing: find runs of `.typing` events (gap < 1 s, length > 3 s), split clips around them, set 2×. Core fn `typingRanges(events:) -> [TimeRange]` + test.
+  - PARTIAL: Core `typingRanges(events:)` + tests merged; Edit ▸ Speed Up Typing wiring remains (needs editor menus, M3/M4).
 - [ ] **T-604 Cursor advanced** — loop position, rotate, remove shakes, always-arrow, hide-cursor ranges via Edit ▸ Hide Cursor in Selected Clip (adds the clip's source range to `cursorHidden`). Tests per stage in `CursorPath`.
 - [ ] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
 - [ ] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
@@ -625,3 +629,9 @@ T-412 · 2026-09-18 · verified: 4 listed tests green · deviations: test rename
 T-109 · 2026-09-18 · verified: lane-capture merged, `make app` OK; `--selftest events 3` exits 1 cleanly without TCC (agent shell) · deviations: none; HUMAN run pending
 T-110 · 2026-09-18 · verified: `make app` OK; `--selftest record display 3` exits 1 cleanly without TCC · deviations: `finish()` returns `Source` (the type is top-level in Core, not nested in `Project`); HUMAN run pending
 T-206 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `make test` passes 29/29; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: `WindowResizer.resize` matches the AX window by title only (falls back to the front-most AX window when the title is nil/unmatched) since the normative signature carries no frame param — noted as `// ponytail:` with an upgrade path; the `[Resize]` control sits next to the size line ("1440 × 834  [Resize]") per the SPEC §4.4 ASCII mockup rather than next to the Start-recording button (the task text's looser paraphrase); 9:16/16:10/Square submenu sizes aren't listed verbatim in SPEC §4.4 (only 4:3's five sizes are) so five round numbers per ratio were chosen matching the 4:3 list's pattern; saved sizes stored in `UserDefaults` as `[[Double]]` under key `WindowResizer.savedSizes`. Not HUMAN-verified: no Screen Recording/Accessibility TCC grant for this agent, so AC-WIN-2 (real resize + highlight/size-label follows, oversize presets disabled, Custom… remembered) couldn't be exercised — task marked `[~]`.
+T-304 · 2026-09-18 · verified: `--selftest render` OK on master; coordinator viewed the PNG (rounded corners, soft shadow, ~8 % padding, violet background — matches SPEC §6.1); `layoutFitsAndCentres` green · deviations: layout math is the free function `screenRect(...)` (a `Layout` type already exists in Project); shadow drawn on a full-canvas quad; screen texture is a synthetic gradient until T-306/T-413
+T-305 · 2026-09-18 · verified by lane agent: `--selftest composition` 2.0 s single clip and 1.5 s two-clip (1× + 2×) fixtures OK; builds on master · deviations: `audioTimePitchAlgorithm` belongs to AVPlayerItem → T-306; TextureCache returns luma only until shader mode 4 (T-306), both `// ponytail:`
+T-201 · 2026-09-18 · verified: `make app`, launch smoke · deviations: exposes CaptureSession `t0/pausedSoFar/isPaused` + internal `TrackWriter`; camera TCC gate via `CameraCapture.request`; HUMAN pending
+T-416 (peaks) · 2026-09-18 · verified: `--selftest waveform` on big-endian aiff and m4a; coordinator caught byte-swapped samples (missing `AVLinearPCMIsBigEndianKey: false`), fixed; selftest now range-checks the peak
+T-603 (core) / T-202 (file) · 2026-09-18 · merged; wiring pending
+KNOWN ISSUE · `--selftest library` flaked 1/7 on master: `ProjectStore.duplicate` copies into the watched folder before fixing `project.json` title, so a reload can see the stale title (and the folder watcher never fires for the later in-package write). Fix in T-302: copy to a temp dir, rewrite project.json, then move into the folder.
