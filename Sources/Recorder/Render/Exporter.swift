@@ -226,23 +226,43 @@ final class Exporter {
     }
 }
 
-/// Decodes one video track sequentially, advancing until the buffer at/after output time `t`
-/// (SPEC §6.8: "advance each reader until its buffer PTS ≥ t"), holding the last decoded frame for
-/// gaps/tail — the same rule `PreviewView.currentScreenPixelBuffer` uses for the live player.
+/// Decodes one video track sequentially and, for output time `t`, returns the frame with the
+/// **largest PTS ≤ t** — the frame a player is actually showing at `t` (its "current" frame is the
+/// most recent one whose presentation time has passed), not the first frame *at or after* `t`.
+///
+/// `// T-505 fix: the first version of this advanced "while pendingPTS < t" and returned whatever
+/// it had just consumed, which lands on the first sample with PTS ≥ t — one frame LATER than the
+/// preview path (AVPlayerItemVideoOutput.copyPixelBuffer(forItemTime:), which floors) picks for the
+/// same t. On moving/changing content that's a full extra frame of content difference, not decoder
+/// noise — confirmed by logging both candidates (see the T-505 fix commit message for numbers)
+/// before fixing. copyNextSampleBuffer() has no peek, so a one-sample lookahead buffer is needed:
+/// only "commit" a freshly read sample as current once its own PTS ≤ t; otherwise hold it for a
+/// later call (t only moves forward — export/parity always sample it in increasing order).`
 private final class FrameHold {
     private let output: AVAssetReaderTrackOutput
-    private var pending: CMSampleBuffer?
-    private var pendingPTS = -Double.infinity
+    private var current: CMSampleBuffer?
+    private var lookahead: CMSampleBuffer?
+    private var lookaheadPTS = Double.infinity
 
     init(output: AVAssetReaderTrackOutput) { self.output = output }
 
     func imageBuffer(upTo t: Double) -> CVPixelBuffer? {
-        while pendingPTS < t, let next = output.copyNextSampleBuffer() {
-            pending = next
-            pendingPTS = CMSampleBufferGetPresentationTimeStamp(next).seconds
+        if let lookahead, lookaheadPTS <= t {
+            current = lookahead
+            self.lookahead = nil
+            lookaheadPTS = .infinity
         }
-        guard let pending else { return nil }
-        return CMSampleBufferGetImageBuffer(pending)
+        while lookahead == nil, let next = output.copyNextSampleBuffer() {
+            let pts = CMSampleBufferGetPresentationTimeStamp(next).seconds
+            if pts <= t {
+                current = next
+            } else {
+                lookahead = next
+                lookaheadPTS = pts
+            }
+        }
+        guard let current else { return nil }
+        return CMSampleBufferGetImageBuffer(current)
     }
 }
 
@@ -315,10 +335,22 @@ enum ExporterSelfTest {
         let model = try loadEditorModel(package: packageURL)
         let project = model.project
         let duration = model.timeMap.outputDuration
-        // Offset off any exact source-frame boundary (§ t*sourceFps landing on an integer): right on
-        // one, the two decoders' own internal rounding can disagree by a single frame — a genuine
-        // ± frame-duration ambiguity in "which frame is current at exactly t", not a compositor bug.
-        let times = [duration * 0.1, duration * 0.5, duration * 0.85].filter { $0 >= 0 }.map { $0 + 0.011 }
+        let timeMap = model.timeMap
+
+        // ≥ 5 times spread across the timeline, plus: one exactly on a likely (30 fps) frame
+        // boundary (`FrameHold`'s floor-selection must still match the player there), one inside
+        // the last clip when it's sped up (composition's `scaleTimeRange` region), and one inside
+        // the first enabled zoom (view/cursor sampling under a non-identity `ViewTransform`).
+        var times: Set<Double> = [duration * 0.08, duration * 0.28, duration * 0.5, duration * 0.73, duration * 0.92]
+        let boundary = (Double(Int(duration * 15)) / 30.0)
+        if boundary > 0, boundary < duration { times.insert(boundary) }
+        if let lastClip = project.clips.last, lastClip.speed != 1 {
+            times.insert(duration - lastClip.outputDuration / 2)
+        }
+        if let zoom = project.zooms.first(where: \.enabled), let mid = timeMap.outputTime(atSource: (zoom.start + zoom.end) / 2) {
+            times.insert(mid)
+        }
+        let orderedTimes = times.filter { $0 >= 0 && $0 < duration }.sorted()
 
         guard let device = MTLCreateSystemDefaultDevice() else { throw SelfTestArgError.usage("no Metal device") }
         let compositor = try Compositor(device: device, package: packageURL)
@@ -369,7 +401,7 @@ enum ExporterSelfTest {
         }
 
         var maxDelta = 0
-        for t in times {
+        for t in orderedTimes {
             let time = CMTime(seconds: t, preferredTimescale: 600)
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in cont.resume() }
@@ -382,14 +414,26 @@ enum ExporterSelfTest {
                 throw SelfTestArgError.usage("no export-path pixel buffer at t=\(t)")
             }
 
+            // (2) pixel format / range: both request identical 420v + Metal-compat settings above;
+            // confirm no implicit scaling snuck in by checking the decoded buffer dimensions match.
+            let previewSize = (CVPixelBufferGetWidth(previewPB), CVPixelBufferGetHeight(previewPB))
+            let exportSize = (CVPixelBufferGetWidth(exportPB), CVPixelBufferGetHeight(exportPB))
+            guard previewSize == exportSize else {
+                throw SelfTestArgError.usage("decoded size mismatch at t=\(t): preview=\(previewSize) export=\(exportSize)")
+            }
+
+            // (3) both call `makeFrameState` with the identical outputTime/size (see `render` above).
             let previewBytes = try await render(previewTex, outputTime: t)
             let exportBytes = try await render(exportTex, outputTime: t)
+            var tMaxDelta = 0
             for i in 0..<previewBytes.count {
                 let delta = abs(Int(previewBytes[i]) - Int(exportBytes[i]))
-                if delta > maxDelta { maxDelta = delta }
+                if delta > tMaxDelta { tMaxDelta = delta }
             }
+            print("parity t=\(String(format: "%.3f", t)) maxDelta=\(tMaxDelta)")
+            maxDelta = max(maxDelta, tMaxDelta)
         }
-        print("parity maxDelta=\(maxDelta) over \(times.count) times")
+        print("parity maxDelta=\(maxDelta) over \(orderedTimes.count) times")
         guard maxDelta <= 1 else { throw SelfTestArgError.usage("parity maxDelta \(maxDelta) > 1") }
     }
 }
