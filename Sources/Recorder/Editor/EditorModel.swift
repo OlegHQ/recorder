@@ -24,6 +24,10 @@ import RecorderCore
     private var redoNames: [String] = []
     private let undoCap = 200
 
+    /// For selftests (AC-TL-6: "every gesture is exactly one undo step"): how many completed
+    /// edits/gestures are currently undoable.
+    var undoStepCount: Int { undoStack.count }
+
     private var gestureSnapshot: Project?
     private var autosaveWork: DispatchWorkItem?
 

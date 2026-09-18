@@ -207,7 +207,10 @@ private extension Array where Element: TimedBlock {
         let sorted = self.sorted { $0.start < $1.start }
         var lo = 0.0, hi = duration
         for b in sorted {
-            if s >= b.start && s <= b.end { return nil }   // s is inside an existing block, not a gap
+            // Half-open `[start, end)`: `s` sitting exactly on another block's end is the instant
+            // its gap begins, not "inside" it — root-cause fix so `duplicateBlock`'s anchor (a
+            // block's own `end`) lands in the gap right after it, not refused as self-overlapping.
+            if s >= b.start && s < b.end { return nil }
             if b.end <= s { lo = Swift.max(lo, b.end) }
             if b.start >= s { hi = Swift.min(hi, b.start) }
         }
@@ -293,6 +296,38 @@ public extension Project {
             masks.removeBlock(id: key)
         }
         assert(checkInvariants() == nil)
+    }
+
+    /// SPEC §7.3 `⌘D`: "duplicate selected zoom/mask after itself" — a copy of `id`'s block
+    /// (same scale/mode/center/instant/enabled, or opacity/rect for a mask), placed in the free
+    /// gap right after it. Returns the copy's id, or `nil` if `id` isn't a zoom/mask or there's no
+    /// room. Layout isn't in SPEC's keyboard map for `⌘D`.
+    @discardableResult
+    mutating func duplicateBlock(_ id: UUID) -> UUID? {
+        let key = id.uuidString
+        let newID = UUID()
+        if let zoom = zooms.first(where: { $0.id == key }) {
+            guard zooms.addBlock(atSource: zoom.end, length: zoom.end - zoom.start, duration: source.duration, minLength: Self.minBlockLength, make: { start, end in
+                Zoom(id: newID.uuidString, start: start, end: end, scale: zoom.scale, mode: zoom.mode, center: zoom.center, instant: zoom.instant, enabled: zoom.enabled)
+            }) != nil else { return nil }
+        } else if let mask = masks.first(where: { $0.id == key }) {
+            guard masks.addBlock(atSource: mask.end, length: mask.end - mask.start, duration: source.duration, minLength: Self.minBlockLength, make: { start, end in
+                Mask(id: newID.uuidString, start: start, end: end, kind: mask.kind, rect: mask.rect, opacity: mask.opacity)
+            }) != nil else { return nil }
+        } else {
+            return nil
+        }
+        assert(checkInvariants() == nil)
+        return newID
+    }
+
+    /// Non-mutating preview of where `addZoom(atSource:length:)` would place a new block — for the
+    /// empty zoom-lane "ghost" (SPEC §7.2 "Zoom blocks"). `nil` exactly when `addZoom` would also fail.
+    func previewZoomPlacement(atSource s: Double, length: Double = 3) -> (start: Double, end: Double)? {
+        var trial = self
+        guard let id = trial.addZoom(atSource: s, length: length, mode: .manual),
+              let zoom = trial.zooms.first(where: { $0.id == id.uuidString }) else { return nil }
+        return (zoom.start, zoom.end)
     }
 }
 

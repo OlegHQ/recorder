@@ -400,6 +400,9 @@ enum SelfTest {
             try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
             defer { try? fm.removeItem(at: tmp) }
 
+            // T-416: a short synthetic mic track so the clip lane actually has a waveform to draw.
+            try synthesizeSineM4A(at: tmp.appendingPathComponent("mic.m4a"), duration: 15)
+
             let model = await EditorModel(packageURL: tmp, project: project, events: EventLog())
             let outputDuration = await model.timeMap.outputDuration
             await MainActor.run { model.playhead = outputDuration / 2 }
@@ -407,12 +410,22 @@ enum SelfTest {
             let zoom0ID = UUID(uuidString: project.zooms[0].id)!
             let layout0ID = UUID(uuidString: project.layouts[0].id)!
 
-            let (png, hitErrors): (Data?, [String]) = await MainActor.run {
+            let view = await MainActor.run { () -> TimelineView in
                 let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 160))
                 view.model = model
                 view.geometry.pxPerSecond = (view.frame.width - TimelineView.gutter) / (outputDuration + 3)
                 view.needsDisplay = true
+                return view
+            }
 
+            // T-416's waveform load happens off the main thread; wait for it before rendering.
+            let waveformDeadline = Date().addingTimeInterval(3)
+            while await MainActor.run(body: { !view.hasWaveform }) {
+                guard Date() < waveformDeadline else { throw Fail(description: "waveform never loaded") }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+
+            let (png, hitErrors): (Data?, [String]) = await MainActor.run {
                 // T-406: hit-test a handful of known points against the fixture's geometry.
                 var errors: [String] = []
                 @MainActor func expect(_ p: CGPoint, _ wanted: TimelineHit, _ name: String) {
@@ -430,6 +443,7 @@ enum SelfTest {
                     errors.append("emptyLane: got \(view.hitTest(at: CGPoint(x: 700, y: 80)))")
                 }
 
+                view.needsDisplay = true
                 guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return (nil, errors) }
                 view.cacheDisplay(in: view.bounds, to: rep)
                 return (rep.representation(using: .png, properties: [:]), errors)
@@ -1520,6 +1534,11 @@ enum SelfTest {
         "click": { args in try await UIDriver.click(args) },
         "key": { args in try await UIDriver.key(args) },
         "drag": { args in try await UIDriver.drag(args) },
+        // T-407/408/409: drives a `TimelineView` + `EditorModel` over a synthetic project with
+        // real (synthesized) `NSEvent`s — no window, no TCC — asserting the invariants CLAUDE.md
+        // calls out: invariants hold after every op, each gesture is exactly one undo step, `Esc`
+        // mid-drag/mid-split-mode reverts, split refuses near edges, snapping lands on/off candidates.
+        "timeline-ops": { _ in try await runTimelineOpsSelfTest() },
     ]
 
     /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and
@@ -1583,4 +1602,462 @@ enum SelfTest {
 
 private extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
+// MARK: - T-416: a synthetic `mic.m4a` fixture (used by "timeline-png") so the waveform draws.
+
+private func synthesizeSineM4A(at url: URL, duration: Double, sampleRate: Double = 44_100) throws {
+    struct Fail: Error, CustomStringConvertible { let description: String }
+    let settings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000,
+    ]
+    let file = try AVAudioFile(forWriting: url, settings: settings)
+    guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(sampleRate * duration)) else {
+        throw Fail(description: "couldn't allocate a PCM buffer for the mic fixture")
+    }
+    buffer.frameLength = buffer.frameCapacity
+    let channel = buffer.floatChannelData![0]
+    for i in 0..<Int(buffer.frameLength) {
+        let t = Double(i) / sampleRate
+        let envelope = 0.15 + 0.45 * abs(sin(2 * .pi * 0.6 * t)) // varying peaks, like SPEC §7.1's mockup
+        channel[i] = Float(sin(2 * .pi * 220 * t) * envelope)
+    }
+    try file.write(from: buffer)
+}
+
+// MARK: - "timeline-ops" (T-407/408/409)
+
+private struct TimelineOpsFail: Error, CustomStringConvertible { let description: String }
+
+private func synthMouse(_ type: NSEvent.EventType, _ p: CGPoint, modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
+    NSEvent.mouseEvent(with: type, location: p, modifierFlags: modifiers, timestamp: 0, windowNumber: 0,
+                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+}
+
+private func synthKey(_ chars: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
+    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: 0,
+                      context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: keyCode)!
+}
+
+private func synthFlags(_ modifiers: NSEvent.ModifierFlags) -> NSEvent {
+    NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: 0,
+                      context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 0)!
+}
+
+/// A fresh `TimelineView` + `EditorModel`, at a known `pxPerSecond` (so pixel math in a test is
+/// exact): a 20 s single clip and one click event at source t=5. Each section below gets its own,
+/// so the sections are independent of each other's end state.
+@MainActor
+private func makeTimelineOpsFixture() throws -> (model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat, cleanup: () -> Void) {
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-timeline-ops-\(UUID().uuidString)")
+    try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+
+    var project = Project(title: "Ops Fixture", source: Source(duration: 20))
+    project.clips = [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)]
+    let events = EventLog(events: [InputEvent(t: 5, k: .down, x: 0.5, y: 0.5, b: 0)])
+    let model = EditorModel(packageURL: tmp, project: project, events: events)
+
+    let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 160))
+    view.model = model
+    view.geometry.pxPerSecond = 40
+    view.geometry.scrollX = 0
+    let gutter = TimelineView.gutter
+
+    func px(_ outputSeconds: Double) -> CGFloat { gutter + CGFloat(outputSeconds * view.geometry.pxPerSecond) }
+    // `TimelineView` is flipped; a windowless `convert(_:from: nil)` (what `mouseDown`/etc. use to
+    // read `event.locationInWindow`) still applies that flip, so a synthetic event's `y` must be
+    // pre-flipped to land at the intended *view-local* y that `hitTest`/lane rows are defined in.
+    func py(_ localY: CGFloat) -> CGFloat { view.bounds.height - localY }
+    return (model, view, px, py, { try? fm.removeItem(at: tmp) })
+}
+
+/// Drives a `TimelineView` + `EditorModel` over synthetic projects, headless: fires real
+/// `NSEvent`s at the view exactly as AppKit would, asserting the invariants named in CLAUDE.md /
+/// the plan's Verify step.
+@MainActor
+private func runTimelineOpsSelfTest() async throws {
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        try runSplitSelfTest(model: model, view: view, px: px, py: py)
+    }
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        try runTrimRemoveRestoreSpeedSelfTest(model: model, view: view, px: px, py: py)
+    }
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        try runZoomBlockSelfTest(model: model, view: view, px: px, py: py)
+    }
+    try runFitOnFirstLayoutSelfTest()
+}
+
+/// T-405 fix: "the timeline opens fitted" (SPEC §7.2 "Navigation") — regardless of whether the
+/// model or the first real layout (non-zero width) happens first — and a later resize never
+/// re-fits, whether or not the user has zoomed manually in between.
+@MainActor
+private func runFitOnFirstLayoutSelfTest() throws {
+    func shortProject() throws -> (model: EditorModel, cleanup: () -> Void) {
+        let (model, _, _, _, cleanup) = try makeTimelineOpsFixture()
+        model.edit("shrink") { $0.clips = [Clip(sourceStart: 0, sourceEnd: 3, speed: 1)] } // a short, 3 s project
+        return (model, cleanup)
+    }
+
+    // model attached, then the first layout.
+    do {
+        let (model, cleanup) = try shortProject()
+        defer { cleanup() }
+        let view = TimelineView(frame: .zero)
+        view.model = model
+        view.setFrameSize(NSSize(width: 900, height: 160))
+        let expected = view.geometry.width / 3
+        guard abs(view.geometry.pxPerSecond - expected) < 0.01 else {
+            throw TimelineOpsFail(description: "didn't fit on first layout (model-then-layout): pxPerSecond \(view.geometry.pxPerSecond), expected ~\(expected)")
+        }
+        // A later resize doesn't re-fit — only the first layout does.
+        view.setFrameSize(NSSize(width: 1200, height: 160))
+        guard abs(view.geometry.pxPerSecond - expected) < 0.01 else {
+            throw TimelineOpsFail(description: "a later resize re-fit the timeline")
+        }
+    }
+
+    // The first layout, then the model attached (duration only becomes known second).
+    do {
+        let (model, cleanup) = try shortProject()
+        defer { cleanup() }
+        let view = TimelineView(frame: .zero)
+        view.setFrameSize(NSSize(width: 900, height: 160))
+        view.model = model
+        let expected = view.geometry.width / 3
+        guard abs(view.geometry.pxPerSecond - expected) < 0.01 else {
+            throw TimelineOpsFail(description: "didn't fit on first layout (layout-then-model): pxPerSecond \(view.geometry.pxPerSecond), expected ~\(expected)")
+        }
+    }
+
+    // A manual zoom before the first real layout suppresses the auto-fit entirely.
+    do {
+        let (model, cleanup) = try shortProject()
+        defer { cleanup() }
+        let view = TimelineView(frame: .zero)
+        view.model = model
+        view.setZoom(sliderValue: 1.0)
+        let zoomed = view.geometry.pxPerSecond
+        view.setFrameSize(NSSize(width: 900, height: 160))
+        guard view.geometry.pxPerSecond == zoomed else {
+            throw TimelineOpsFail(description: "auto-fit ran even though the user had already zoomed")
+        }
+    }
+}
+
+/// T-407 "Split": `C` at the playhead (works, and is refused within 2 frames of an edge), sticky
+/// split mode via `S`/toolbar, momentary split mode via `⌥`, snapping onto/off the playhead
+/// candidate, `Esc` exiting split mode, and exactly one undo step per successful split.
+@MainActor
+private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
+    // `C` splits the single clip at the playhead.
+    model.playhead = 10
+    let beforeC = model.project
+    let undoBeforeC = model.undoStepCount
+    view.keyDown(with: synthKey("c", keyCode: 8))
+    guard model.project.clips.count == beforeC.clips.count + 1 else {
+        throw TimelineOpsFail(description: "`C` didn't split: \(model.project.clips)")
+    }
+    guard model.project.checkInvariants() == nil else {
+        throw TimelineOpsFail(description: "invariants broken after split: \(model.project.checkInvariants()!)")
+    }
+    guard model.undoStepCount == undoBeforeC + 1 else {
+        throw TimelineOpsFail(description: "split should push exactly one undo step, pushed \(model.undoStepCount - undoBeforeC)")
+    }
+    model.undo()
+    guard model.project == beforeC else { throw TimelineOpsFail(description: "undo after split didn't restore the pre-split project") }
+
+    // Refused: within 2 frames (at the default 60 fps) of the clip's trailing edge.
+    model.playhead = 20 - 0.01
+    let beforeRefused = model.project
+    let undoBeforeRefused = model.undoStepCount
+    view.keyDown(with: synthKey("c", keyCode: 8))
+    guard model.project == beforeRefused else { throw TimelineOpsFail(description: "split within 2 frames of an edge should be a no-op") }
+    guard model.undoStepCount == undoBeforeRefused else { throw TimelineOpsFail(description: "a refused split pushed an undo step") }
+
+    // Sticky split mode (`S`), snapped click onto the playhead candidate (10), one undo step.
+    model.playhead = 10
+    let beforeSnap = model.project
+    let undoBeforeSnap = model.undoStepCount
+    view.keyDown(with: synthKey("s", keyCode: 1))
+    let hoverX = px(10.08) // well within the 6 pt / 40 px-per-s = 0.15 s snap threshold of the playhead
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: hoverX, y: py(60))))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: hoverX, y: py(60))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: hoverX, y: py(60))))
+    guard model.project.clips.count == beforeSnap.clips.count + 1 else {
+        throw TimelineOpsFail(description: "split-mode click didn't split")
+    }
+    guard model.project.clips[0].sourceEnd == 10 else {
+        throw TimelineOpsFail(description: "split-mode click didn't snap onto the playhead: landed at \(model.project.clips[0].sourceEnd)")
+    }
+    guard model.undoStepCount == undoBeforeSnap + 1 else {
+        throw TimelineOpsFail(description: "split-mode click should push exactly one undo step")
+    }
+
+    // `Esc` exits sticky split mode: the next click goes back to plain hit-testing (selects, no split).
+    view.cancelOperation(nil)
+    let beforeEsc = model.project
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: py(40))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: py(40))))
+    guard model.project == beforeEsc else { throw TimelineOpsFail(description: "Esc didn't exit split mode — click still split") }
+
+    // Unsnapped: far from every candidate (playhead 10, clip edges 0/10/20), the split lands at
+    // the raw (unsnapped) hover time, not clamped to a candidate.
+    let farX = px(15.5)
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: farX, y: py(60))))
+    view.keyDown(with: synthKey("s", keyCode: 1)) // re-enter sticky mode (Esc above exited it)
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: farX, y: py(60))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: farX, y: py(60))))
+    guard let farClip = model.project.clips.first(where: { abs($0.sourceEnd - 15.5) < 0.05 }) else {
+        throw TimelineOpsFail(description: "unsnapped split didn't land near 15.5: \(model.project.clips.map(\.sourceEnd))")
+    }
+    _ = farClip
+    view.cancelOperation(nil) // leave split mode clean for whichever test runs next
+
+    // Momentary `⌥` split mode: held → a click splits; released → it doesn't.
+    model.undo(); model.undo(); model.undo() // back to the single, unsplit clip
+    guard model.project.clips.count == 1 else { throw TimelineOpsFail(description: "setup: expected a single clip before the ⌥ test") }
+    view.flagsChanged(with: synthFlags(.option))
+    let optionX = px(10)
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: optionX, y: py(60)), modifiers: .option))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: optionX, y: py(60)), modifiers: .option))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: optionX, y: py(60)), modifiers: .option))
+    guard model.project.clips.count == 2 else { throw TimelineOpsFail(description: "⌥-held click should split") }
+    view.flagsChanged(with: synthFlags([]))
+    let beforeReleased = model.project
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: py(40))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: py(40))))
+    guard model.project == beforeReleased else { throw TimelineOpsFail(description: "click after releasing ⌥ should not split") }
+}
+
+/// T-408 "Trim, remove, restore, speed, ripple animation": a trailing-edge trim drag (commits as
+/// one undo step), `Esc` mid-drag restoring the pre-drag project (AC-TL-6), `restoreCut` (the ✂
+/// bubble popover's action), `⌫` removing a clip, the Speed context-menu item, and a post-edit
+/// render (ripple's new code path) not crashing.
+@MainActor
+private func runTrimRemoveRestoreSpeedSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
+    // Trailing-edge trim: drag clip 0's right edge from output 20 to output 15.
+    let beforeTrim = model.project
+    let undoBeforeTrim = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(20) - 3, y: py(40))))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(15), y: py(40))))
+    guard model.project.clips[0].sourceEnd == 15 else {
+        throw TimelineOpsFail(description: "trim didn't track the mouse: sourceEnd \(model.project.clips[0].sourceEnd)")
+    }
+    guard model.undoStepCount == undoBeforeTrim else { throw TimelineOpsFail(description: "an in-progress trim shouldn't push an undo step yet") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(15), y: py(40))))
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after trim") }
+    guard model.undoStepCount == undoBeforeTrim + 1 else { throw TimelineOpsFail(description: "trim should push exactly one undo step") }
+    model.undo()
+    guard model.project == beforeTrim else { throw TimelineOpsFail(description: "undo after trim didn't restore the pre-trim project") }
+    model.redo() // back to sourceEnd 15 (a tail cut) for the restore test below
+
+    // Restore (the ✂ bubble popover's action): the tail cut (15...20) comes back.
+    let beforeRestore = model.project
+    let undoBeforeRestore = model.undoStepCount
+    view.restoreCut(afterClip: 0)
+    guard model.project.clips[0].sourceEnd == 20 else { throw TimelineOpsFail(description: "restoreCut didn't restore the tail") }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after restore") }
+    guard model.undoStepCount == undoBeforeRestore + 1 else { throw TimelineOpsFail(description: "restore should push exactly one undo step") }
+    model.undo()
+    guard model.project == beforeRestore else { throw TimelineOpsFail(description: "undo after restore didn't revert it") }
+    model.redo() // back to the whole, uncut [0, 20] clip
+
+    // AC-TL-6: `Esc` mid-drag (leading-edge trim this time) restores the pre-drag project exactly,
+    // and pushes no undo step at all (it was never completed).
+    let beforeEscDrag = model.project
+    let undoBeforeEscDrag = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(0) + 3, y: py(40))))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5), y: py(40))))
+    guard model.project.clips[0].sourceStart == 5 else { throw TimelineOpsFail(description: "mid-drag trim didn't apply live") }
+    view.cancelOperation(nil)
+    guard model.project == beforeEscDrag else { throw TimelineOpsFail(description: "Esc mid-drag didn't restore the pre-drag project") }
+    guard model.undoStepCount == undoBeforeEscDrag else { throw TimelineOpsFail(description: "a cancelled drag pushed an undo step") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5), y: py(40)))) // the real mouse-up AppKit would still deliver; must be a no-op
+
+    // Remove: split into two clips first (direct setup, not part of what's under test here), then
+    // select + `⌫` removes one — the last remaining clip can never be removed (SPEC §7.4).
+    model.edit("setup") { $0.clips = [Clip(sourceStart: 0, sourceEnd: 10, speed: 1), Clip(sourceStart: 10, sourceEnd: 20, speed: 1)] }
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: py(40))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: py(40))))
+    let undoBeforeRemove = model.undoStepCount
+    view.keyDown(with: synthKey("", keyCode: 51)) // ⌫
+    guard model.project.clips.count == 1 else { throw TimelineOpsFail(description: "⌫ didn't remove the selected clip") }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after remove") }
+    guard model.undoStepCount == undoBeforeRemove + 1 else { throw TimelineOpsFail(description: "remove should push exactly one undo step") }
+
+    // Speed: the real context menu (right-click on the clip), invoking the "2×" item's actual
+    // target/action — not a shortcut around it.
+    guard let menu = view.menu(for: synthMouse(.rightMouseDown, CGPoint(x: px(5), y: py(40)))),
+          let speedItem = menu.items.first(where: { $0.title == "Speed" })?.submenu,
+          let twoX = speedItem.items.first(where: { $0.title.hasPrefix("2") }) else {
+        throw TimelineOpsFail(description: "no clip context menu / Speed submenu / 2× item")
+    }
+    let undoBeforeSpeed = model.undoStepCount
+    guard let speedAction = twoX.action else { throw TimelineOpsFail(description: "2× item has no action") }
+    _ = twoX.target?.perform(speedAction, with: twoX)
+    guard model.project.clips[0].speed == 2 else { throw TimelineOpsFail(description: "Speed ▸ 2× menu item didn't set speed") }
+    guard model.undoStepCount == undoBeforeSpeed + 1 else { throw TimelineOpsFail(description: "speed change should push exactly one undo step") }
+
+    // Ripple's new code path (interpolating from the pre-change geometry) must not crash a render.
+    view.needsDisplay = true
+    guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
+        throw TimelineOpsFail(description: "no bitmap rep after a clip-changing edit")
+    }
+}
+
+/// T-409 "Snapping + zoom-block gestures": add (empty-lane click = manual, `Z` at the playhead near
+/// a click event = auto), body drag = move (snapping onto a candidate, clamped at a neighbour),
+/// edge drag = resize, `Esc` mid-drag (AC-TL-6), double-click (select + playhead to start), `⌘D`
+/// duplicate, and the Disable/Remove context-menu items.
+@MainActor
+private func runZoomBlockSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
+    // The fixture has no camera, so the zoom lane is the second row: ruler(22) + clip(44) = 66...98.
+    let zoomLaneY = py(82)
+
+    // Empty-lane click adds a zoom; no click event within ±1 s of source 10 ⇒ manual.
+    let undoBeforeAdd = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(10), y: zoomLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(10), y: zoomLaneY)))
+    guard model.project.zooms.count == 1, model.project.zooms[0].mode == .manual else {
+        throw TimelineOpsFail(description: "empty-lane click didn't add a manual zoom: \(model.project.zooms)")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after addZoom") }
+    guard model.undoStepCount == undoBeforeAdd + 1 else { throw TimelineOpsFail(description: "addZoom should push exactly one undo step") }
+    guard let zoomAID = UUID(uuidString: model.project.zooms[0].id), model.selection == [zoomAID] else {
+        throw TimelineOpsFail(description: "the new zoom isn't selected")
+    }
+    let zoomA = model.project.zooms[0] // [10, 13)
+
+    // `Z` at the playhead (5.2, within ±1 s of the fixture's click event at t=5) ⇒ auto.
+    model.playhead = 5.2
+    view.keyDown(with: synthKey("z", keyCode: 6))
+    guard let zoomB = model.project.zooms.first(where: { $0.id != zoomA.id }) else {
+        throw TimelineOpsFail(description: "`Z` didn't add a second zoom")
+    }
+    guard zoomB.mode == .auto else { throw TimelineOpsFail(description: "zoom near a click event should be auto, got \(zoomB.mode)") }
+    guard zoomB.start == 5.2 else { throw TimelineOpsFail(description: "`Z` didn't add at the playhead: start \(zoomB.start)") }
+
+    // Body drag = moveZoom: grab mid-block, drag so its start lands exactly at source 1.
+    let grabX = px((zoomB.start + zoomB.end) / 2)
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: grabX, y: zoomLaneY)))
+    let undoBeforeMove = model.undoStepCount
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(1 + (zoomB.end - zoomB.start) / 2), y: zoomLaneY)))
+    guard let movedLive = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(movedLive.start - 1) < 0.01 else {
+        throw TimelineOpsFail(description: "move didn't track the mouse: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
+    }
+    guard model.undoStepCount == undoBeforeMove else { throw TimelineOpsFail(description: "an in-progress move shouldn't push an undo step yet") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(1 + (zoomB.end - zoomB.start) / 2), y: zoomLaneY)))
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after move") }
+    guard model.undoStepCount == undoBeforeMove + 1 else { throw TimelineOpsFail(description: "move should push exactly one undo step") }
+
+    // Dragging into zoom A's territory clamps at its edge instead of overlapping (SPEC §7.2).
+    let movedZoom = model.project.zooms.first { $0.id == zoomB.id }!
+    let farRightX = px(zoomA.end + 5) // well past zoom A — would overlap if unclamped
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px((movedZoom.start + movedZoom.end) / 2), y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: farRightX, y: zoomLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: farRightX, y: zoomLaneY)))
+    guard let clamped = model.project.zooms.first(where: { $0.id == zoomB.id }) else { throw TimelineOpsFail(description: "zoom B vanished") }
+    guard clamped.end <= zoomA.start + 1e-6 else { throw TimelineOpsFail(description: "move overlapped zoom A: \(clamped) vs \(zoomA)") }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after clamped move") }
+
+    // Esc mid-drag (AC-TL-6): restores the pre-drag project, pushes no undo step.
+    let beforeEscDrag = model.project
+    let undoBeforeEscDrag = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px((clamped.start + clamped.end) / 2), y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(2), y: zoomLaneY)))
+    guard model.project != beforeEscDrag else { throw TimelineOpsFail(description: "mid-drag move didn't apply live") }
+    view.cancelOperation(nil)
+    guard model.project == beforeEscDrag else { throw TimelineOpsFail(description: "Esc mid-drag didn't restore the pre-drag project") }
+    guard model.undoStepCount == undoBeforeEscDrag else { throw TimelineOpsFail(description: "a cancelled move pushed an undo step") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: zoomLaneY))) // the real mouse-up AppKit still delivers
+
+    // Snapping: the *raw mouse position* (not the resulting start) is what's compared to the
+    // candidates, so grab a known 0.2 s inside the block's leading edge (safely past the 0.15 s
+    // edge-hit-test zone) and drag until the mouse itself is 0.05 s from the playhead candidate
+    // (5.2) — well within the 0.15 s threshold — so it should snap exactly onto it.
+    model.playhead = 5.2
+    let beforeSnapMove = model.project.zooms.first { $0.id == zoomB.id }!
+    let grabOffset = 0.2
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(beforeSnapMove.start + grabOffset), y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY)))
+    guard let snapped = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(snapped.start - (5.2 - grabOffset)) < 0.01 else {
+        throw TimelineOpsFail(description: "move didn't snap onto the playhead: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
+    }
+    // ⌘ held disables snapping — the same near-candidate drag should now land at the raw position.
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY), modifiers: .command))
+    guard let unsnapped = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(unsnapped.start - (5.25 - grabOffset)) < 0.01 else {
+        throw TimelineOpsFail(description: "⌘ should have disabled snapping: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
+    }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY), modifiers: .command))
+
+    // Edge drag = resizeZoom.
+    let beforeResize = model.project.zooms.first { $0.id == zoomB.id }!
+    let undoBeforeResize = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(beforeResize.end) - 3, y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(beforeResize.start + 4), y: zoomLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(beforeResize.start + 4), y: zoomLaneY)))
+    guard let resized = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(resized.end - (beforeResize.start + 4)) < 0.01 else {
+        throw TimelineOpsFail(description: "trailing-edge drag didn't resize: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after resize") }
+    guard model.undoStepCount == undoBeforeResize + 1 else { throw TimelineOpsFail(description: "resize should push exactly one undo step") }
+
+    // Double-click zoom A: selects it and moves the playhead to its start.
+    model.playhead = 0
+    view.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: CGPoint(x: px(zoomA.start + 1), y: zoomLaneY),
+                                             modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 2, pressure: 1)!)
+    guard model.playhead == zoomA.start, model.selection == [UUID(uuidString: zoomA.id)!] else {
+        throw TimelineOpsFail(description: "double-click didn't select + move the playhead: playhead \(model.playhead), selection \(model.selection)")
+    }
+
+    // `⌘D` duplicates the selected zoom (A) right after itself, copying its fields.
+    let undoBeforeDup = model.undoStepCount
+    view.keyDown(with: synthKey("d", keyCode: 2, modifiers: .command))
+    guard let dup = model.project.zooms.first(where: { $0.id != zoomA.id && $0.id != zoomB.id }) else {
+        throw TimelineOpsFail(description: "⌘D didn't add a duplicate")
+    }
+    guard abs(dup.start - zoomA.end) < 0.01, abs((dup.end - dup.start) - (zoomA.end - zoomA.start)) < 0.01, dup.scale == zoomA.scale else {
+        throw TimelineOpsFail(description: "duplicate isn't placed right after / doesn't match the original: \(dup) vs \(zoomA)")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after duplicate") }
+    guard model.undoStepCount == undoBeforeDup + 1 else { throw TimelineOpsFail(description: "duplicate should push exactly one undo step") }
+
+    // Context menu: Disable, then Remove — both real target/action, both one undo step.
+    guard let menu = view.menu(for: synthMouse(.rightMouseDown, CGPoint(x: px(zoomA.start + 1), y: zoomLaneY))),
+          let disable = menu.items.first(where: { $0.title == "Disable" }), let disableAction = disable.action else {
+        throw TimelineOpsFail(description: "no zoom context menu / Disable item")
+    }
+    let undoBeforeDisable = model.undoStepCount
+    _ = disable.target?.perform(disableAction, with: disable)
+    guard model.project.zooms.first(where: { $0.id == zoomA.id })?.enabled == false else {
+        throw TimelineOpsFail(description: "Disable menu item didn't disable the zoom")
+    }
+    guard model.undoStepCount == undoBeforeDisable + 1 else { throw TimelineOpsFail(description: "Disable should push exactly one undo step") }
+
+    guard let menu2 = view.menu(for: synthMouse(.rightMouseDown, CGPoint(x: px(zoomA.start + 1), y: zoomLaneY))),
+          let remove = menu2.items.first(where: { $0.title == "Remove" }), let removeAction = remove.action else {
+        throw TimelineOpsFail(description: "no zoom context menu / Remove item")
+    }
+    let zoomsBeforeRemove = model.project.zooms.count
+    _ = remove.target?.perform(removeAction, with: remove)
+    guard model.project.zooms.count == zoomsBeforeRemove - 1, !model.project.zooms.contains(where: { $0.id == zoomA.id }) else {
+        throw TimelineOpsFail(description: "Remove menu item didn't remove zoom A")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after Remove") }
+
+    // Ghost/click-tick drawing paths must not crash a render.
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: px(17), y: zoomLaneY)))
+    view.needsDisplay = true
+    guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
+        throw TimelineOpsFail(description: "no bitmap rep with the zoom-lane ghost hovered")
+    }
 }
