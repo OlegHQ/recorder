@@ -104,3 +104,12 @@ struct LayoutTests {
         #expect(a.kind == b.kind && abs(a.amount - b.amount) < 1e-12)
     }
 }
+
+@Test func zoomedScreenRectPutsViewportOnBase() {
+    let base = CGRect(x: 100, y: 50, width: 800, height: 400)
+    #expect(zoomedScreenRect(base: base, view: .identity) == base)
+    // 2× clamped to the top-left: that corner keeps its padding, the frame overflows right/down.
+    #expect(zoomedScreenRect(base: base, view: ViewTransform(cx: 0.25, cy: 0.25, scale: 2)) == CGRect(x: 100, y: 50, width: 1600, height: 800))
+    // 2× centred: grows symmetrically about the base's centre.
+    #expect(zoomedScreenRect(base: base, view: ViewTransform(cx: 0.5, cy: 0.5, scale: 2)) == CGRect(x: -300, y: -150, width: 1600, height: 800))
+}

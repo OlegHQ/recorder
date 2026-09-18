@@ -8,7 +8,6 @@ final class SelectionRectView: NSView {
             let clamped = SelectionRectView.clamp(rect, to: limit, minSize: minSize)
             if clamped != rect { rect = clamped; return }
             needsDisplay = true
-            window?.invalidateCursorRects(for: self)
             onChange?(rect)
         }
     }
@@ -144,6 +143,10 @@ final class SelectionRectView: NSView {
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
+        // macOS clicks through fully transparent window pixels (the empty overlay, the rect's clear
+        // interior), so create/move drags never arrived. A near-invisible fill keeps it all hit-testable.
+        NSColor.black.withAlphaComponent(0.01).setFill()
+        bounds.fill()
         guard !rect.isEmpty else { return }
 
         let dim = NSBezierPath(rect: bounds)
@@ -169,6 +172,10 @@ final class SelectionRectView: NSView {
     }
 
     // MARK: - Mouse
+
+    // Overlays are non-activating panels over an inactive app: without this the first click (and the
+    // whole drag) is swallowed as a window-activation click, so area selection never started.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
@@ -224,14 +231,26 @@ final class SelectionRectView: NSView {
 
     // MARK: - Cursor
 
-    override func resetCursorRects() {
-        guard !rect.isEmpty else {
-            if allowsResize { addCursorRect(bounds, cursor: .crosshair) }
-            return
+    // Cursor rects only fire in the key window of the active app, but this view lives in non-activating
+    // overlays that lose key to the toolbar the moment "Area" is clicked — so the crosshair reverted to
+    // the arrow as soon as it left the toolbar. An `.activeAlways` tracking area works regardless.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.activeAlways, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited],
+                                       owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) { cursor(at: convert(event.locationInWindow, from: nil))?.set() }
+    override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
+    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
+
+    private func cursor(at p: CGPoint) -> NSCursor? {
+        guard !rect.isEmpty else { return allowsResize ? .crosshair : nil }
+        if allowsResize, let h = hitHandle(p) {
+            return cursor(for: h)
         }
-        addCursorRect(rect, cursor: .openHand)
-        guard allowsResize else { return }
-        for h in Handle.allCases { addCursorRect(handleRect(h).insetBy(dx: -4, dy: -4), cursor: cursor(for: h)) }
+        return rect.contains(p) ? .openHand : .arrow
     }
 
     private func cursor(for h: Handle) -> NSCursor {

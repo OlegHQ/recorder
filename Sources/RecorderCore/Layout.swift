@@ -18,6 +18,15 @@ public func screenRect(output: CGSize, cropAspect: Double, padding: Double) -> C
     return CGRect(x: x, y: y, width: w, height: h)
 }
 
+/// Zoom moves the whole framed screen, not just the pixels inside a fixed frame: `base` (the un-zoomed
+/// `screenRect`) grown by `view.scale` and placed so the viewport `view` looks at lands exactly on
+/// `base`. Mid-content the frame overflows the canvas (content fills it, background gone); with the
+/// viewport clamped to a content edge (`CameraPath`) that edge sits on `base`'s, so padding returns.
+public func zoomedScreenRect(base: CGRect, view: ViewTransform) -> CGRect {
+    let w = base.width * view.scale, h = base.height * view.scale
+    return CGRect(x: base.midX - view.cx * w, y: base.midY - view.cy * h, width: w, height: h)
+}
+
 /// The output canvas size for `project.output.aspect` (SPEC §5, §6.1 `Auto ▾` popup):
 /// `.auto` keeps the (cropped) source's own aspect; any fixed ratio ignores the source and uses
 /// that ratio instead — `screenRect` then letterboxes the source inside it. `longEdge` sets the

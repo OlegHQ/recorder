@@ -137,10 +137,14 @@ final class Compositor {
             let rectPx = screenRect(output: s.outputSize, cropAspect: cropAspect(s.project), padding: s.project.frame.padding)
             let contentUV = cropUV(s.project.crop, view: s.view)
             let prevContentUV = motionBlurContentUV(project: s.project, view: s.view, prevView: s.prevView, contentUV: contentUV, rectPx: rectPx)
-            drawScreen(screen, project: s.project, rectPx: rectPx, contentUV: contentUV, prevContentUV: prevContentUV,
+            // Zoom scales the whole frame (corners, shadow, clip), not just the UVs inside a fixed one;
+            // cursor/masks map through `frameRect` + the un-zoomed crop — the same linear mapping.
+            let frameRect = zoomedScreenRect(base: rectPx, view: s.view)
+            let frameUV = cropUV(s.project.crop, view: .identity)
+            drawScreen(screen, project: s.project, rectPx: rectPx, frameRect: frameRect, contentUV: contentUV, prevContentUV: prevContentUV,
                        alpha: screenAlpha, outputSize: s.outputSize, encoder: encoder)
             if let cursor = s.cursor, cursor.alpha > 0 {
-                drawCursor(cursor, project: s.project, rectPx: rectPx, contentUV: contentUV,
+                drawCursor(cursor, project: s.project, rectPx: frameRect, contentUV: frameUV,
                            alphaMultiplier: screenAlpha, outputSize: s.outputSize, encoder: encoder)
             }
 
@@ -149,7 +153,7 @@ final class Compositor {
             // content instead of staying fixed to the canvas.
             let activeMasks = s.project.masks.filter { s.sourceTime >= $0.start && s.sourceTime <= $0.end }
             if !activeMasks.isEmpty {
-                drawMasks(activeMasks, rectPx: rectPx, contentUV: contentUV, alphaMultiplier: screenAlpha,
+                drawMasks(activeMasks, rectPx: frameRect, contentUV: frameUV, alphaMultiplier: screenAlpha,
                           outputSize: s.outputSize, encoder: encoder)
             }
         }
@@ -262,17 +266,19 @@ final class Compositor {
     /// shadow — computed by the fragment shader's SDF, offset to the content rect — can bleed
     /// outward into the padding (SPEC §6.2 pass 2: "quad is enlarged by blurPx"; a full-canvas
     /// quad is the simplest way to give it room on every side without a second uniform set).
-    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, prevContentUV: SIMD4<Float>, alpha: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, frameRect: CGRect, contentUV: SIMD4<Float>, prevContentUV: SIMD4<Float>, alpha: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         var u = Uniforms()
         u.rectNDC = SIMD4(-1, 1, 1, -1)
         u.uvRect = extrapolatedUV(contentUV, contentRect: rectPx, to: outputSize)
         u.prevUvRect = extrapolatedUV(prevContentUV, contentRect: rectPx, to: outputSize)
         u.pixelSize = SIMD2(Float(outputSize.width), Float(outputSize.height))
-        u.contentSize = SIMD2(Float(rectPx.width), Float(rectPx.height))
-        u.contentOffset = SIMD2(Float(rectPx.midX - outputSize.width / 2), Float(rectPx.midY - outputSize.height / 2))
-        u.radius = Float(project.frame.cornerRadius * min(rectPx.width, rectPx.height))
+        u.contentSize = SIMD2(Float(frameRect.width), Float(frameRect.height))
+        u.contentOffset = SIMD2(Float(frameRect.midX - outputSize.width / 2), Float(frameRect.midY - outputSize.height / 2))
+        u.radius = Float(project.frame.cornerRadius * min(frameRect.width, frameRect.height))
         u.shadowAlpha = Float(project.frame.shadow)
-        u.shadowBlur = Float(0.04 * min(outputSize.width, outputSize.height))
+        // 20 pt (the native window shadow's sigma) in output px, so the shadow scales with the window.
+        let sourcePointsWide = project.crop.w * Double(max(project.source.pixelWidth, 1)) / max(project.source.scale, 0.0001)
+        u.shadowBlur = Float(20 * frameRect.width / sourcePointsWide)
         u.globalAlpha = Float(alpha)
         u.mode = texture.chroma != nil ? 4 : 3   // biplanar YCbCr (real capture) vs already-RGB (fixtures)
         encoder.setFragmentTexture(texture.luma, index: 0)
@@ -332,11 +338,10 @@ final class Compositor {
         let drawH = imagePointH * project.cursor.size * pointToOutputPxY * cursor.clickScale
         guard drawW > 0, drawH > 0 else { return }
 
-        // `hotX`/`hotY` are `NSCursor.hotSpot` scaled to pixels — AppKit's coordinate system is
-        // bottom-left/y-up, but the PNG (and our `localPos`/`uv` convention above) is top-left/
-        // y-down, so only Y needs flipping.
+        // `hotX`/`hotY` are `NSCursor.hotSpot` scaled to pixels. `hotSpot` is already top-left/y-down
+        // (pointingHand reports (13, 8) in 32×32 — fingertip at the top), same as the PNG, so no flip.
         let hotFracX = image.hotX / Double(image.texture.width)
-        let hotFracY = 1 - image.hotY / Double(image.texture.height)
+        let hotFracY = image.hotY / Double(image.texture.height)
         let centerX = px + (0.5 - hotFracX) * drawW
         let centerY = py + (0.5 - hotFracY) * drawH
         let prevCenterX = prevPx + (0.5 - hotFracX) * drawW

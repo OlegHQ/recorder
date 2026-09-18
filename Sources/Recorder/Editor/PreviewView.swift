@@ -206,10 +206,10 @@ final class PreviewView: MTKView {
 
     private func setRate(_ rate: Float) {
         guard rate != 0, let player else { pause(); return }
-        // A lingering hover seek must not hijack where playback resumes from (AC-TL-7 is a paused-
-        // only feature; leaving the player wherever the last hover looked would desync it from
-        // `model.playhead`).
-        if hoverTime != nil { performSeek(to: model.playhead) }
+        // Timeline scrubs/clicks only move `model.playhead`, and a lingering hover seek leaves the
+        // player elsewhere too — so play always resumes from the playhead (restart if parked at the end).
+        if model.playhead >= model.timeMap.outputDuration - 1.0 / 60 { model.playhead = 0 }
+        if hoverTime != nil || abs(player.currentTime().seconds - model.playhead) > 1.0 / 120 { performSeek(to: model.playhead) }
         lastClickCheckSourceTime = model.timeMap.sourceTime(atOutput: model.playhead)
         model.isPlaying = true
         player.rate = rate
@@ -238,7 +238,7 @@ final class PreviewView: MTKView {
     }
 
     @objc private func tick(_ link: CADisplayLink) {
-        guard let player, let item = player.currentItem else { return }
+        guard !isSeeking, let player, let item = player.currentItem else { return }  // mid-seek time is stale
         let t = player.currentTime().seconds
         playClickSoundIfCrossed(outputTime: t)
         model.playhead = t

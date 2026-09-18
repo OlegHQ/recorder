@@ -495,7 +495,7 @@ FrameState(t_out) = {
 
 Passes (single render encoder, 4 draw calls, all in `Shaders.swift`):
 1. **Background** — textured/gradient/colour quad, optional blur (pre-blurred once on change with `MPSImageGaussianBlur`, cached).
-2. **Screen** — quad with SDF rounded-rect mask, inset, soft shadow (analytic SDF shadow, no blur pass), crop + zoom applied as UV transform; motion blur = N taps (N = 8) along the UV delta between `prevView` and `view`, only when delta > 0.5 px.
+2. **Screen** — quad with SDF rounded-rect mask, inset, soft shadow (analytic SDF, no blur pass, modelled on a measured native NSWindow shadow: Gaussian σ 20 pt, peak α 0.39, 17 pt drop, 1 pt black 0.155 hairline — all in source points so it scales with the window; `frame.shadow` 0.5 = native), crop + zoom applied as UV transform, and the frame itself (mask, corners, shadow) scales with the zoom (`zoomedScreenRect`: the viewed viewport lands on the un-zoomed frame rect, so mid-content the window fills the canvas and at a content edge the padding returns); motion blur = N taps (N = 8) along the UV delta between `prevView` and `view`, only when delta > 0.5 px.
 3. **Cursor** — own quad **inside** the screen's coordinate space (so it zooms with the content), size × `cursor.size`, blur taps along `pos − prevPos`.
 4. **Camera / masks / key overlay** — rounded-rect SDF quads.
 

@@ -13,7 +13,7 @@ import Foundation
 //       unaffected)
 //   3 = rounded-rect texture with soft shadow (the "screen"/"camera" quad, RGB source) — analytic
 //       SDF, no blur pass: `d = length(max(abs(p) - halfSize + r, 0)) - r`; fill alpha =
-//       `1 - smoothstep(-1, 1, d)`; shadow alpha = `shadowAlpha * (1 - smoothstep(0, shadowBlur, d))`.
+//       `1 - smoothstep(-1, 1, d)`; shadow = the measured native NSWindow one (see `roundedRectShadow`).
 //       Motion blur (T-501, SPEC §6.2 pass 2): averages N=8 texture taps along `uv → prevUv`
 //       (`prevUvRect`, interpolated the same way `uvRect` is — an affine remap of the crop/zoom UV,
 //       so the per-fragment delta already varies correctly with a zoom's radial expansion); when
@@ -79,7 +79,16 @@ float4 roundedRectShadow(float2 localPos, constant Uniforms &u, float4 texColor)
     float2 q = abs(p) - halfSize + u.radius;
     float d = length(max(q, 0.0)) - u.radius;
     float fillAlpha = 1.0 - smoothstep(-1.0, 1.0, d);
-    float shadowAlpha = u.shadowAlpha * (1.0 - smoothstep(0.0, max(u.shadowBlur, 0.001), d));
+    // Native NSWindow shadow, fitted to a WindowServer capture of a key window (alpha profile of its
+    // left/top/bottom edges): one Gaussian, sigma 20 pt, peak 0.39, dropped 17 pt, plus a 1 pt black
+    // 0.155 hairline hugging the frame. `shadowBlur` = that sigma in output px; `shadowAlpha` 0.5 = native.
+    // Blurred straight edge = normal CDF of the SDF (logistic approximation, error < 0.01).
+    float sigma = max(u.shadowBlur, 0.001);
+    float2 qs = abs(p - float2(0.0, 0.85 * sigma)) - halfSize + u.radius;
+    float ds = length(max(qs, 0.0)) + min(max(qs.x, qs.y), 0.0) - u.radius;
+    float soft = 0.78 * u.shadowAlpha / (1.0 + exp(1.702 * ds / sigma));
+    float rim = 0.31 * u.shadowAlpha * (1.0 - smoothstep(-0.5, 0.5, d - sigma / 20.0));
+    float shadowAlpha = 1.0 - (1.0 - soft) * (1.0 - rim);
     float4 shadowColor = float4(0.0, 0.0, 0.0, shadowAlpha);
     float4 result = mix(shadowColor, float4(texColor.rgb, 1.0), fillAlpha);
     result.a = max(fillAlpha, shadowAlpha);
