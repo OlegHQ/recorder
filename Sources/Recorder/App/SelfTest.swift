@@ -690,6 +690,11 @@ private func runTimelineOpsSelfTest() async throws {
         defer { cleanup() }
         try runTrimRemoveRestoreSpeedSelfTest(model: model, view: view, px: px, py: py)
     }
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        try runZoomBlockSelfTest(model: model, view: view, px: px, py: py)
+    }
     try runFitOnFirstLayoutSelfTest()
 }
 
@@ -908,5 +913,153 @@ private func runTrimRemoveRestoreSpeedSelfTest(model: EditorModel, view: Timelin
     view.needsDisplay = true
     guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
         throw TimelineOpsFail(description: "no bitmap rep after a clip-changing edit")
+    }
+}
+
+/// T-409 "Snapping + zoom-block gestures": add (empty-lane click = manual, `Z` at the playhead near
+/// a click event = auto), body drag = move (snapping onto a candidate, clamped at a neighbour),
+/// edge drag = resize, `Esc` mid-drag (AC-TL-6), double-click (select + playhead to start), `⌘D`
+/// duplicate, and the Disable/Remove context-menu items.
+@MainActor
+private func runZoomBlockSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
+    // The fixture has no camera, so the zoom lane is the second row: ruler(22) + clip(44) = 66...98.
+    let zoomLaneY = py(82)
+
+    // Empty-lane click adds a zoom; no click event within ±1 s of source 10 ⇒ manual.
+    let undoBeforeAdd = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(10), y: zoomLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(10), y: zoomLaneY)))
+    guard model.project.zooms.count == 1, model.project.zooms[0].mode == .manual else {
+        throw TimelineOpsFail(description: "empty-lane click didn't add a manual zoom: \(model.project.zooms)")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after addZoom") }
+    guard model.undoStepCount == undoBeforeAdd + 1 else { throw TimelineOpsFail(description: "addZoom should push exactly one undo step") }
+    guard let zoomAID = UUID(uuidString: model.project.zooms[0].id), model.selection == [zoomAID] else {
+        throw TimelineOpsFail(description: "the new zoom isn't selected")
+    }
+    let zoomA = model.project.zooms[0] // [10, 13)
+
+    // `Z` at the playhead (5.2, within ±1 s of the fixture's click event at t=5) ⇒ auto.
+    model.playhead = 5.2
+    view.keyDown(with: synthKey("z", keyCode: 6))
+    guard let zoomB = model.project.zooms.first(where: { $0.id != zoomA.id }) else {
+        throw TimelineOpsFail(description: "`Z` didn't add a second zoom")
+    }
+    guard zoomB.mode == .auto else { throw TimelineOpsFail(description: "zoom near a click event should be auto, got \(zoomB.mode)") }
+    guard zoomB.start == 5.2 else { throw TimelineOpsFail(description: "`Z` didn't add at the playhead: start \(zoomB.start)") }
+
+    // Body drag = moveZoom: grab mid-block, drag so its start lands exactly at source 1.
+    let grabX = px((zoomB.start + zoomB.end) / 2)
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: grabX, y: zoomLaneY)))
+    let undoBeforeMove = model.undoStepCount
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(1 + (zoomB.end - zoomB.start) / 2), y: zoomLaneY)))
+    guard let movedLive = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(movedLive.start - 1) < 0.01 else {
+        throw TimelineOpsFail(description: "move didn't track the mouse: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
+    }
+    guard model.undoStepCount == undoBeforeMove else { throw TimelineOpsFail(description: "an in-progress move shouldn't push an undo step yet") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(1 + (zoomB.end - zoomB.start) / 2), y: zoomLaneY)))
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after move") }
+    guard model.undoStepCount == undoBeforeMove + 1 else { throw TimelineOpsFail(description: "move should push exactly one undo step") }
+
+    // Dragging into zoom A's territory clamps at its edge instead of overlapping (SPEC §7.2).
+    let movedZoom = model.project.zooms.first { $0.id == zoomB.id }!
+    let farRightX = px(zoomA.end + 5) // well past zoom A — would overlap if unclamped
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px((movedZoom.start + movedZoom.end) / 2), y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: farRightX, y: zoomLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: farRightX, y: zoomLaneY)))
+    guard let clamped = model.project.zooms.first(where: { $0.id == zoomB.id }) else { throw TimelineOpsFail(description: "zoom B vanished") }
+    guard clamped.end <= zoomA.start + 1e-6 else { throw TimelineOpsFail(description: "move overlapped zoom A: \(clamped) vs \(zoomA)") }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after clamped move") }
+
+    // Esc mid-drag (AC-TL-6): restores the pre-drag project, pushes no undo step.
+    let beforeEscDrag = model.project
+    let undoBeforeEscDrag = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px((clamped.start + clamped.end) / 2), y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(2), y: zoomLaneY)))
+    guard model.project != beforeEscDrag else { throw TimelineOpsFail(description: "mid-drag move didn't apply live") }
+    view.cancelOperation(nil)
+    guard model.project == beforeEscDrag else { throw TimelineOpsFail(description: "Esc mid-drag didn't restore the pre-drag project") }
+    guard model.undoStepCount == undoBeforeEscDrag else { throw TimelineOpsFail(description: "a cancelled move pushed an undo step") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: zoomLaneY))) // the real mouse-up AppKit still delivers
+
+    // Snapping: the *raw mouse position* (not the resulting start) is what's compared to the
+    // candidates, so grab a known 0.2 s inside the block's leading edge (safely past the 0.15 s
+    // edge-hit-test zone) and drag until the mouse itself is 0.05 s from the playhead candidate
+    // (5.2) — well within the 0.15 s threshold — so it should snap exactly onto it.
+    model.playhead = 5.2
+    let beforeSnapMove = model.project.zooms.first { $0.id == zoomB.id }!
+    let grabOffset = 0.2
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(beforeSnapMove.start + grabOffset), y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY)))
+    guard let snapped = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(snapped.start - (5.2 - grabOffset)) < 0.01 else {
+        throw TimelineOpsFail(description: "move didn't snap onto the playhead: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
+    }
+    // ⌘ held disables snapping — the same near-candidate drag should now land at the raw position.
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY), modifiers: .command))
+    guard let unsnapped = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(unsnapped.start - (5.25 - grabOffset)) < 0.01 else {
+        throw TimelineOpsFail(description: "⌘ should have disabled snapping: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
+    }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY), modifiers: .command))
+
+    // Edge drag = resizeZoom.
+    let beforeResize = model.project.zooms.first { $0.id == zoomB.id }!
+    let undoBeforeResize = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(beforeResize.end) - 3, y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(beforeResize.start + 4), y: zoomLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(beforeResize.start + 4), y: zoomLaneY)))
+    guard let resized = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(resized.end - (beforeResize.start + 4)) < 0.01 else {
+        throw TimelineOpsFail(description: "trailing-edge drag didn't resize: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after resize") }
+    guard model.undoStepCount == undoBeforeResize + 1 else { throw TimelineOpsFail(description: "resize should push exactly one undo step") }
+
+    // Double-click zoom A: selects it and moves the playhead to its start.
+    model.playhead = 0
+    view.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: CGPoint(x: px(zoomA.start + 1), y: zoomLaneY),
+                                             modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 2, pressure: 1)!)
+    guard model.playhead == zoomA.start, model.selection == [UUID(uuidString: zoomA.id)!] else {
+        throw TimelineOpsFail(description: "double-click didn't select + move the playhead: playhead \(model.playhead), selection \(model.selection)")
+    }
+
+    // `⌘D` duplicates the selected zoom (A) right after itself, copying its fields.
+    let undoBeforeDup = model.undoStepCount
+    view.keyDown(with: synthKey("d", keyCode: 2, modifiers: .command))
+    guard let dup = model.project.zooms.first(where: { $0.id != zoomA.id && $0.id != zoomB.id }) else {
+        throw TimelineOpsFail(description: "⌘D didn't add a duplicate")
+    }
+    guard abs(dup.start - zoomA.end) < 0.01, abs((dup.end - dup.start) - (zoomA.end - zoomA.start)) < 0.01, dup.scale == zoomA.scale else {
+        throw TimelineOpsFail(description: "duplicate isn't placed right after / doesn't match the original: \(dup) vs \(zoomA)")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after duplicate") }
+    guard model.undoStepCount == undoBeforeDup + 1 else { throw TimelineOpsFail(description: "duplicate should push exactly one undo step") }
+
+    // Context menu: Disable, then Remove — both real target/action, both one undo step.
+    guard let menu = view.menu(for: synthMouse(.rightMouseDown, CGPoint(x: px(zoomA.start + 1), y: zoomLaneY))),
+          let disable = menu.items.first(where: { $0.title == "Disable" }), let disableAction = disable.action else {
+        throw TimelineOpsFail(description: "no zoom context menu / Disable item")
+    }
+    let undoBeforeDisable = model.undoStepCount
+    _ = disable.target?.perform(disableAction, with: disable)
+    guard model.project.zooms.first(where: { $0.id == zoomA.id })?.enabled == false else {
+        throw TimelineOpsFail(description: "Disable menu item didn't disable the zoom")
+    }
+    guard model.undoStepCount == undoBeforeDisable + 1 else { throw TimelineOpsFail(description: "Disable should push exactly one undo step") }
+
+    guard let menu2 = view.menu(for: synthMouse(.rightMouseDown, CGPoint(x: px(zoomA.start + 1), y: zoomLaneY))),
+          let remove = menu2.items.first(where: { $0.title == "Remove" }), let removeAction = remove.action else {
+        throw TimelineOpsFail(description: "no zoom context menu / Remove item")
+    }
+    let zoomsBeforeRemove = model.project.zooms.count
+    _ = remove.target?.perform(removeAction, with: remove)
+    guard model.project.zooms.count == zoomsBeforeRemove - 1, !model.project.zooms.contains(where: { $0.id == zoomA.id }) else {
+        throw TimelineOpsFail(description: "Remove menu item didn't remove zoom A")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after Remove") }
+
+    // Ghost/click-tick drawing paths must not crash a render.
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: px(17), y: zoomLaneY)))
+    view.needsDisplay = true
+    guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
+        throw TimelineOpsFail(description: "no bitmap rep with the zoom-lane ghost hovered")
     }
 }
