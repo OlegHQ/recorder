@@ -123,6 +123,22 @@ final class PreviewView: MTKView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // MARK: - T-610 state snapshot accessors (read-only; several fields the dump needs are private)
+
+    var debugPlayerStatus: String {
+        switch player?.currentItem?.status {
+        case .readyToPlay: return "readyToPlay"
+        case .failed: return "failed"
+        case .unknown, .none: return "unknown"
+        @unknown default: return "unknown"
+        }
+    }
+    var debugRate: Float { player?.rate ?? 0 }
+    var debugCurrentTime: Double { player?.currentTime().seconds ?? 0 }
+    var debugHasScreenPixelBuffer: Bool { lastScreenPixelBuffer != nil }
+    var debugPendingFrameRetries: Int { pendingFrameRetries }
+    var debugIsSeeking: Bool { isSeeking }
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         needsDisplay = true

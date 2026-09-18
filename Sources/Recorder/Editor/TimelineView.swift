@@ -133,6 +133,19 @@ final class TimelineView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
+    // MARK: - T-610 state snapshot accessors (`isSplitMode`/`dragKind` stay private otherwise)
+
+    var debugSplitMode: Bool { isSplitMode }
+    var debugDragKind: String? {
+        switch dragKind {
+        case .none: return nil
+        case .scrub: return "scrub"
+        case .trimClip: return "trimClip"
+        case .moveBlock: return "moveBlock"
+        case .resizeBlock: return "resizeBlock"
+        }
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true

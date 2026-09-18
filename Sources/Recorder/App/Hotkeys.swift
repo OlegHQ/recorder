@@ -30,6 +30,10 @@ enum Hotkeys {
                alwaysActive: true, action: toggleRecording),
         Hotkey(keyCode: KeyCode.p, modifiers: [.control, .option, .command], character: "p", title: "Pause/Resume",
                alwaysActive: true, action: togglePause),
+        // T-610: like ⌃⌥⌘R/⌃⌥⌘P, allowed WHILE RECORDING — the whole point is grabbing state when
+        // the UI is misbehaving mid-recording.
+        Hotkey(keyCode: KeyCode.s, modifiers: [.control, .option, .command], character: "s", title: "Copy State Snapshot",
+               alwaysActive: true, action: { StateSnapshot.dump() }),
         Hotkey(keyCode: KeyCode.returnKey, modifiers: [.control, .command], character: "\r", title: "New Recording",
                alwaysActive: false, action: { ToolbarController.shared.show() }),
         Hotkey(keyCode: KeyCode.three, modifiers: [.option, .command], character: "3", title: "Record Display",
@@ -149,6 +153,7 @@ enum Hotkeys {
 private enum KeyCode {
     static let r: UInt16 = 15
     static let p: UInt16 = 35
+    static let s: UInt16 = 1
     static let z: UInt16 = 6
     static let returnKey: UInt16 = 36
     static let three: UInt16 = 20

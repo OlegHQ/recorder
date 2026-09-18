@@ -1618,6 +1618,7 @@ enum SelfTest {
             let expected: [(title: String, keyCode: UInt16, mods: NSEvent.ModifierFlags, alwaysActive: Bool)] = [
                 ("Start/Finish Recording", 15, [.control, .option, .command], true),  // ⌃⌥⌘R
                 ("Pause/Resume", 35, [.control, .option, .command], true),            // ⌃⌥⌘P
+                ("Copy State Snapshot", 1, [.control, .option, .command], true),      // ⌃⌥⌘S (T-610)
                 ("New Recording", 36, [.control, .command], false),                   // ⌃⌘↩
                 ("Record Display", 20, [.option, .command], false),                   // ⌥⌘3
                 ("Record Window", 21, [.option, .command], false),                    // ⌥⌘4
@@ -1671,6 +1672,7 @@ enum SelfTest {
                     ("Record Window", "4", [.option, .command]),
                     ("Record Area", "5", [.option, .command]),
                     ("Settings…", ",", [.command]),
+                    ("Copy State Snapshot", "s", [.control, .option, .command]),
                     ("Show Recorder in Dock", "d", [.command]),
                     ("Projects", "o", [.command, .shift]),
                     ("Open…", "o", [.command]),
@@ -1688,6 +1690,7 @@ enum SelfTest {
                     ("Pause", "p", [.control, .option, .command]),
                     ("Restart", "", [.command]),
                     ("Delete", "", [.command]),
+                    ("Copy State Snapshot", "s", [.control, .option, .command]),
                     ("Hide widget", "", [.command]),
                 ], "recording menu")
                 guard recording.items.filter(\.isSeparatorItem).count == 1 else {
@@ -1993,6 +1996,100 @@ enum SelfTest {
             ])
             try JSONEncoder().encode(events).write(to: url.appendingPathComponent("events.json"))
             print("wrote \(url.path)")
+        },
+        // T-610: `StateSnapshot.dump(to:pasteboard:)` over a real offscreen editor (one edit + a
+        // selected zoom) — everything is injected (a tmp "Snapshots" directory, a private named
+        // pasteboard) so this never touches the user's real Logs folder or clipboard.
+        "snapshot": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-snapshot-\(UUID().uuidString)")
+            let packageURL = tmp.appendingPathComponent("Fixture.recorder")
+            try fm.createDirectory(at: packageURL, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            var project = Project(title: "Snapshot Fixture",
+                                   source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 1, duration: 20))
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)]
+            let zoom = Zoom(start: 2, end: 6, scale: 2, mode: .manual)
+            project.zooms = [zoom]
+            try project.save(to: packageURL.appendingPathComponent("project.json"))
+
+            var events = EventLog()
+            events.events.append(InputEvent(t: 1.0, k: .down, x: 0.5, y: 0.5, b: 0))
+            events.events.append(InputEvent(t: 1.2, k: .move, x: 0.4, y: 0.4))
+            try JSONEncoder().encode(events).write(to: packageURL.appendingPathComponent("events.json"), options: .atomic)
+
+            try await MainActor.run {
+                guard let window = EditorWindowController.makeOffscreen(package: packageURL),
+                      let controller = window.windowController as? EditorWindowController else {
+                    throw Fail(description: "couldn't build the offscreen editor")
+                }
+                let model = controller.model
+                model.playhead = 4.5
+                model.edit("Snapshot rename") { $0.title = "Snapshot Fixture Renamed" }
+                let zoomID = UUID(uuidString: zoom.id)!
+                model.selection = [zoomID]
+
+                let snapshotsDir = tmp.appendingPathComponent("Snapshots")
+                let testPasteboard = NSPasteboard.withUniqueName()
+                defer { testPasteboard.releaseGlobally() }
+
+                guard let folder = StateSnapshot.dump(to: snapshotsDir, pasteboard: testPasteboard, playSound: false) else {
+                    throw Fail(description: "dump() returned nil")
+                }
+                guard fm.fileExists(atPath: folder.path) else { throw Fail(description: "snapshot folder wasn't created") }
+
+                // snapshot.json parses and has the right editor fields.
+                let snapshotData = try Data(contentsOf: folder.appendingPathComponent("snapshot.json"))
+                guard let root = try JSONSerialization.jsonObject(with: snapshotData) as? [String: Any] else {
+                    throw Fail(description: "snapshot.json didn't parse as an object")
+                }
+                guard let editors = root["editors"] as? [[String: Any]], let editor0 = editors.first else {
+                    throw Fail(description: "snapshot.json has no editors: \(root.keys)")
+                }
+                guard let playhead = editor0["playhead"] as? Double, abs(playhead - 4.5) < 1e-9 else {
+                    throw Fail(description: "editor0 playhead wrong: \(String(describing: editor0["playhead"]))")
+                }
+                guard let selection = editor0["selection"] as? [String], selection == [zoomID.uuidString] else {
+                    throw Fail(description: "editor0 selection wrong: \(String(describing: editor0["selection"]))")
+                }
+                guard let undoNames = editor0["undoStepNames"] as? [String], undoNames == ["Snapshot rename"] else {
+                    throw Fail(description: "editor0 undoStepNames wrong: \(String(describing: editor0["undoStepNames"]))")
+                }
+
+                // editor-0-project.json loads with `Project.load` and equals the in-memory project.
+                let loaded = try Project.load(from: folder.appendingPathComponent("editor-0-project.json"))
+                guard loaded == model.project else { throw Fail(description: "editor-0-project.json doesn't match the in-memory project") }
+
+                // events summary has no raw events, only counts + timestamps.
+                let summaryData = try Data(contentsOf: folder.appendingPathComponent("editor-0-events-summary.json"))
+                guard let summary = try JSONSerialization.jsonObject(with: summaryData) as? [String: Any] else {
+                    throw Fail(description: "events-summary.json didn't parse")
+                }
+                guard summary["events"] == nil, let totalCount = summary["totalCount"] as? Int, totalCount == 2 else {
+                    throw Fail(description: "events summary wrong: \(summary)")
+                }
+                guard let counts = summary["countsByKind"] as? [String: Int], counts["down"] == 1, counts["move"] == 1 else {
+                    throw Fail(description: "events summary counts wrong: \(String(describing: summary["countsByKind"]))")
+                }
+
+                // The pasteboard string equals the folder path.
+                guard testPasteboard.string(forType: .string) == folder.path else {
+                    throw Fail(description: "pasteboard wasn't set to the folder path")
+                }
+                guard fm.fileExists(atPath: folder.appendingPathComponent("README.txt").path) else {
+                    throw Fail(description: "README.txt missing")
+                }
+
+                // Retention: 25 dumps total into the same directory keep only the newest 20.
+                for _ in 0..<24 {
+                    _ = StateSnapshot.dump(to: snapshotsDir, pasteboard: testPasteboard, playSound: false)
+                }
+                let remaining = try fm.contentsOfDirectory(at: snapshotsDir, includingPropertiesForKeys: [.isDirectoryKey])
+                    .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+                guard remaining.count <= 20 else { throw Fail(description: "retention kept \(remaining.count) folders, want <= 20") }
+            }
         },
     ]
 

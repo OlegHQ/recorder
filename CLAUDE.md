@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Recorder: a native macOS (15+, Apple Silicon) screen recorder + non-destructive video editor, modelled on Screen Studio.
 The repo is currently a **buildable skeleton plus a full spec and plan**. `docs/SPEC.md` is the source of truth for *what*:
 feature scope, ASCII mockups of every screen, acceptance criteria (`AC-*`), project file format, milestones M1–M6.
-`docs/PLAN.md` is the ordered task list **and the progress tracker** (78 tasks, `T-001`…`T-609`). `reference/*.png` are
+`docs/PLAN.md` is the ordered task list **and the progress tracker** (79 tasks, `T-001`…`T-610`). `reference/*.png` are
 screenshots of the real Screen Studio recording flow that the mockups were derived from.
 
 ## How to work here (mandatory)
@@ -60,7 +60,12 @@ make install               # copy to /Applications/Recorder.app (kills a running
 make cert                  # one-time: create the self-signed "Recorder Dev" signing identity
 make clean
 build/Recorder.app/Contents/MacOS/Recorder --selftest <name> [args]   # headless app checks (cases are added by plan tasks)
+scripts/freeze-dump.sh [pid]                                          # hung main thread: sample+ps into a new snapshot folder, path to clipboard
 ```
+
+`Recorder ▸ Copy State Snapshot` (⌃⌥⌘S, global, also works mid-recording) writes a debugging folder
+(app/permission/recording/editor state, own-window screenshots) under `~/Library/Logs/Recorder/Snapshots/`
+and copies its path (SPEC §8.1) — for handing an AI assistant one path instead of narrating a bug.
 
 Always test via `make test`, not bare `swift test` — see the first constraint below.
 

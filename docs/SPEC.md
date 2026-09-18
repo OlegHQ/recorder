@@ -337,12 +337,12 @@ is recorded to `camera.mov` and composited in the editor. Its corner becomes the
         │   3   │  72 pt, scales/fades      │  ● 00:42   │  ■ Finish   ❙❙   ↺    🗑  │
         ╰───────╯  each second; Esc cancels ╰─────────────────────────────────────────╯
                                                red dot    finish   pause restart delete
- Menu-bar item: ◉ 00:42  → menu: Finish (⌃⌥⌘R) · Pause/Resume (⌃⌥⌘P) · Restart · Delete · ─ · Hide widget
+ Menu-bar item: ◉ 00:42  → menu: Finish (⌃⌥⌘R) · Pause/Resume (⌃⌥⌘P) · Restart · Delete · ─ · Copy State Snapshot (⌃⌥⌘S) · Hide widget
 ```
 
 - Finish → stop writers → create project → open editor (§6). Restart = discard + start again with same settings (no countdown re-prompt). Delete asks for confirmation.
 - Pause: stop appending samples; resume subtracts the paused duration from all subsequent timestamps (video, audio, events).
-- Global hotkeys — defaults: start/finish `⌃⌥⌘R`, pause/resume `⌃⌥⌘P`, new recording `⌃⌘↩`, record display/window/area `⌥⌘3`/`⌥⌘4`/`⌥⌘5`, open last project `⌥⌘Z` (menu: §8). Configurable in Settings (M6).
+- Global hotkeys — defaults: start/finish `⌃⌥⌘R`, pause/resume `⌃⌥⌘P`, copy state snapshot `⌃⌥⌘S` (works mid-recording too, like R/P — §8's "State snapshot"), new recording `⌃⌘↩`, record display/window/area `⌥⌘3`/`⌥⌘4`/`⌥⌘5`, open last project `⌥⌘Z` (menu: §8). Configurable in Settings (M6).
 - "Hide dock icon while recording": `NSApp.setActivationPolicy(.accessory)` during recording, `.regular` after.
 - "Hide desktop icons": exclude Finder's desktop-icon windows from the filter (windows owned by Finder at desktop-icon level), display mode only.
 
@@ -706,7 +706,7 @@ Invariants (assert in debug, test always): clips sorted by `sourceStart`, non-ov
 
 ## 8. App-level
 
-Menu bar: **Recorder** (About, Settings… ⌘,, Quit) · **File** (New Recording ⌘N, Open… ⌘O, Open Recent ▸, Projects ⇧⌘O, Save ⌘S, Save As… ⇧⌘S, Show Raw Files, Close ⌘W) · **Edit** (Undo, Redo, Split C, Remove ⌫, Add Zoom Z, Regenerate Auto Zooms, Remove All Zooms, Restore All Cuts) · **Record** (Start/Finish, Pause, Restart) · **Export** (Export… ⌘E, Copy Frame as Image ⇧⌘C) · **View** (tabs 1–6, Zoom In/Out/Fit, Crop…, Command Menu… ⌘K, Keyboard Shortcuts ⌘/ — no Help menu exists, so T-311 put both in View's last group) · **Window**.
+Menu bar: **Recorder** (About, Settings… ⌘,, Copy State Snapshot ⌃⌥⌘S, Quit) · **File** (New Recording ⌘N, Open… ⌘O, Open Recent ▸, Projects ⇧⌘O, Save ⌘S, Save As… ⇧⌘S, Show Raw Files, Close ⌘W) · **Edit** (Undo, Redo, Split C, Remove ⌫, Add Zoom Z, Regenerate Auto Zooms, Remove All Zooms, Restore All Cuts) · **Record** (Start/Finish, Pause, Restart) · **Export** (Export… ⌘E, Copy Frame as Image ⇧⌘C) · **View** (tabs 1–6, Zoom In/Out/Fit, Crop…, Command Menu… ⌘K, Keyboard Shortcuts ⌘/ — no Help menu exists, so T-311 put both in View's last group) · **Window**.
 
 Settings window (SwiftUI `Form`): General — projects folder, default export settings, "after recording: open editor"; Recording — fps 30/60, countdown, the three toggles from §4.2; Shortcuts (M6) — rebind the global hotkeys (§4.7).
 
@@ -720,6 +720,7 @@ Status item (always present while the app runs; ref: `reference/status-item-menu
  ⬚ Record Area                ⌥⌘5   → toolbar + area selection (§4.5)
  ─────────────────────────────────
    Settings…                  ⌘,
+   Copy State Snapshot        ⌃⌥⌘S  writes a debugging folder + copies its path (below)
  ✓ Show Recorder in Dock      ⌘D    persisted; off = `.accessory` activation policy (menu-bar-only app)
  ─────────────────────────────────
    Projects                   ⇧⌘O   library window (§5.1)
@@ -729,15 +730,34 @@ Status item (always present while the app runs; ref: `reference/status-item-menu
    Quit Recorder              ⌘Q
 ```
 
-While recording the menu is replaced by the §4.7 one (Finish · Pause/Resume · Restart · Delete · Hide widget) and the title shows `◉ mm:ss`.
+While recording the menu is replaced by the §4.7 one (Finish · Pause/Resume · Restart · Delete · ─ · Copy State Snapshot · Hide widget) and the title shows `◉ mm:ss`.
 UX rules: the three `Record …` items set the mode *and* open its picker in one step (no second click); with permissions missing every
 recording item opens onboarding (§4.1) instead; "Show Recorder in Dock" off never hides an open editor window's app — it only takes
 effect while no editor/library window is open (`// ponytail`: simplest rule that avoids a dock-less app with windows).
-`⌃⌘↩`, `⌥⌘3/4/5` and `⌥⌘Z` are **global** shortcuts (§4.7); the others are ordinary key equivalents. Closing all windows does **not** quit.
+`⌃⌘↩`, `⌥⌘3/4/5`, `⌥⌘Z` and `⌃⌥⌘S` are **global** shortcuts (§4.7); the others are ordinary key equivalents. Closing all windows does **not** quit.
 
-**AC-APP-4** Each global shortcut works while another app is frontmost; `⌥⌘4` shows the window picker within 300 ms; shortcuts are ignored while a recording is in progress (except `⌃⌥⌘R`/`⌃⌥⌘P`).
+**AC-APP-4** Each global shortcut works while another app is frontmost; `⌥⌘4` shows the window picker within 300 ms; shortcuts are ignored while a recording is in progress (except `⌃⌥⌘R`/`⌃⌥⌘P`/`⌃⌥⌘S`).
 
 **AC-APP-1** `make install` on a clean clone produces `/Applications/Recorder.app` that launches. **AC-APP-2** With the "Recorder Dev" identity, permissions survive `make install` rebuilds. **AC-APP-3** Idle app (toolbar open, not recording) uses < 1% CPU and < 150 MB RAM.
+
+### 8.1 State snapshot (debugging aid)
+
+`Recorder ▸ Copy State Snapshot` (⌃⌥⌘S, global, works mid-recording) writes
+`~/Library/Logs/Recorder/Snapshots/<yyyy-MM-dd HH.mm.ss>/` — `snapshot.json` (app/OS/permission/recording/
+settings/hotkey/memory state, every window, and one entry per open editor: playhead, selection, undo/redo
+names, `TimeMap` output duration, `checkInvariants()`, preview/timeline internals, which inspector
+tab/panel is showing, export sheet phase), `editor-<n>-project.json` (each open editor's CURRENT
+in-memory `Project`, unsaved edits included), `editor-<n>-events-summary.json` (event-kind counts +
+first/last timestamps only), one `window-<n>-<class>.png` per Recorder's own visible window, and a
+`README.txt` explaining the above. The folder path is copied to the clipboard and a system sound plays;
+the status item flashes "Snapshot copied" for 2 s (no new window). Only the newest 20 snapshot folders
+are kept. Privacy: no raw input events, no typed text, no screen contents other than Recorder's own
+windows, ever (CLAUDE.md's rule). `scripts/freeze-dump.sh [pid]` is the out-of-process fallback for a
+hung main thread: `sample`/`ps` on the running `Recorder` process into a new folder under the same
+Snapshots directory, path copied to the clipboard the same way.
+
+**AC-APP-5** `Recorder ▸ Copy State Snapshot` writes the snapshot folder and puts its path on the
+clipboard in < 1 s with an editor open; it also works while a recording is in progress.
 
 ---
 

@@ -27,6 +27,9 @@ import RecorderCore
     /// Elapsed output-clock seconds of the current recording, for the status item (SPEC §4.7).
     var elapsed: Double { session?.elapsed ?? 0 }
 
+    /// T-610: read-only for the state snapshot — `currentTarget` itself stays private.
+    var currentTargetDescription: String? { currentTarget?.targetDescription }
+
     /// From the pickers' Start button. Awaits the countdown (Esc there returns to the picker, which is
     /// still showing at that point), then closes the recording-flow UI and starts capture.
     func begin(target: CaptureTarget) {

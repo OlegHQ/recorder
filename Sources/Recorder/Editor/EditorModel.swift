@@ -43,6 +43,11 @@ import RecorderCore
     var undoName: String? { undoNames.last }
     var redoName: String? { redoNames.last }
 
+    /// T-610: the full undo/redo NAME stacks (not the `Project` snapshots themselves), for the state
+    /// snapshot dump — oldest first, same order as `undoStack`/`redoStack`.
+    var undoStepNames: [String] { undoNames }
+    var redoStepNames: [String] { redoNames }
+
     init(packageURL: URL, project: Project, events: EventLog) {
         self.packageURL = packageURL
         self.project = project

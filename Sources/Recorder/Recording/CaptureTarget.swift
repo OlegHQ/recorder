@@ -87,6 +87,18 @@ extension CaptureTarget {
         }
     }
 
+    /// T-610: a short human-readable description of what's being recorded, for the state snapshot
+    /// (`StateSnapshot.swift`) — not a `CustomStringConvertible` conformance, just a debugging accessor.
+    var targetDescription: String {
+        switch self {
+        case .display(let display): return "display \(display.displayID) \(Int(display.width))x\(Int(display.height))"
+        case .window(let window):
+            return "window \"\(window.title ?? "")\" (\(window.owningApplication?.applicationName ?? "unknown app"))"
+        case .area(let display, let rect):
+            return "area \(Int(rect.width))x\(Int(rect.height)) on display \(display.displayID)"
+        }
+    }
+
     private static func screen(displayID: CGDirectDisplayID) -> NSScreen? {
         NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID

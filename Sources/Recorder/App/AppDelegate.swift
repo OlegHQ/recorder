@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wireProjects()
         wireOpen()
         wireViewHelpItems()
+        wireCopyStateSnapshot()
         Hotkeys.install()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateStatusItem() }
@@ -210,6 +211,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor @objc private func showCommandMenu() { CommandMenu.show() }
     @MainActor @objc private func showCheatSheet() { CheatSheet.show() }
 
+    /// Wires "Recorder ▸ Copy State Snapshot" (T-610) — same pattern as `wireSettings`. The status
+    /// item's own copy (idle + recording variants, `buildIdleStatusMenu`/`buildRecordingStatusMenu`)
+    /// is wired directly, like every other status-menu item.
+    private func wireCopyStateSnapshot() {
+        let item = NSApp.mainMenu?.item(withTitle: "Recorder")?.submenu?.item(withTitle: "Copy State Snapshot")
+        item?.target = self
+        item?.action = #selector(copyStateSnapshotTapped)
+    }
+
+    @MainActor @objc private func copyStateSnapshotTapped() { StateSnapshot.dump() }
+
+    /// T-610: transient confirmation for an action with no window of its own to show feedback in —
+    /// flashes the status item's title for 2 s without stealing focus or a new window class, then
+    /// lets the existing 1 s `statusTimer` poll (`updateStatusItem`) put it back.
+    func flashStatusItem(_ text: String) {
+        statusItem.button?.title = " \(text)"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.updateStatusItem() }
+    }
+
     // MARK: - "Show Recorder in Dock" (SPEC §8) and "Open Last Project" (SPEC §4.7/§8)
 
     private static let showInDockKey = "app.showInDock"
@@ -276,6 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.addItem(item("About", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
         app.addItem(.separator())
         app.addItem(item("Settings…", ","))
+        app.addItem(item("Copy State Snapshot", "s", [.control, .option, .command]))
         app.addItem(.separator())
         app.addItem(item("Quit", "q", action: #selector(NSApplication.terminate(_:))))
         main.addItem(item("Recorder", submenu: app))
@@ -397,6 +418,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      action: #selector(recordArea)))
         menu.addItem(.separator())
         menu.addItem(statusMenuItem("Settings…", key: ",", action: #selector(openSettings)))
+        let snapshotKey = hotkeyKey("Copy State Snapshot")
+        menu.addItem(statusMenuItem("Copy State Snapshot", key: snapshotKey.key, mods: snapshotKey.mods, action: #selector(copyStateSnapshotTapped)))
         let showInDock = statusMenuItem("Show Recorder in Dock", key: "d", action: #selector(toggleShowInDock))
         showInDock.state = AppDelegate.showInDock ? .on : .off
         menu.addItem(showInDock)
@@ -432,6 +455,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(statusMenuItem("Restart", action: #selector(restartRecording)))
         menu.addItem(statusMenuItem("Delete", action: #selector(deleteRecording)))
         menu.addItem(.separator())
+        // T-610: allowed while recording (the global hotkey is `alwaysActive`, same as ⌃⌥⌘R/⌃⌥⌘P) —
+        // exactly the moment "the UI is misbehaving" is most likely to matter.
+        let snapshotKey = hotkeyKey("Copy State Snapshot")
+        menu.addItem(statusMenuItem("Copy State Snapshot", key: snapshotKey.key, mods: snapshotKey.mods, action: #selector(copyStateSnapshotTapped)))
         menu.addItem(statusMenuItem("Hide widget", action: #selector(hideWidget)))
         return menu
     }

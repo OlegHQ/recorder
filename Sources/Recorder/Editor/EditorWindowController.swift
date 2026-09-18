@@ -35,12 +35,29 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     // (T-311) below can reach real API (`InspectorView.init(initialTab:)`, `TimelineView.setZoom`)
     // instead of only the type-erased `NSView` the rest of the window plumbing needs.
     private let inspectorHostingView: NSHostingView<InspectorView>
-    private let coreTimelineView: TimelineView
+    // T-610: not `private` — the state snapshot dump (`StateSnapshot.swift`) reads its `geometry`/
+    // debug accessors directly instead of duplicating a second way to reach the timeline.
+    let coreTimelineView: TimelineView
+    /// T-610: which of the 6 inspector tabs `View ▸ 1–6`/`selectInspectorTab` last selected — a
+    /// ponytail-scoped stand-in for "the tab actually on screen": SwiftUI's own tab-button clicks
+    /// inside `InspectorView` are a private `@State` with no callback out, so a click made without
+    /// going through the menu isn't reflected here. Good enough for a debugging snapshot; the
+    /// selection panel case (clip/zoom/layout/mask) is computed separately in `StateSnapshot` from
+    /// `model.selection`/`selectedClip`, which IS always accurate.
+    private(set) var currentInspectorTab: InspectorView.Tab = .background
     // T-601: kept alive here (its own `view` is only weakly referenced by `PreviewView`'s subview
     // list) and re-laid-out on every preview resize (`preview.onResize` below).
     private let maskOverlay: MaskRectOverlay
 
     private static var openWindows: [URL: EditorWindowController] = [:]
+    // T-610: every constructed controller, including ones from `makeOffscreen` (never added to
+    // `openWindows` — that dict is only the URL-keyed "focus the existing window instead of
+    // duplicating it" dedup for `open(package:)`). `allOpen` below is what the state snapshot dump
+    // walks; `weak` so a closed/deallocated controller just drops out, no manual bookkeeping needed.
+    private static var liveControllers: [WeakEditorWindowController] = []
+
+    /// T-610: every constructed, still-alive editor window controller — for the state snapshot dump.
+    static var allOpen: [EditorWindowController] { liveControllers.compactMap(\.value) }
 
     private init(packageURL: URL, project: Project, events: EventLog, orderFront: Bool = true) {
         let model = EditorModel(packageURL: packageURL, project: project, events: events)
@@ -100,6 +117,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(preview)
         }
+        Self.liveControllers.append(WeakEditorWindowController(value: self))
     }
 
     @available(*, unavailable)
@@ -510,6 +528,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     @objc func selectInspectorTab(_ sender: NSMenuItem) {
         guard let tab = InspectorView.Tab(rawValue: sender.tag) else { return }
         inspectorHostingView.rootView = InspectorView(model: model, initialTab: tab)
+        currentInspectorTab = tab
     }
 
     /// View ▸ Zoom In/Out/Fit: `TimelineView`'s own public zoom API (its ⌘=/⌘- keyDown handling
@@ -695,4 +714,9 @@ private final class EditorRootView: NSView {
         let range = dividerHitRange()
         addCursorRect(NSRect(x: 0, y: range.lowerBound, width: bounds.width, height: range.upperBound - range.lowerBound), cursor: .resizeUpDown)
     }
+}
+
+/// T-610: a weak box so `EditorWindowController.liveControllers` doesn't keep closed windows alive.
+private struct WeakEditorWindowController {
+    weak var value: EditorWindowController?
 }
