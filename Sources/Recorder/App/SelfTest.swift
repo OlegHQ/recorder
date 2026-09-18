@@ -7,6 +7,7 @@ import Foundation
 import Metal
 import RecorderCore
 import ScreenCaptureKit
+import SwiftUI
 
 /// Headless app checks, run instead of the GUI when launched with `--selftest <name> [args]`.
 /// Cases are registered by later tasks: `SelfTest.cases["name"] = { args in … throws }`.
@@ -79,6 +80,71 @@ enum SelfTest {
             try store.trash(bravoURL)
             try await waitUntil { store.items.count == 3 }
             guard !fm.fileExists(atPath: bravoURL.path) else { throw Fail(description: "trash didn't remove the package") }
+        },
+        // T-302: renders `LibraryView` over a fixture folder to a PNG for eyeballing against the SPEC
+        // §5.1 mockup (`Read` tool). Not a correctness test — kept as a standing look-check.
+        "library-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard args.count >= 2 else { throw Fail(description: "usage: library-png <folder> <out.png>") }
+            let fm = FileManager.default
+            let folder = URL(fileURLWithPath: args[0])
+            let outURL = URL(fileURLWithPath: args[1])
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+
+            func makePackage(_ title: String, duration: Double, modified: Date) throws -> URL {
+                let url = folder.appendingPathComponent("\(title).recorder")
+                try fm.createDirectory(at: url, withIntermediateDirectories: true)
+                let project = Project(title: title, clips: [Clip(sourceStart: 0, sourceEnd: duration, speed: 1)])
+                try project.save(to: url.appendingPathComponent("project.json"))
+                try fm.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+                return url
+            }
+            let now = Date()
+            _ = try makePackage("Onboarding", duration: 93, modified: now)
+            _ = try makePackage("Bug repro", duration: 12, modified: now.addingTimeInterval(-86_400))
+            let demoURL = try makePackage("Demo v2", duration: 724, modified: now.addingTimeInterval(-6 * 86_400))
+
+            let thumb = NSImage(size: NSSize(width: 640, height: 400))
+            thumb.lockFocus()
+            NSColor(hex: "#5B3DF5").setFill()
+            NSRect(x: 0, y: 0, width: 640, height: 400).fill()
+            thumb.unlockFocus()
+            guard let tiff = thumb.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                  let thumbJPEG = rep.representation(using: .jpeg, properties: [:]) else {
+                throw Fail(description: "couldn't synthesize thumbnail")
+            }
+            try thumbJPEG.write(to: demoURL.appendingPathComponent("thumbnail.jpg"))
+            // Writing into the package bumps its directory mtime again — restore it (order is by mtime).
+            try fm.setAttributes([.modificationDate: now.addingTimeInterval(-6 * 86_400)], ofItemAtPath: demoURL.path)
+
+            let store = ProjectStore(folder: folder)
+            let deadline = Date().addingTimeInterval(3)
+            while store.items.count < 3 && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+            guard store.items.count == 3 else { throw Fail(description: "fixture scan incomplete: \(store.items.map(\.title))") }
+
+            try await MainActor.run {
+                // `ImageRenderer` leaves `LazyVGrid` content inside `ScrollView` empty (its lazy
+                // instantiation needs a real `NSScrollView` viewport). Host in an actual (offscreen,
+                // never ordered front) window instead so layout happens exactly as on screen.
+                let size = NSSize(width: 900, height: 600)
+                let hostingView = NSHostingView(rootView: LibraryView(store: store).frame(width: size.width, height: size.height))
+                hostingView.frame = NSRect(origin: .zero, size: size)
+                let window = NSWindow(contentRect: hostingView.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = hostingView
+                window.layoutIfNeeded()
+                hostingView.layoutSubtreeIfNeeded()
+                for _ in 0..<5 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+                hostingView.layoutSubtreeIfNeeded()
+
+                guard let rep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hostingView.cacheDisplay(in: hostingView.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try png.write(to: outURL)
+            }
         },
         "model": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }

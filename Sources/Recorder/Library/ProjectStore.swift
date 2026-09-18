@@ -47,34 +47,67 @@ import RecorderCore
         }
     }
 
+    /// A scratch directory on the same volume as `folder`, for building a package fully (copy/move +
+    /// rewritten `project.json`) before it ever appears inside the watched folder — see `stageThenMove`.
+    private func stagingDirectory() throws -> URL {
+        try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                     appropriateFor: folder, create: true)
+    }
+
+    /// Assembles a package in a staging directory (outside `folder`, so the folder watcher can't see it
+    /// mid-write), lets `build` finish writing it (e.g. rewrite `project.json`'s title), then moves the
+    /// finished package into `folder` in one filesystem op. Fixes T-301: doing the move first and the
+    /// `project.json` rewrite after let the watcher's `reload()` race the rewrite and read a stale title,
+    /// and since the watcher only fires on `folder` itself (not on writes to files inside a package it
+    /// already contains), that stale title could stick until some unrelated folder-level change.
+    private func stageThenMove(named name: String, build: (URL) throws -> Void) throws -> URL {
+        let fm = FileManager.default
+        let staging = try stagingDirectory()
+        defer { try? fm.removeItem(at: staging) }
+        let staged = staging.appendingPathComponent(name)
+        try build(staged)
+        let finalURL = folder.appendingPathComponent(name)
+        try fm.moveItem(at: staged, to: finalURL)
+        return finalURL
+    }
+
     /// Renames the package directory and updates `project.title` to match.
     func rename(_ url: URL, to title: String) throws {
-        let fm = FileManager.default
-        let newURL = url.deletingLastPathComponent().appendingPathComponent("\(title).recorder")
-        if newURL != url { try fm.moveItem(at: url, to: newURL) }
-        let projectURL = newURL.appendingPathComponent("project.json")
-        var project = try Project.load(from: projectURL)
-        project.title = title
-        try project.save(to: projectURL)
+        let newName = "\(title).recorder"
+        if url.lastPathComponent == newName {
+            let projectURL = url.appendingPathComponent("project.json")
+            var project = try Project.load(from: projectURL)
+            project.title = title
+            try project.save(to: projectURL)
+        } else {
+            _ = try stageThenMove(named: newName) { staged in
+                try FileManager.default.moveItem(at: url, to: staged)
+                let projectURL = staged.appendingPathComponent("project.json")
+                var project = try Project.load(from: projectURL)
+                project.title = title
+                try project.save(to: projectURL)
+            }
+        }
         reload()
     }
 
     func duplicate(_ url: URL) throws {
         let fm = FileManager.default
         let base = url.deletingPathExtension().lastPathComponent
-        let folder = url.deletingLastPathComponent()
-        var candidate = folder.appendingPathComponent("\(base) copy.recorder")
+        var name = "\(base) copy.recorder"
         var n = 2
-        while fm.fileExists(atPath: candidate.path) {
-            candidate = folder.appendingPathComponent("\(base) copy \(n).recorder")
+        while fm.fileExists(atPath: folder.appendingPathComponent(name).path) {
+            name = "\(base) copy \(n).recorder"
             n += 1
         }
-        try fm.copyItem(at: url, to: candidate)
-        let projectURL = candidate.appendingPathComponent("project.json")
-        var project = try Project.load(from: projectURL)
-        project.id = UUID().uuidString
-        project.title = candidate.deletingPathExtension().lastPathComponent
-        try project.save(to: projectURL)
+        _ = try stageThenMove(named: name) { staged in
+            try fm.copyItem(at: url, to: staged)
+            let projectURL = staged.appendingPathComponent("project.json")
+            var project = try Project.load(from: projectURL)
+            project.id = UUID().uuidString
+            project.title = staged.deletingPathExtension().lastPathComponent
+            try project.save(to: projectURL)
+        }
         reload()
     }
 
