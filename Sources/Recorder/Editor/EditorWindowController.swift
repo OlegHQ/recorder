@@ -288,7 +288,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let outputSize = compositor.outputSize(for: project, longEdge: longEdge)
         let width = Int(outputSize.width), height = Int(outputSize.height)
 
-        let (composition, _) = try await makeComposition(package: packageURL, project: project)
+        let (composition, _, _, _) = try await makeComposition(package: packageURL, project: project)
         guard let screenTrack = composition.tracks(withMediaType: .video).first else {
             throw RenderFail(description: "no video track")
         }
