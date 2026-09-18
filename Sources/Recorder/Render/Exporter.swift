@@ -1,9 +1,12 @@
 import AVFoundation
+import CoreGraphics
 import CoreMedia
 import CoreVideo
 import Foundation
+import ImageIO
 import Metal
 import RecorderCore
+import UniformTypeIdentifiers
 
 /// SPEC §6.8 export sheet settings. Persisted as the export sheet's defaults (T-506) — not here.
 struct ExportSettings: Codable {
@@ -32,7 +35,7 @@ final class Exporter {
             switch self {
             case .noVideoTrack: return "no screen video track in the composition"
             case .cancelled: return "cancelled"
-            case .unsupportedFormat: return "GIF export lands with T-507; Exporter only handles .mp4"
+            case .unsupportedFormat: return "unsupported export format"
             case .failed(let m): return m
             }
         }
@@ -57,7 +60,10 @@ final class Exporter {
     func cancel() { isCancelled = true }
 
     func run() async throws {
-        guard settings.format == .mp4 else { throw ExportError.unsupportedFormat }
+        // T-507: GIF is a wholly separate encode path (ImageIO, not AVAssetWriter) — kept out of
+        // this method below (see `runGIF()` at the bottom of this file) so it doesn't disturb the
+        // MP4 loop.
+        guard settings.format == .mp4 else { return try await runGIF() }
 
         let packageURL = await model.packageURL
         let project = await model.project
@@ -223,6 +229,118 @@ final class Exporter {
         var mbps = base * scale
         if codec == .hevc { mbps *= 0.6 }
         return Int((mbps * 1_000_000).rounded())
+    }
+}
+
+// MARK: - GIF export (T-507)
+
+/// SPEC §6.8's GIF row: same decode/compositor pipeline as `run()`'s MP4 loop above — `makeComposition`,
+/// `FrameHold` (sequential decode, floor-selected frame), `makeFrameState`/`Compositor.render` — but
+/// written straight to an animated GIF with `CGImageDestination` instead of an `AVAssetWriter`, since
+/// GIF has no writer input to append to. Kept as its own extension/function, entirely below the MP4
+/// path, so it doesn't disturb that loop (which the render lane's camera work also touches).
+extension Exporter {
+    private func runGIF() async throws {
+        let packageURL = await model.packageURL
+        let project = await model.project
+        let outputDuration = await model.timeMap.outputDuration
+        try? FileManager.default.removeItem(at: destination)
+
+        // SPEC §6.8: "Warn (non-blocking) if duration > 60 s" — GIFs get large fast; export still runs.
+        if outputDuration > 60 {
+            print("warning: GIF export duration is \(Int(outputDuration))s — SPEC §6.8 recommends keeping GIFs under 60s")
+        }
+
+        let (composition, _) = try await makeComposition(package: packageURL, project: project)
+
+        guard let device = MTLCreateSystemDefaultDevice(), let commandQueue = device.makeCommandQueue() else {
+            throw ExportError.failed("no Metal device")
+        }
+        let compositor = try Compositor(device: device, package: packageURL)
+        let textureCache = TextureCache(device: device)
+
+        // SPEC §6.8: "render at chosen fps, max 960 px long edge" — fps also capped to the sheet's
+        // GIF row (10|15|24) regardless of what's passed in, since MP4-only rates (30/60) would
+        // make oversized, janky-to-play GIFs.
+        let outputSize = compositor.outputSize(for: project, longEdge: 960)
+        let width = Int(outputSize.width), height = Int(outputSize.height)
+        let fps = min(max(settings.fps, 1), 24)
+
+        let decodeSettings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+        ]
+        let reader = try AVAssetReader(asset: composition)
+        let videoTracks = composition.tracks(withMediaType: .video)
+        guard let screenTrack = videoTracks.first else { throw ExportError.noVideoTrack }
+        let screenOutput = AVAssetReaderTrackOutput(track: screenTrack, outputSettings: decodeSettings)
+        screenOutput.alwaysCopiesSampleData = false
+        reader.add(screenOutput)
+        var cameraOutput: AVAssetReaderTrackOutput?
+        if videoTracks.count > 1 {
+            let o = AVAssetReaderTrackOutput(track: videoTracks[1], outputSettings: decodeSettings)
+            o.alwaysCopiesSampleData = false
+            reader.add(o)
+            cameraOutput = o
+        }
+        guard reader.startReading() else {
+            throw ExportError.failed("reader failed to start: \(reader.error?.localizedDescription ?? "?")")
+        }
+
+        let totalFrames = max(1, Int((outputDuration * Double(fps)).rounded()))
+        guard let gifDestination = CGImageDestinationCreateWithURL(destination as CFURL, UTType.gif.identifier as CFString, totalFrames, nil) else {
+            throw ExportError.failed("failed to create GIF destination")
+        }
+        // loop 0 = forever (SPEC §6.8).
+        CGImageDestinationSetProperties(gifDestination, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
+
+        let screenHold = FrameHold(output: screenOutput)
+        let cameraHold = cameraOutput.map(FrameHold.init)
+        let delay = 1.0 / Double(fps)
+
+        for n in 0..<totalFrames {
+            if isCancelled {
+                try? FileManager.default.removeItem(at: destination)
+                throw ExportError.cancelled
+            }
+
+            let t = Double(n) / Double(fps)
+            let screenTexture = screenHold.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) }
+            let cameraTexture = cameraHold?.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) }
+            let state = await makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
+
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+            descriptor.usage = [.renderTarget, .shaderRead]
+            descriptor.storageMode = .shared
+            guard let target = device.makeTexture(descriptor: descriptor), let commandBuffer = commandQueue.makeCommandBuffer() else {
+                throw ExportError.failed("failed to set up a render target")
+            }
+            compositor.render(state, to: target, commandBuffer: commandBuffer)
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+
+            var bytes = [UInt8](repeating: 0, count: width * height * 4)
+            target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+            guard let frame = Self.gifFrame(bgra: bytes, width: width, height: height) else {
+                throw ExportError.failed("failed to build a GIF frame image")
+            }
+            let frameProperties = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: delay]] as CFDictionary
+            CGImageDestinationAddImage(gifDestination, frame, frameProperties)
+            progress(Double(n + 1) / Double(totalFrames), n + 1, totalFrames)
+        }
+
+        guard CGImageDestinationFinalize(gifDestination) else { throw ExportError.failed("failed to finalize GIF") }
+    }
+
+    /// BGRA8 bytes (as rendered by `Compositor`, same layout `Compositor.writePNG`'s selftest uses)
+    /// → `CGImage`, one per GIF frame.
+    private static func gifFrame(bgra bytes: [UInt8], width: Int, height: Int) -> CGImage? {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                        bytesPerRow: width * 4, space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 }
 
@@ -435,5 +553,67 @@ enum ExporterSelfTest {
         }
         print("parity maxDelta=\(maxDelta) over \(orderedTimes.count) times")
         guard maxDelta <= 1 else { throw SelfTestArgError.usage("parity maxDelta \(maxDelta) > 1") }
+    }
+
+    /// T-507: `export-gif <package> <out.gif>` — runs the GIF path end to end, then reads the file
+    /// back with `CGImageSource` (not the Exporter) to check frame count ≈ `duration × fps`, loop
+    /// count 0, a per-frame delay close to `1/fps`, and long edge ≤ 960 (SPEC §6.8).
+    @MainActor
+    static func runExportGIFSelfTest(_ args: [String]) async throws {
+        guard args.count >= 2 else { throw SelfTestArgError.usage("export-gif <package> <out.gif>") }
+        let packageURL = URL(fileURLWithPath: args[0])
+        let outURL = URL(fileURLWithPath: args[1])
+        let model = try loadEditorModel(package: packageURL)
+        let expectedDuration = model.timeMap.outputDuration
+
+        var settings = ExportSettings()
+        settings.format = .gif
+        settings.fps = 15
+        let exporter = Exporter(model: model, settings: settings, destination: outURL)
+        var lastFrame = 0
+        exporter.progress = { _, frame, _ in lastFrame = frame }
+
+        let start = Date()
+        try await exporter.run()
+        let elapsed = Date().timeIntervalSince(start)
+
+        guard let source = CGImageSourceCreateWithURL(outURL as CFURL, nil) else {
+            throw SelfTestArgError.usage("failed to open exported GIF")
+        }
+        let frameCount = CGImageSourceGetCount(source)
+        let expectedFrames = Int((expectedDuration * Double(settings.fps)).rounded())
+        print("export-gif frames=\(frameCount) expected≈\(expectedFrames) lastFrameCallback=\(lastFrame) elapsed=\(String(format: "%.2f", elapsed))s")
+        guard abs(frameCount - expectedFrames) <= 1 else {
+            throw SelfTestArgError.usage("frame count mismatch: \(frameCount) vs \(expectedFrames)")
+        }
+        guard lastFrame == frameCount else {
+            throw SelfTestArgError.usage("progress callback frame \(lastFrame) != written frame count \(frameCount)")
+        }
+
+        guard let properties = CGImageSourceCopyProperties(source, nil) as? [CFString: Any],
+              let gifProperties = properties[kCGImagePropertyGIFDictionary] as? [CFString: Any],
+              let loopCount = gifProperties[kCGImagePropertyGIFLoopCount] as? Int else {
+            throw SelfTestArgError.usage("no GIF loop-count property")
+        }
+        print("export-gif loopCount=\(loopCount)")
+        guard loopCount == 0 else { throw SelfTestArgError.usage("loop count \(loopCount) != 0 (forever)") }
+
+        guard let frameProperties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let frameGIFProperties = frameProperties[kCGImagePropertyGIFDictionary] as? [CFString: Any],
+              let delay = frameGIFProperties[kCGImagePropertyGIFDelayTime] as? Double else {
+            throw SelfTestArgError.usage("no per-frame GIF delay property")
+        }
+        let expectedDelay = 1.0 / Double(settings.fps)
+        print("export-gif delay=\(delay)s expected≈\(expectedDelay)s")
+        guard abs(delay - expectedDelay) <= 0.01 else {
+            throw SelfTestArgError.usage("frame delay \(delay) != expected \(expectedDelay)")
+        }
+
+        guard let firstFrame = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw SelfTestArgError.usage("failed to decode first GIF frame")
+        }
+        let longEdge = max(firstFrame.width, firstFrame.height)
+        print("export-gif size=\(firstFrame.width)x\(firstFrame.height) longEdge=\(longEdge)")
+        guard longEdge <= 960 else { throw SelfTestArgError.usage("long edge \(longEdge) > 960") }
     }
 }
