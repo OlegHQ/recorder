@@ -839,6 +839,34 @@ enum SelfTest {
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
+        // Offscreen render of `CheatSheetView` (SPEC §7.3's table, static SwiftUI grid) to a PNG for
+        // visual comparison against the spec table — not part of the automated pass/fail contract.
+        "cheatsheet-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: cheatsheet-png <out.png>") }
+            try await MainActor.run {
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 460),
+                                       styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .darkAqua) // forced before the hosting view exists
+                let hosting = NSHostingView(rootView: CheatSheetView())
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 640, height: 460)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                let fitted = hosting.fittingSize
+                hosting.frame = NSRect(origin: .zero, size: fitted)
+                window.setContentSize(fitted)
+                hosting.layoutSubtreeIfNeeded()
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try data.write(to: URL(fileURLWithPath: outPath))
+                print("wrote \(outPath)")
+            }
+        },
     ]
 
     static func runIfRequested() {
