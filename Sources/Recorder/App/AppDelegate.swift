@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wireProjects()
         wireOpen()
         wireFinishRecording()
+        Hotkeys.install()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateStatusItem() }
         }
