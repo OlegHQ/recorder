@@ -9,6 +9,11 @@ import ScreenCaptureKit
 enum SourcePickerOverlay {
     private static var windows: [SourcePickerWindow] = []
     private static var state: SourcePickerState?
+    private static var refreshTimer: Timer?
+
+    /// Whether a display/window picker is currently up. Used by `ToolbarController.handleEscape()` to
+    /// decide whether `Esc` should close the overlay or the toolbar (AC-TB-4).
+    static var isOpen: Bool { !windows.isEmpty }
 
     /// Shows one overlay per screen for `.display`/`.window`; routes to `AreaSelectionOverlay` for `.area`.
     static func show(mode: RecordingSettings.Mode) {
@@ -27,12 +32,18 @@ enum SourcePickerOverlay {
         state.activeScreen.flatMap { active in windows.first { $0.targetScreen === active } }?.makeKeyAndOrderFront(nil)
 
         refreshContent(into: state)
+        // Windows open/close/move while the picker is up (SPEC AC-WIN-1 "tracks the front-most window");
+        // a one-time fetch goes stale. A 1 s poll is simple and cheap next to a live window-list
+        // subscription, which ScreenCaptureKit doesn't offer.
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in refreshContent(into: state) }
     }
 
     static func close() {
         windows.forEach { $0.orderOut(nil) }
         windows = []
         state = nil
+        refreshTimer?.invalidate()
+        refreshTimer = nil
         AreaSelectionOverlay.close()
     }
 
@@ -43,11 +54,9 @@ enum SourcePickerOverlay {
         NSLog("Recorder: start recording target=\(target)")
     }
 
-    // ponytail: the window list is fetched once when the picker opens, not re-polled while it's open
-    // (SPEC only asks for live *hover* tracking, not a live window list). Upgrade path: re-fetch on an
-    // interval if windows opening/closing while the picker is up turns out to matter.
     // `fileprivate`, not `private`: also called by `SourcePickerWindow` after a resize (T-206) so the
-    // picker's highlighted frame/size line re-reads the window's new frame (AC-WIN-2).
+    // picker's highlighted frame/size line re-reads the window's new frame (AC-WIN-2), and by `show`'s
+    // 1 s poll (AC-WIN-1) so the list doesn't go stale while the picker is up.
     fileprivate static func refreshContent(into state: SourcePickerState) {
         Task { @MainActor in
             guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return }
@@ -66,6 +75,27 @@ enum SourcePickerOverlay {
         let primaryTop = NSScreen.screens[0].frame.height
         let globalMinY = primaryTop - r.maxY // AppKit-global (bottom-left) y of the rect's bottom edge
         return CGRect(x: r.minX - screen.frame.minX, y: globalMinY - screen.frame.minY, width: r.width, height: r.height)
+    }
+
+    /// AppKit-global (bottom-left-origin, primary-screen-based — `NSEvent.mouseLocation`'s convention)
+    /// point → CG-global (top-left-origin — `SCWindow.frame`'s convention) point. The point half of `flip`.
+    static func cgGlobalPoint(_ p: NSPoint) -> CGPoint {
+        CGPoint(x: p.x, y: NSScreen.screens[0].frame.height - p.y)
+    }
+
+    /// Front-to-back on-screen window IDs from the window server. `SCShareableContent.windows` is *not*
+    /// z-ordered, which was the root cause of the window picker highlighting whichever overlapping window
+    /// happened to come first in that unordered list instead of the one actually under the cursor
+    /// (AC-WIN-1). Matched against `SCWindow`s by `windowID` in `frontmostWindow(at:order:frames:)`.
+    static func frontToBackWindowIDs() -> [CGWindowID] {
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return info.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+    }
+
+    /// The front-most window (by `order`) whose frame contains `point`, or `nil`. Pure so the `pickers`
+    /// selftest can exercise it with synthetic data instead of a live window-server call.
+    static func frontmostWindow(at point: CGPoint, order: [CGWindowID], frames: [CGWindowID: CGRect]) -> CGWindowID? {
+        order.first { frames[$0]?.contains(point) ?? false }
     }
 }
 
@@ -105,17 +135,25 @@ private final class SourcePickerWindow: NSPanel {
             onStart: { [weak self] in self?.start() },
             onResize: { [weak self] in self?.showResizeMenu() }
         ))
-        hostingView.onCancel = { [weak self] in self?.cancel() }
         hostingView.onReturn = { [weak self] in self?.start() }
         hostingView.onEnter = { [weak self] in self?.enter() }
         hostingView.onExit = { [weak self] in self?.exit() }
-        hostingView.onMove = { [weak self] point in self?.moved(to: point) }
+        hostingView.onMove = { [weak self] in self?.moved() }
         contentView = hostingView
 
         FloatingPanel.register(self)
     }
 
     override var canBecomeKey: Bool { true }
+
+    // Same fix, same reason, as `FloatingPanel.makeKeyAndOrderFront` (see its comment): `contentView` was
+    // never `initialFirstResponder`, so without this override first responder stayed the window itself,
+    // which has no `cancelOperation` — a mode switch made this overlay key but `Esc` reached nothing
+    // (AC-TB-4).
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        if let contentView { makeFirstResponder(contentView) }
+    }
 
     private func enter() {
         if mode == .display { state.activeScreen = targetScreen }
@@ -126,17 +164,18 @@ private final class SourcePickerWindow: NSPanel {
         if mode == .display, state.activeScreen === targetScreen { state.activeScreen = nil }
     }
 
-    private func moved(to localPoint: NSPoint) {
+    /// Highlights the front-most on-screen window under the mouse (AC-WIN-1). Uses `NSEvent.mouseLocation`
+    /// directly (AppKit-global) rather than the tracking area's view-local point: `SourcePickerHostingView`
+    /// is an `NSHostingView`, which SwiftUI always flips (top-left origin) — treating that local point as
+    /// bottom-left AppKit coordinates (as the old code did) mirrored the hit-test point vertically within
+    /// the screen, which is why hover picked "random" windows.
+    private func moved() {
         guard mode == .window else { return }
-        let primaryTop = NSScreen.screens[0].frame.height
-        let global = NSPoint(x: targetScreen.frame.minX + localPoint.x, y: targetScreen.frame.minY + localPoint.y)
-        let cgPoint = CGPoint(x: global.x, y: primaryTop - global.y) // AppKit-global → CG-global (top-left)
-        state.hoveredWindow = state.windows.first { $0.frame.contains(cgPoint) }
-    }
-
-    private func cancel() {
-        SourcePickerOverlay.close()
-        ToolbarController.shared.show() // re-key the toolbar so a second Esc reaches it (AC-TB-4)
+        let cgPoint = SourcePickerOverlay.cgGlobalPoint(NSEvent.mouseLocation)
+        let frames = Dictionary(uniqueKeysWithValues: state.windows.map { ($0.windowID, $0.frame) })
+        let order = SourcePickerOverlay.frontToBackWindowIDs()
+        let id = SourcePickerOverlay.frontmostWindow(at: cgPoint, order: order, frames: frames)
+        state.hoveredWindow = id.flatMap { i in state.windows.first { $0.windowID == i } }
     }
 
     private func start() {
@@ -301,11 +340,10 @@ private enum SavedWindowSizes {
 /// Routes AppKit mouse/key events (SwiftUI has no hover/keyDown hooks that fit the picker's needs) into
 /// the closures `SourcePickerWindow` wires up.
 private final class SourcePickerHostingView: NSHostingView<SourcePickerContentView> {
-    var onCancel: (() -> Void)?
     var onReturn: (() -> Void)?
     var onEnter: (() -> Void)?
     var onExit: (() -> Void)?
-    var onMove: ((NSPoint) -> Void)?
+    var onMove: (() -> Void)?
 
     private var trackingArea: NSTrackingArea?
 
@@ -318,10 +356,12 @@ private final class SourcePickerHostingView: NSHostingView<SourcePickerContentVi
     }
 
     override var acceptsFirstResponder: Bool { true }
-    override func cancelOperation(_ sender: Any?) { onCancel?() }
+    // Esc: one shared handler, regardless of which of our windows is key (AC-TB-4) — see
+    // `ToolbarController.handleEscape()`.
+    override func cancelOperation(_ sender: Any?) { ToolbarController.shared.handleEscape() }
     override func mouseEntered(with event: NSEvent) { onEnter?() }
     override func mouseExited(with event: NSEvent) { onExit?() }
-    override func mouseMoved(with event: NSEvent) { onMove?(convert(event.locationInWindow, from: nil)) }
+    override func mouseMoved(with event: NSEvent) { onMove?() }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 36 { onReturn?() } else { super.keyDown(with: event) } // Return

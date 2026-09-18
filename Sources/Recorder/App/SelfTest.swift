@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreMedia
 import Darwin
@@ -170,6 +171,77 @@ enum SelfTest {
             }
             print("SELFTEST record duration=\(source.duration) size=\(Int(naturalSize.width))x\(Int(naturalSize.height))")
             try? FileManager.default.removeItem(at: packageURL)
+        },
+        "pickers": { _ in
+            // T-107/T-108 bug fix regression coverage: `SelectionRectView`'s create/resize drag math
+            // (AC-AREA-1/2) and `SourcePickerOverlay`'s window hit-test ordering (AC-WIN-1), both driven
+            // with synthetic data so they run without Screen Recording permission or a real window.
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            func drag(_ view: SelectionRectView, from a: CGPoint, to b: CGPoint) {
+                view.mouseDown(with: synthEvent(.leftMouseDown, a))
+                view.mouseDragged(with: synthEvent(.leftMouseDragged, b))
+                view.mouseUp(with: synthEvent(.leftMouseUp, b))
+            }
+            func freshView() -> SelectionRectView {
+                let v = SelectionRectView(frame: NSRect(x: 0, y: 0, width: 1000, height: 1000))
+                v.limit = v.bounds
+                return v
+            }
+
+            // Plain create drag, well above minSize: anchored at mouse-down, size tracks the mouse exactly.
+            do {
+                let view = freshView()
+                drag(view, from: CGPoint(x: 200, y: 200), to: CGPoint(x: 500, y: 400))
+                let expected = CGRect(x: 200, y: 200, width: 300, height: 200)
+                guard view.rect == expected else { throw Fail(description: "create drag: got \(view.rect), want \(expected)") }
+            }
+
+            // Create drag that stays under 100×100: the mouse-down corner (anchor) must stay exactly put,
+            // not slide with the naive post-hoc clamp that grew from (minX, minY) unconditionally.
+            do {
+                let view = freshView()
+                drag(view, from: CGPoint(x: 700, y: 700), to: CGPoint(x: 720, y: 715))
+                guard view.rect.minX == 700, view.rect.maxY == 700, view.rect.width == 100, view.rect.height == 100 else {
+                    throw Fail(description: "create under minSize: anchor moved, got \(view.rect)")
+                }
+            }
+
+            // Resizing the left handle of an existing rect past the min width must keep the right (anchor)
+            // edge fixed, not drag it along with the pointer — this was the "wonky" area-selection bug.
+            do {
+                let view = freshView()
+                view.rect = CGRect(x: 100, y: 100, width: 300, height: 300) // left handle at (100, 250)
+                drag(view, from: CGPoint(x: 100, y: 250), to: CGPoint(x: 380, y: 250))
+                guard view.rect.maxX == 400, view.rect.width == 100 else {
+                    throw Fail(description: "left-handle resize under minSize: right edge moved, got \(view.rect)")
+                }
+            }
+
+            // Window hit-test must follow front-to-back z-order, not `SCShareableContent.windows`'
+            // unordered list (the root cause of the window picker highlighting "random" windows).
+            do {
+                let frames: [CGWindowID: CGRect] = [1: CGRect(x: 0, y: 0, width: 200, height: 200),
+                                                      2: CGRect(x: 50, y: 50, width: 200, height: 200)]
+                let overlap = CGPoint(x: 100, y: 100) // inside both
+                guard SourcePickerOverlay.frontmostWindow(at: overlap, order: [2, 1], frames: frames) == 2 else {
+                    throw Fail(description: "hit-test didn't prefer the front window")
+                }
+                guard SourcePickerOverlay.frontmostWindow(at: overlap, order: [1, 2], frames: frames) == 1 else {
+                    throw Fail(description: "hit-test didn't respect order")
+                }
+                let onlyInWindow1 = CGPoint(x: 10, y: 10)
+                guard SourcePickerOverlay.frontmostWindow(at: onlyInWindow1, order: [2, 1], frames: frames) == 1 else {
+                    throw Fail(description: "hit-test picked a window that doesn't contain the point")
+                }
+                guard SourcePickerOverlay.frontmostWindow(at: CGPoint(x: -5, y: -5), order: [2, 1], frames: frames) == nil else {
+                    throw Fail(description: "hit-test should return nil outside every window")
+                }
+            }
         },
         "waveform": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
