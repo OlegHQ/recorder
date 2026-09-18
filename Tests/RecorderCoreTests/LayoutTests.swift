@@ -30,4 +30,29 @@ struct LayoutTests {
             #expect(touchesWidth || touchesHeight)
         }
     }
+
+    @Test func layoutAspects() {
+        let longEdge = 1920
+        let source = CGSize(width: 1600, height: 1000) // 16:10
+        let cropAspect = source.width / source.height
+
+        // A 9:16 output canvas: portrait, even dimensions, exactly that ratio.
+        let output = outputSize(aspect: .r9x16, croppedSource: source, longEdge: longEdge)
+        #expect(Int(output.height) == longEdge)
+        #expect(output.width.truncatingRemainder(dividingBy: 2) == 0)
+        #expect(output.height.truncatingRemainder(dividingBy: 2) == 0)
+        #expect(abs(output.width / output.height - 9.0 / 16.0) < 0.001)
+
+        // The 16:10 source still keeps its own aspect inside the padded screen rect, letterboxed
+        // (top/bottom or side bars) inside the mismatched 9:16 canvas.
+        let rect = screenRect(output: output, cropAspect: cropAspect, padding: 0.08)
+        #expect(abs(rect.width / rect.height - cropAspect) < 0.001)
+        #expect(rect.width <= output.width + 0.001)
+        #expect(rect.height <= output.height + 0.001)
+
+        // `.auto` keeps the output canvas itself at the (cropped) source aspect — no letterboxing.
+        let autoOutput = outputSize(aspect: .auto, croppedSource: source, longEdge: longEdge)
+        #expect(abs(autoOutput.width / autoOutput.height - cropAspect) < 0.01)
+        #expect(Int(autoOutput.width) == longEdge)
+    }
 }
