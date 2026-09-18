@@ -721,6 +721,21 @@ enum SelfTest {
             guard try Project.load(from: projectURL).animation.screen == .smooth else {
                 throw Fail(description: "autosave didn't persist the screen preset edit")
             }
+
+            // --- Keys tab (T-602): "Show keyboard shortcuts" == one undo step, autosaved. ---
+            let beforeShow = await model.project
+            await model.edit("Show keyboard shortcuts") { $0.keys.show = true }
+            let afterShow = await model.project
+            guard afterShow.keys.show, !beforeShow.keys.show else {
+                throw Fail(description: "show-keys toggle didn't change keys.show")
+            }
+            await model.undo()
+            guard await model.project == beforeShow else { throw Fail(description: "show-keys toggle should be one undo step") }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).keys.show else {
+                throw Fail(description: "autosave didn't persist the show-keys toggle")
+            }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
         // front — `EditorWindowController.makeOffscreen`) for a fixture package and caches its
