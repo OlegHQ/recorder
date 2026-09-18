@@ -25,6 +25,8 @@ import Observation
     var hideDockIcon: Bool { didSet { UserDefaults.standard.set(hideDockIcon, forKey: Keys.hideDockIcon) } }
     var highlightArea: Bool { didSet { UserDefaults.standard.set(highlightArea, forKey: Keys.highlightArea) } }
     var countdown: Int { didSet { UserDefaults.standard.set(countdown, forKey: Keys.countdown) } } // 0,3,5,10
+    var fps: Int { didSet { UserDefaults.standard.set(fps, forKey: Keys.fps) } } // 30,60 (SPEC §8)
+    var projectsFolder: URL { didSet { UserDefaults.standard.set(projectsFolder, forKey: Keys.projectsFolder) } }
 
     private enum Keys {
         static let mode = "recording.mode"
@@ -37,6 +39,8 @@ import Observation
         static let hideDockIcon = "recording.hideDockIcon"
         static let highlightArea = "recording.highlightArea"
         static let countdown = "recording.countdown"
+        static let fps = "recording.fps"
+        static let projectsFolder = "recording.projectsFolder"
     }
 
     private init() {
@@ -55,5 +59,8 @@ import Observation
         hideDockIcon = d.object(forKey: Keys.hideDockIcon) as? Bool ?? true
         highlightArea = d.object(forKey: Keys.highlightArea) as? Bool ?? true
         countdown = d.object(forKey: Keys.countdown) != nil ? d.integer(forKey: Keys.countdown) : 0
+        fps = d.object(forKey: Keys.fps) as? Int ?? 60
+        projectsFolder = d.url(forKey: Keys.projectsFolder)
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Recorder", isDirectory: true)
     }
 }
