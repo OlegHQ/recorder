@@ -35,7 +35,7 @@ final class PreviewView: MTKView {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             fatalError("no Metal device")
         }
-        compositor = try! Compositor(device: device)
+        compositor = try! Compositor(device: device, package: model.packageURL)
         textureCache = TextureCache(device: device)
         commandQueue = queue
         super.init(frame: .zero, device: device)
@@ -197,9 +197,14 @@ final class PreviewView: MTKView {
         // nothing consumes FrameState.camera yet (Compositor doesn't draw a camera quad), and
         // AVPlayerItemVideoOutput has no per-track selection without a custom AVVideoComposition.
 
-        statusObservation = item.observe(\.status) { [weak self] item, _ in
+        // A freshly attached item has no decoded frame yet — `copyPixelBuffer` returns nil until
+        // one exists, so drawing right away (or on a bare `readyToPlay`, which doesn't guarantee the
+        // output has a buffer for the resume time) shows only the background, with the screen pass
+        // skipped entirely (T-306 fix: "paused at open" showed no screen quad). Only a *completed*
+        // zero-tolerance seek guarantees the output has a frame ready to redraw with.
+        statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             guard item.status == .readyToPlay else { return }
-            DispatchQueue.main.async { self?.needsDisplay = true }
+            DispatchQueue.main.async { self?.seekToShowCurrentFrame(resumeSeconds: resumeSeconds) }
         }
 
         if let player {
@@ -209,8 +214,15 @@ final class PreviewView: MTKView {
             newPlayer.actionAtItemEnd = .pause
             player = newPlayer
         }
-        player?.seek(to: CMTime(seconds: resumeSeconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         needsDisplay = true
+    }
+
+    private func seekToShowCurrentFrame(resumeSeconds: Double) {
+        guard let player else { return }
+        let time = CMTime(seconds: resumeSeconds, preferredTimescale: 600)
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            self?.needsDisplay = true
+        }
     }
 
     // MARK: - Draw (SPEC §6.2 "Preview")
