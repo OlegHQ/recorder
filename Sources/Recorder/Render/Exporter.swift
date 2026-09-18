@@ -339,16 +339,18 @@ enum ExporterSelfTest {
 
         // ≥ 5 times spread across the timeline, plus: one exactly on a likely (30 fps) frame
         // boundary (`FrameHold`'s floor-selection must still match the player there), one inside
-        // the last clip when it's sped up (composition's `scaleTimeRange` region), and one inside
-        // the first enabled zoom (view/cursor sampling under a non-identity `ViewTransform`).
+        // the last clip when it's sped up (composition's `scaleTimeRange` region), and one inside a
+        // zoom's spring transition (not just its settled midpoint, T-501: `view != prevView`, so
+        // motion blur is actually engaged).
         var times: Set<Double> = [duration * 0.08, duration * 0.28, duration * 0.5, duration * 0.73, duration * 0.92]
         let boundary = (Double(Int(duration * 15)) / 30.0)
         if boundary > 0, boundary < duration { times.insert(boundary) }
         if let lastClip = project.clips.last, lastClip.speed != 1 {
             times.insert(duration - lastClip.outputDuration / 2)
         }
-        if let zoom = project.zooms.first(where: \.enabled), let mid = timeMap.outputTime(atSource: (zoom.start + zoom.end) / 2) {
-            times.insert(mid)
+        if let zoom = project.zooms.first(where: \.enabled) {
+            if let mid = timeMap.outputTime(atSource: (zoom.start + zoom.end) / 2) { times.insert(mid) }
+            if let transition = timeMap.outputTime(atSource: zoom.start + 0.15) { times.insert(transition) }
         }
         let orderedTimes = times.filter { $0 >= 0 && $0 < duration }.sorted()
 

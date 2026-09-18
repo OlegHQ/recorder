@@ -12,11 +12,13 @@ import RecorderCore
 private struct Uniforms {
     var rectNDC = SIMD4<Float>(-1, 1, 1, -1)
     var uvRect = SIMD4<Float>(0, 0, 1, 1)
+    var prevUvRect = SIMD4<Float>(0, 0, 1, 1)
     var color = SIMD4<Float>(0, 0, 0, 1)
     var color2 = SIMD4<Float>(0, 0, 0, 1)
     var pixelSize = SIMD2<Float>(1, 1)
     var contentSize = SIMD2<Float>(1, 1)
     var contentOffset = SIMD2<Float>(0, 0)
+    var prevContentOffset = SIMD2<Float>(0, 0)
     var radius: Float = 0
     var shadowAlpha: Float = 0
     var shadowBlur: Float = 1
@@ -118,15 +120,15 @@ final class Compositor {
         // Pass 1: background.
         drawBackground(s.project.background, outputSize: s.outputSize, encoder: encoder)
 
-        // Pass 2: screen (rounded rect + shadow + crop/zoom UV, SPEC §6.2 pass 2). Pass 3 (cursor)
-        // shares the same content rect + crop/zoom UV mapping so it lands in "screen space" and
-        // zooms with the content (SPEC §6.2 pass 3, T-413).
-        // ponytail: motion blur (N=8 taps along prevView→view, gated by animation.blur*) and pass 4
-        // (camera/masks) land with T-501/T-502.
+        // Pass 2: screen (rounded rect + shadow + crop/zoom UV + motion blur, SPEC §6.2 pass 2,
+        // T-501). Pass 3 (cursor) shares the same content rect + crop/zoom UV mapping so it lands
+        // in "screen space" and zooms with the content (SPEC §6.2 pass 3, T-413).
+        // ponytail: pass 4 (camera/masks) lands with T-502.
         if let screen = s.screen {
             let rectPx = screenRect(output: s.outputSize, cropAspect: cropAspect(s.project), padding: s.project.frame.padding)
             let contentUV = cropUV(s.project.crop, view: s.view)
-            drawScreen(screen, project: s.project, rectPx: rectPx, contentUV: contentUV, outputSize: s.outputSize, encoder: encoder)
+            let prevContentUV = motionBlurContentUV(project: s.project, view: s.view, prevView: s.prevView, contentUV: contentUV, rectPx: rectPx)
+            drawScreen(screen, project: s.project, rectPx: rectPx, contentUV: contentUV, prevContentUV: prevContentUV, outputSize: s.outputSize, encoder: encoder)
             if let cursor = s.cursor, cursor.alpha > 0 {
                 drawCursor(cursor, project: s.project, rectPx: rectPx, contentUV: contentUV, outputSize: s.outputSize, encoder: encoder)
             }
@@ -193,10 +195,11 @@ final class Compositor {
     /// shadow — computed by the fragment shader's SDF, offset to the content rect — can bleed
     /// outward into the padding (SPEC §6.2 pass 2: "quad is enlarged by blurPx"; a full-canvas
     /// quad is the simplest way to give it room on every side without a second uniform set).
-    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, prevContentUV: SIMD4<Float>, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         var u = Uniforms()
         u.rectNDC = SIMD4(-1, 1, 1, -1)
         u.uvRect = extrapolatedUV(contentUV, contentRect: rectPx, to: outputSize)
+        u.prevUvRect = extrapolatedUV(prevContentUV, contentRect: rectPx, to: outputSize)
         u.pixelSize = SIMD2(Float(outputSize.width), Float(outputSize.height))
         u.contentSize = SIMD2(Float(rectPx.width), Float(rectPx.height))
         u.contentOffset = SIMD2(Float(rectPx.midX - outputSize.width / 2), Float(rectPx.midY - outputSize.height / 2))
@@ -209,6 +212,26 @@ final class Compositor {
         draw(u, encoder: encoder)
         encoder.setFragmentTexture(dummyTexture, index: 0)
         encoder.setFragmentTexture(dummyTexture, index: 1)
+    }
+
+    /// SPEC §6.2 pass 2, T-501: the UV rect the screen quad should blur towards — `prevView` warped
+    /// by only the axes `animation.blurZoom`/`blurPan` actually gate (scale vs centre), scaled by
+    /// `animation.motionBlur`, and zeroed below a 0.5 output-px delta (SPEC's own threshold). Kept
+    /// pre-extrapolation (like `contentUV`) since `extrapolatedUV` is linear — blending before or
+    /// after it gives the same result, and `drawScreen` already extrapolates both the same way.
+    private func motionBlurContentUV(project: Project, view: ViewTransform, prevView: ViewTransform, contentUV: SIMD4<Float>, rectPx: CGRect) -> SIMD4<Float> {
+        let animation = project.animation
+        guard animation.motionBlur > 0, animation.blurZoom || animation.blurPan else { return contentUV }
+        var blurTarget = view
+        if animation.blurZoom { blurTarget.scale = prevView.scale }
+        if animation.blurPan { blurTarget.cx = prevView.cx; blurTarget.cy = prevView.cy }
+        guard blurTarget != view else { return contentUV }
+        let blurUV = cropUV(project.crop, view: blurTarget)
+        let dx = Double(blurUV.x - contentUV.x) * rectPx.width
+        let dy = Double(blurUV.y - contentUV.y) * rectPx.height
+        guard (dx * dx + dy * dy).squareRoot() > 0.5 else { return contentUV }
+        let amount = Float(min(max(animation.motionBlur, 0), 1))
+        return contentUV + (blurUV - contentUV) * amount
     }
 
     // MARK: - Pass 3: cursor (SPEC §6.2 pass 3, §6.5, T-413)
@@ -226,6 +249,8 @@ final class Compositor {
 
         let px = rectPx.minX + (cursor.x - u0) / (u1 - u0) * rectPx.width
         let py = rectPx.minY + (cursor.y - v0) / (v1 - v0) * rectPx.height
+        let prevPx = rectPx.minX + (cursor.prevX - u0) / (u1 - u0) * rectPx.width
+        let prevPy = rectPx.minY + (cursor.prevY - v0) / (v1 - v0) * rectPx.height
 
         let sourceW = Double(max(project.source.pixelWidth, 1)), sourceH = Double(max(project.source.pixelHeight, 1))
         let outputPxPerSourcePxX = rectPx.width / ((u1 - u0) * sourceW)
@@ -246,12 +271,17 @@ final class Compositor {
         let hotFracY = 1 - image.hotY / Double(image.texture.height)
         let centerX = px + (0.5 - hotFracX) * drawW
         let centerY = py + (0.5 - hotFracY) * drawH
+        let prevCenterX = prevPx + (0.5 - hotFracX) * drawW
+        let prevCenterY = prevPy + (0.5 - hotFracY) * drawH
 
         var u = Uniforms()
         u.rectNDC = SIMD4(-1, 1, 1, -1)
         u.pixelSize = SIMD2(Float(outputSize.width), Float(outputSize.height))
         u.contentSize = SIMD2(Float(drawW), Float(drawH))
         u.contentOffset = SIMD2(Float(centerX - outputSize.width / 2), Float(centerY - outputSize.height / 2))
+        u.prevContentOffset = motionBlurCursorOffset(project: project, current: u.contentOffset,
+                                                       currentCenter: (centerX, centerY), prevCenter: (prevCenterX, prevCenterY),
+                                                       outputSize: outputSize)
         u.color = SIMD4(0, 0, 0, Float(cursor.alpha))
         u.rotation = Float(cursor.rotation * .pi / 180)
         u.mode = 5
@@ -259,6 +289,22 @@ final class Compositor {
         draw(u, encoder: encoder)
         encoder.setFragmentTexture(dummyTexture, index: 0)
     }
+
+    /// SPEC §6.2 pass 3, T-501: the cursor quad's centre one render frame earlier, scaled by
+    /// `animation.motionBlur` and gated by `blurCursor` + the same 0.5 output-px threshold as the
+    /// screen pass. Equal to `current` (no blur) when off — the shader's tap loop then collapses to
+    /// a no-op average.
+    private func motionBlurCursorOffset(project: Project, current: SIMD2<Float>, currentCenter: (Double, Double), prevCenter: (Double, Double), outputSize: CGSize) -> SIMD2<Float> {
+        let animation = project.animation
+        guard animation.motionBlur > 0, animation.blurCursor else { return current }
+        let dx = prevCenter.0 - currentCenter.0, dy = prevCenter.1 - currentCenter.1
+        guard (dx * dx + dy * dy).squareRoot() > 0.5 else { return current }
+        let amount = min(max(animation.motionBlur, 0), 1)
+        let bx = currentCenter.0 + dx * amount, by = currentCenter.1 + dy * amount
+        return SIMD2(Float(bx - outputSize.width / 2), Float(by - outputSize.height / 2))
+    }
+
+    // ponytail: pass 4 (camera/masks) lands with T-502.
 
     /// `id == nil` (or a load failure) falls back to the plain system arrow — AppKit already ships
     /// it, so there's no need to bundle our own default cursor asset. Cached per package + id.

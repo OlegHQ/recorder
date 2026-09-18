@@ -11,11 +11,20 @@ import Foundation
 //   3 = rounded-rect texture with soft shadow (the "screen" quad, RGB source) — analytic SDF, no
 //       blur pass: `d = length(max(abs(p) - halfSize + r, 0)) - r`; fill alpha =
 //       `1 - smoothstep(-1, 1, d)`; shadow alpha = `shadowAlpha * (1 - smoothstep(0, shadowBlur, d))`.
-//   4 = same rounded-rect + shadow as mode 3, but the source is biplanar 4:2:0 YCbCr (real capture
-//       output — `texture(0)` luma, `texture(1)` chroma) converted to RGB first (BT.709, video range).
+//       Motion blur (T-501, SPEC §6.2 pass 2): averages N=8 texture taps along `uv → prevUv`
+//       (`prevUvRect`, interpolated the same way `uvRect` is — an affine remap of the crop/zoom UV,
+//       so the per-fragment delta already varies correctly with a zoom's radial expansion); when
+//       there's no blur `prevUvRect == uvRect` so every tap samples the same point (a harmless
+//       no-op average, not worth branching around).
+//   4 = same rounded-rect + shadow + blur as mode 3, but the source is biplanar 4:2:0 YCbCr (real
+//       capture output — `texture(0)` luma, `texture(1)` chroma) converted to RGB after blurring
+//       each plane (BT.709, video range).
 //   5 = the cursor quad (SPEC §6.2 pass 3, T-413): straight-alpha RGBA texture, rotated `rotation`
 //       radians about the quad centre (`contentOffset`/`contentSize`, same fields pass 3/4 use for
 //       their SDF) — sampled in the quad's own unrotated local space, alpha multiplied by `color.a`.
+//       Motion blur (T-501): N=8 taps of the quad translated between `prevContentOffset` and
+//       `contentOffset` (a translating "trail" average, gated/scaled entirely on the Swift side —
+//       `prevContentOffset == contentOffset` when off, same no-branch trick as mode 3/4).
 // `Uniforms` below must stay byte-layout-identical to the `Uniforms` struct in Compositor.swift.
 let shaderSource = """
 #include <metal_stdlib>
@@ -24,11 +33,13 @@ using namespace metal;
 struct Uniforms {
     float4 rectNDC;        // left, top, right, bottom in clip space (mix handles either order)
     float4 uvRect;         // u0, v0, u1, v1 (may extrapolate outside 0…1 — see mode 3)
+    float4 prevUvRect;     // mode 3/4: uvRect one render frame earlier, for motion blur
     float4 color;          // mode 0/1: fill / gradient stop 0
     float4 color2;         // mode 1: gradient stop 1
     float2 pixelSize;      // on-screen size of the quad, in pixels (for vertexMain's localPos)
-    float2 contentSize;    // mode 3: the rounded content rect's size, in pixels (for the SDF)
-    float2 contentOffset;  // mode 3: content rect centre, relative to the quad's centre, in pixels
+    float2 contentSize;    // mode 3/4/5: the rounded content rect's size, in pixels (for the SDF)
+    float2 contentOffset;  // mode 3/4/5: content rect centre, relative to the quad's centre, in pixels
+    float2 prevContentOffset; // mode 5: contentOffset one render frame earlier, for motion blur
     float radius;          // corner radius, pixels
     float shadowAlpha;
     float shadowBlur;      // pixels
@@ -40,6 +51,7 @@ struct Uniforms {
 struct VertexOut {
     float4 position [[position]];
     float2 uv;
+    float2 prevUv;     // mode 3/4: `uv` one render frame earlier (motion blur)
     float2 localPos;   // position within the quad in pixels, centred at (0,0)
 };
 
@@ -49,6 +61,7 @@ vertex VertexOut vertexMain(uint vid [[vertex_id]], constant Uniforms &u [[buffe
     VertexOut out;
     out.position = float4(mix(u.rectNDC.x, u.rectNDC.z, c.x), mix(u.rectNDC.y, u.rectNDC.w, c.y), 0, 1);
     out.uv = float2(mix(u.uvRect.x, u.uvRect.z, c.x), mix(u.uvRect.y, u.uvRect.w, c.y));
+    out.prevUv = float2(mix(u.prevUvRect.x, u.prevUvRect.z, c.x), mix(u.prevUvRect.y, u.prevUvRect.w, c.y));
     out.localPos = (c - 0.5) * u.pixelSize;
     return out;
 }
@@ -93,24 +106,42 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
     } else if (u.mode == 2) {
         return tex.sample(smp, in.uv);
     } else if (u.mode == 3) {
-        return roundedRectShadow(in.localPos, u, tex.sample(smp, in.uv));
+        float4 sum = float4(0.0);
+        for (int i = 0; i < 8; i++) {
+            float2 uvTap = mix(in.prevUv, in.uv, float(i) / 7.0);
+            sum += tex.sample(smp, uvTap);
+        }
+        return roundedRectShadow(in.localPos, u, sum / 8.0);
     } else if (u.mode == 4) {
-        float y = tex.sample(smp, in.uv).r;
-        float2 cbcr = texChroma.sample(smp, in.uv).rg;
-        float3 rgb = ycbcr709VideoToRGB(y, cbcr);
+        float4 ySum = float4(0.0);
+        float4 cSum = float4(0.0);
+        for (int i = 0; i < 8; i++) {
+            float2 uvTap = mix(in.prevUv, in.uv, float(i) / 7.0);
+            ySum += tex.sample(smp, uvTap);
+            cSum += texChroma.sample(smp, uvTap);
+        }
+        float3 rgb = ycbcr709VideoToRGB((ySum / 8.0).r, (cSum / 8.0).rg);
         return roundedRectShadow(in.localPos, u, float4(rgb, 1.0));
     } else {
-        // Mode 5: cursor quad — rotate back into the quad's own local space, discard outside it.
-        float2 p = in.localPos - u.contentOffset;
+        // Mode 5: cursor quad — N taps translated between prevContentOffset and contentOffset
+        // (motion blur trail), each rotated back into its own local space and bounds-checked.
         float cosR = cos(-u.rotation);
         float sinR = sin(-u.rotation);
-        float2 pr = float2(p.x * cosR - p.y * sinR, p.x * sinR + p.y * cosR);
         float2 halfSize = u.contentSize * 0.5;
-        if (abs(pr.x) > halfSize.x || abs(pr.y) > halfSize.y) {
-            return float4(0.0);
+        float4 sum = float4(0.0);
+        int hits = 0;
+        for (int i = 0; i < 8; i++) {
+            float2 offsetTap = mix(u.prevContentOffset, u.contentOffset, float(i) / 7.0);
+            float2 p = in.localPos - offsetTap;
+            float2 pr = float2(p.x * cosR - p.y * sinR, p.x * sinR + p.y * cosR);
+            if (abs(pr.x) <= halfSize.x && abs(pr.y) <= halfSize.y) {
+                float2 uv = pr / u.contentSize + 0.5;
+                sum += tex.sample(smp, uv);
+                hits += 1;
+            }
         }
-        float2 uv = pr / u.contentSize + 0.5;
-        float4 c = tex.sample(smp, uv);
+        if (hits == 0) { return float4(0.0); }
+        float4 c = sum / float(hits);
         c.a *= u.color.a;
         return c;
     }
