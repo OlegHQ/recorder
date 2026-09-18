@@ -342,7 +342,7 @@ is recorded to `camera.mov` and composited in the editor. Its corner becomes the
 
 - Finish → stop writers → create project → open editor (§6). Restart = discard + start again with same settings (no countdown re-prompt). Delete asks for confirmation.
 - Pause: stop appending samples; resume subtracts the paused duration from all subsequent timestamps (video, audio, events).
-- Global hotkeys via `CGEventTap` (already required) — defaults: start/finish `⌃⌥⌘R`, pause `⌃⌥⌘P`. Configurable in Settings (M6).
+- Global hotkeys — defaults: start/finish `⌃⌥⌘R`, pause/resume `⌃⌥⌘P`, new recording `⌃⌘↩`, record display/window/area `⌥⌘3`/`⌥⌘4`/`⌥⌘5`, open last project `⌥⌘Z` (menu: §8). Configurable in Settings (M6).
 - "Hide dock icon while recording": `NSApp.setActivationPolicy(.accessory)` during recording, `.regular` after.
 - "Hide desktop icons": exclude Finder's desktop-icon windows from the filter (windows owned by Finder at desktop-icon level), display mode only.
 
@@ -708,9 +708,34 @@ Invariants (assert in debug, test always): clips sorted by `sourceStart`, non-ov
 
 Menu bar: **Recorder** (About, Settings… ⌘,, Quit) · **File** (New Recording ⌘N, Open… ⌘O, Open Recent ▸, Projects ⇧⌘O, Save ⌘S, Save As… ⇧⌘S, Show Raw Files, Close ⌘W) · **Edit** (Undo, Redo, Split C, Remove ⌫, Add Zoom Z, Regenerate Auto Zooms, Remove All Zooms, Restore All Cuts) · **Record** (Start/Finish, Pause, Restart) · **Export** (Export… ⌘E, Copy Frame as Image ⇧⌘C) · **View** (tabs 1–6, Zoom In/Out/Fit, Crop…) · **Window**.
 
-Settings window (SwiftUI `Form`): General — projects folder, default export settings, "after recording: open editor"; Recording — fps 30/60, countdown, the three toggles from §4.2; Shortcuts (M6) — rebind the two global hotkeys.
+Settings window (SwiftUI `Form`): General — projects folder, default export settings, "after recording: open editor"; Recording — fps 30/60, countdown, the three toggles from §4.2; Shortcuts (M6) — rebind the global hotkeys (§4.7).
 
-Status item (always present while the app runs): `New Recording`, `Projects`, recent 5 projects, `Quit`. Closing all windows does **not** quit.
+Status item (always present while the app runs; ref: `reference/status-item-menu.png`). Native `NSMenu`, SF Symbol icons, idle state:
+
+```
+ ◉ New Recording…            ⌃⌘↩   → toolbar (§4.2) in the last-used mode
+ ─────────────────────────────────
+ ▭ Record Display             ⌥⌘3   → toolbar + display picker (§4.3) immediately
+ ▢ Record Window              ⌥⌘4   → toolbar + window picker (§4.4)
+ ⬚ Record Area                ⌥⌘5   → toolbar + area selection (§4.5)
+ ─────────────────────────────────
+   Settings…                  ⌘,
+ ✓ Show Recorder in Dock      ⌘D    persisted; off = `.accessory` activation policy (menu-bar-only app)
+ ─────────────────────────────────
+   Projects                   ⇧⌘O   library window (§5.1)
+   Open…                      ⌘O
+   Open Last Project          ⌥⌘Z   most recently modified package; disabled when there is none
+ ─────────────────────────────────
+   Quit Recorder              ⌘Q
+```
+
+While recording the menu is replaced by the §4.7 one (Finish · Pause/Resume · Restart · Delete · Hide widget) and the title shows `◉ mm:ss`.
+UX rules: the three `Record …` items set the mode *and* open its picker in one step (no second click); with permissions missing every
+recording item opens onboarding (§4.1) instead; "Show Recorder in Dock" off never hides an open editor window's app — it only takes
+effect while no editor/library window is open (`// ponytail`: simplest rule that avoids a dock-less app with windows).
+`⌃⌘↩`, `⌥⌘3/4/5` and `⌥⌘Z` are **global** shortcuts (§4.7); the others are ordinary key equivalents. Closing all windows does **not** quit.
+
+**AC-APP-4** Each global shortcut works while another app is frontmost; `⌥⌘4` shows the window picker within 300 ms; shortcuts are ignored while a recording is in progress (except `⌃⌥⌘R`/`⌃⌥⌘P`).
 
 **AC-APP-1** `make install` on a clean clone produces `/Applications/Recorder.app` that launches. **AC-APP-2** With the "Recorder Dev" identity, permissions survive `make install` rebuilds. **AC-APP-3** Idle app (toolbar open, not recording) uses < 1% CPU and < 150 MB RAM.
 

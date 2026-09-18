@@ -43,7 +43,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 |---|---|---|
 | M0 Foundations | T-001…T-006 | 6/6 |
 | M1 Record | T-101…T-114 | 5/14 |
-| M2 Record+ | T-201…T-208 | 0/8 |
+| M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
 | M3 Editor shell | T-301…T-313 | 0/13 |
 | M4 Timeline | T-401…T-418 | 0/18 |
 | M5 Ship | T-501…T-509 | 0/9 |
@@ -308,7 +308,7 @@ Update the "Done" column whenever you tick a task.
 - [ ] **T-203 Recording widget** · SPEC §4.7 mockup — File `Recording/RecordingWidgetPanel.swift`. `FloatingPanel` with timer (`Theme.timecodeFont`), Finish / Pause⇄Resume / Restart / Delete (confirm alert). Right-click → Hide. Replaces the M1 status-item-only UI (status item keeps the same actions).
   - HUMAN: AC-REC-2 (pause 5 s: duration excludes it, no audio click, cursor aligned later in M4).
 
-- [ ] **T-204 Global hotkeys** — File `App/Hotkeys.swift` (do not reuse `EventRecorder`'s tap; it only lives while recording): `NSEvent.addGlobalMonitorForEvents(matching: .keyDown)` + local monitor; match `⌃⌥⌘R` (start: show toolbar / finish) and `⌃⌥⌘P` (pause/resume). `// ponytail: fixed bindings; rebinding UI is T-609.`
+- [ ] **T-204 Global hotkeys** — File `App/Hotkeys.swift` (do not reuse `EventRecorder`'s tap; it only lives while recording): `NSEvent.addGlobalMonitorForEvents(matching: .keyDown)` + local monitor; one `[(keyCode, mods, action)]` table matching every global default of SPEC §4.7: `⌃⌥⌘R` (start: show toolbar / finish), `⌃⌥⌘P` (pause/resume), `⌃⌘↩` (toolbar), `⌥⌘3/4/5` (toolbar + display/window/area picker), `⌥⌘Z` (open last project — no-op until T-207b wires it). All but R/P are ignored while recording (AC-APP-4). `// ponytail: fixed bindings; rebinding UI is T-609.`
   - HUMAN: hotkeys work while another app is focused.
 
 - [ ] **T-205 Hide dock icon / desktop icons** — `NSApp.setActivationPolicy(.accessory)` on start, `.regular` on finish. Desktop icons: answer SPEC open question 3 empirically (list `SCShareableContent.windows` where `owningApplication?.bundleIdentifier == "com.apple.finder"` and inspect `windowLayer`/title), exclude them, **write the answer into SPEC §9**.
@@ -319,6 +319,9 @@ Update the "Done" column whenever you tick a task.
 
 - [ ] **T-207 Settings window (minimal)** · SPEC §8 — File `App/SettingsView.swift`: SwiftUI `Form` with General (projects folder via `NSOpenPanel`) and Recording (fps 30/60, countdown, 3 toggles) bound to `RecordingSettings`. `⌘,`.
   - HUMAN: values persist across relaunch.
+
+- [ ] **T-207b Status-item menu** · SPEC §8 mockup (`reference/status-item-menu.png`) — in `AppDelegate`: rebuild the idle status menu exactly as SPEC §8 (SF Symbols `record.circle`, `display`, `macwindow`, `rectangle.dashed`; key equivalents as listed). `Record Display/Window/Area` = `RecordingSettings.shared.mode = …` + `ToolbarController.shared.show()` + open that picker (reuse what the toolbar mode buttons call — one function, also used by T-204's table). `Show Recorder in Dock` = one persisted `Bool` → `NSApp.setActivationPolicy`, per the §8 rule. `Open Last Project` = newest `*.recorder` by modification date in the projects folder (opens in Finder until the editor exists in M3, then the editor). Main-menu File items reuse the same selectors.
+  - HUMAN: menu matches the mockup; AC-APP-4.
 
 - [ ] **T-208 M2 gate** — HUMAN: full pass of SPEC §4 mockups vs the app; list deviations in §Log.
 
@@ -594,7 +597,7 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 - [ ] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
 - [ ] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
 - [ ] **T-608 Cheat sheet (⌘/)** — static SwiftUI grid of SPEC §7.3.
-- [ ] **T-609 Shortcut settings + Copy frame (⇧⌘C)** — rebind the two global hotkeys; copy current composed frame to the pasteboard as PNG.
+- [ ] **T-609 Shortcut settings + Copy frame (⇧⌘C)** — rebind the global hotkeys (the T-204 table); copy current composed frame to the pasteboard as PNG.
 
 ---
 
