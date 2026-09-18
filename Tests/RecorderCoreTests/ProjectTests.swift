@@ -56,3 +56,26 @@ import Testing
         try Project.load(from: url)
     }
 }
+
+@Test func eventLogRoundTrip() throws {
+    let log = EventLog(events: [
+        InputEvent(t: 0.1, k: .move, x: 0.10, y: 0.20),
+        InputEvent(t: 0.2, k: .down, x: 0.10, y: 0.20, b: 0),
+        InputEvent(t: 0.3, k: .drag, x: 0.15, y: 0.25, b: 0),
+        InputEvent(t: 0.4, k: .up, x: 0.15, y: 0.25, b: 0),
+        InputEvent(t: 0.5, k: .down, x: 0.50, y: 0.50, b: 1),
+        InputEvent(t: 0.6, k: .scroll, x: 0.50, y: 0.50),
+        InputEvent(t: 0.7, k: .key, keyCode: 8, mods: 1 << 20),
+        InputEvent(t: 0.8, k: .typing),
+        InputEvent(t: 0.9, k: .cursor, id: "ab12"),
+    ])
+
+    let data = try JSONEncoder().encode(log)
+    let decoded = try JSONDecoder().decode(EventLog.self, from: data)
+    #expect(decoded.events == log.events)
+
+    // drag counts as move
+    #expect(decoded.moves().map(\.k) == [.move, .drag])
+    // clicks = left .down only (the right .down at t=0.5 is excluded)
+    #expect(decoded.clicks().map(\.t) == [0.2])
+}

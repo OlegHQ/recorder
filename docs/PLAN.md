@@ -41,7 +41,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 
 | Milestone | Tasks | Done |
 |---|---|---|
-| M0 Foundations | T-001…T-006 | 5/6 |
+| M0 Foundations | T-001…T-006 | 6/6 |
 | M1 Record | T-101…T-114 | 0/14 |
 | M2 Record+ | T-201…T-208 | 0/8 |
 | M3 Editor shell | T-301…T-313 | 0/13 |
@@ -104,7 +104,7 @@ Update the "Done" column whenever you tick a task.
   - Tests (exactly these): `projectRoundTrip` (fully populated → encode → decode → equal) · `projectDefaultsFromMinimalJSON` (`{"version":1,"source":{…}}` decodes; `frame.padding == 0.08`) · `projectRejectsNewerVersion`.
   - Verify: `make test FILTER=project` · covers AC-PRJ-1, AC-PRJ-2.
 
-- [ ] **T-006 Event log model** · SPEC §4.8, §5
+- [x] **T-006 Event log model** · SPEC §4.8, §5
   - File: `Sources/RecorderCore/Events.swift`. Test in `ProjectTests.swift`.
   ```swift
   public struct InputEvent: Codable, Equatable, Sendable {
@@ -583,3 +583,4 @@ T-004 · 2026-09-18 · verified: `make app SIGN_ID=-` builds; `build/Recorder.ap
 T-005 · 2026-09-18 · verified: `make test FILTER=project` passes 3/3 (`projectRoundTrip`, `projectDefaultsFromMinimalJSON`, `projectRejectsNewerVersion`); `make test` passes 4/4 (adds `timeMapRoundTrip`); `make build` succeeds · deviations: SPEC §5's example JSON values are used as every nested struct's `init()` default (spec doesn't state defaults separately from the example) except where the example gives no value (`background.imagePath` defaults to `""`); `Zoom`/`Layout`/`Mask` (no example default given for `start`/`end`/`kind` alone) default to `start:0,end:3,scale:2,mode:.manual` / `start:0,end:0,kind:.cameraFull` / `start:0,end:0,kind:.mask,opacity:0.8`; `Output.Aspect` uses explicit raw values (`r16x9 = "16:9"` etc.) since Swift case names can't contain `:`; `id`/`createdAt` default to a freshly generated `UUID().uuidString`/current ISO8601 timestamp when missing.
 T-001 · 2026-09-18 · verified: user clicked Always Allow; `codesign --sign "Recorder Dev"` succeeds, `codesign -dvv` shows `Authority=Recorder Dev` · deviations: identity lists as CSSMERR_TP_NOT_TRUSTED (self-signed, expected), signing works
 T-003 · 2026-09-18 · HUMAN confirmed: user ran the app, menu bar is fine · deviations: none
+T-006 · 2026-09-18 · verified: `make test FILTER=eventLog` passes 1/1 (`eventLogRoundTrip`, exercises encode/decode round trip plus `moves()` incl. drag and `clicks()` filtered to left `.down`); `make test` passes 5/5; `make build` succeeds · deviations: none
