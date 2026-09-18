@@ -657,35 +657,9 @@ enum SelfTest {
 
             // Synthesize a small, playable screen.mov with no capture/TCC involved, matching what
             // fragmented writing (T-110) leaves behind after a crash mid-recording.
-            let width = 64, height = 48, fps: Int32 = 30, frameCount = 30
+            let width = 64, height = 48
             let movURL = package.appendingPathComponent("screen.mov")
-            let writer = try AVAssetWriter(outputURL: movURL, fileType: .mov)
-            let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-                AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
-            ])
-            let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
-                kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
-            ])
-            writer.add(input)
-            writer.startWriting()
-            writer.startSession(atSourceTime: .zero)
-
-            var frame = 0
-            while frame < frameCount {
-                guard input.isReadyForMoreMediaData else {
-                    try await Task.sleep(nanoseconds: 5_000_000)
-                    continue
-                }
-                var pixelBuffer: CVPixelBuffer?
-                CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
-                guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
-                adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
-                frame += 1
-            }
-            input.markAsFinished()
-            await writer.finishWriting()
-            guard writer.status == .completed else { throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")") }
+            try await synthesizeMovie(at: movURL, width: width, height: height)
 
             let projectURL = package.appendingPathComponent("project.json")
             guard !fm.fileExists(atPath: projectURL.path) else { throw Fail(description: "test setup: project.json already exists") }
@@ -702,6 +676,53 @@ enum SelfTest {
             }
             guard project.clips.first?.sourceEnd == project.source.duration else {
                 throw Fail(description: "clip doesn't span the recovered duration")
+            }
+        },
+        // T-606: `ProjectStore.importMovie` on a synthesized movie living outside the library folder,
+        // like one dragged in from Finder.
+        "import": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-import-\(UUID().uuidString)")
+            let libraryFolder = tmp.appendingPathComponent("Library")
+            try fm.createDirectory(at: libraryFolder, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let sourceMovie = tmp.appendingPathComponent("My Clip.mov")
+            let width = 64, height = 48
+            try await synthesizeMovie(at: sourceMovie, width: width, height: height)
+            let originalData = try Data(contentsOf: sourceMovie)
+
+            let store = ProjectStore(folder: libraryFolder)
+            let packageURL = try await store.importMovie(sourceMovie)
+
+            guard packageURL.lastPathComponent == "My Clip.recorder" else {
+                throw Fail(description: "unexpected package name \(packageURL.lastPathComponent)")
+            }
+            guard fm.fileExists(atPath: packageURL.appendingPathComponent("screen.mov").path) else {
+                throw Fail(description: "screen.mov missing")
+            }
+            guard fm.fileExists(atPath: packageURL.appendingPathComponent("thumbnail.jpg").path) else {
+                throw Fail(description: "thumbnail.jpg missing")
+            }
+            let events = try JSONDecoder().decode(EventLog.self, from: Data(contentsOf: packageURL.appendingPathComponent("events.json")))
+            guard events.events.isEmpty else { throw Fail(description: "events.json not empty") }
+
+            let project = try Project.load(from: packageURL.appendingPathComponent("project.json"))
+            guard project.source.pixelWidth == width, project.source.pixelHeight == height else {
+                throw Fail(description: "size \(project.source.pixelWidth)x\(project.source.pixelHeight) != \(width)x\(height)")
+            }
+            guard (0.5...2.0).contains(project.source.duration) else {
+                throw Fail(description: "duration \(project.source.duration) out of range 0.5...2.0")
+            }
+            guard project.clips.count == 1, project.clips[0].sourceStart == 0, project.clips[0].sourceEnd == project.source.duration else {
+                throw Fail(description: "expected one full-length clip, got \(project.clips)")
+            }
+            guard project.zooms.isEmpty else { throw Fail(description: "expected no zooms") }
+
+            // Media is never modified after recording (SPEC §5) — including on import.
+            guard try Data(contentsOf: sourceMovie) == originalData else {
+                throw Fail(description: "original movie file was modified")
             }
         },
         "events": { args in
@@ -840,6 +861,41 @@ enum SelfTest {
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
     ]
+
+    /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and
+    /// `import` cases so the `AVAssetWriter` boilerplate lives in one place.
+    private static func synthesizeMovie(at url: URL, width: Int, height: Int, fps: Int32 = 30, frameCount: Int = 30) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
+        ])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+            kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+        ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        var frame = 0
+        while frame < frameCount {
+            guard input.isReadyForMoreMediaData else {
+                try await Task.sleep(nanoseconds: 5_000_000)
+                continue
+            }
+            var pixelBuffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
+            guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
+            adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
+            frame += 1
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
+        }
+    }
 
     static func runIfRequested() {
         guard let i = CommandLine.arguments.firstIndex(of: "--selftest") else { return }
