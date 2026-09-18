@@ -55,7 +55,8 @@ Update the "Done" column whenever you tick a task.
 
 ## M0 — Foundations
 
-- [ ] **T-001 git + signing identity**
+- [~] **T-001 git + signing identity**
+  - WAITING ON HUMAN: identity imported, but `codesign --sign "Recorder Dev"` fails with `errSecInternalComponent` until a person runs `make app` in a GUI terminal and clicks "Always Allow". Until then agents verify with `make app SIGN_ID=-`.
   - Do: `git init && git add -A && git commit -m "skeleton + spec"`. Then `make cert`.
   - HUMAN: `make cert` asks for the login-keychain password once; on first `codesign` click "Always Allow".
   - Verify: `security find-identity -p codesigning | grep "Recorder Dev"` prints a line; `make app` output ends with signing by `Recorder Dev`; `codesign -dv build/Recorder.app 2>&1 | grep Authority` shows `Recorder Dev`.
