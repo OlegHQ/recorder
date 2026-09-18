@@ -68,8 +68,12 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     /// Attaches the recording's shared clock: from here on, frames are retimed and written to
-    /// `camera.mov` inside `packageURL`.
+    /// `camera.mov` inside `packageURL`. Discards any writer left over from a previous recording (T-203
+    /// restart reuses the same live `CameraCapture`/`AVCaptureSession` across recordings instead of
+    /// reopening the device) so frames don't keep appending to the old, now-deleted package.
     func startWriting(packageURL: URL, clock: CaptureSession) {
+        writer?.cancel()
+        writer = nil
         self.packageURL = packageURL
         self.clock = clock
     }

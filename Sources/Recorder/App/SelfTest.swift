@@ -918,6 +918,21 @@ enum SelfTest {
                 throw Fail(description: "original movie file was modified")
             }
         },
+        // T-205, SPEC §9 open question 3: no assertions (there's nothing to assert without a live TCC
+        // grant on the machine this runs on) — prints every Finder-owned window so a HUMAN can compare
+        // against the desktop-icons layer and confirm/adjust `CaptureTarget.filter`'s heuristic.
+        "finder-windows": { _ in
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let finderWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == "com.apple.finder" }
+            guard !finderWindows.isEmpty else {
+                print("SELFTEST finder-windows: no Finder windows found (Screen Recording permission likely not granted to this terminal)")
+                return
+            }
+            let desktopIconLevel = Int(CGWindowLevelForKey(.desktopIconWindow))
+            for w in finderWindows {
+                print("windowLayer=\(w.windowLayer) isDesktopIconLevel=\(w.windowLayer == desktopIconLevel) title=\(w.title ?? "") frame=\(w.frame)")
+            }
+        },
         "events": { args in
             let seconds = args.first.flatMap(Double.init) ?? 3
             guard let display = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false).displays.first else {
@@ -1044,6 +1059,93 @@ enum SelfTest {
                 }
             }
         },
+        // T-207b/T-204: builds the status menu in both states and the global hotkey table (no live
+        // status item / window needed) and checks them against SPEC §4.7/§8's titles, order and key
+        // equivalents, that no two hotkeys share a binding, and every menu item has a target and action.
+        "menus": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            // SPEC §4.7 global hotkey table (T-204).
+            let expected: [(title: String, keyCode: UInt16, mods: NSEvent.ModifierFlags, alwaysActive: Bool)] = [
+                ("Start/Finish Recording", 15, [.control, .option, .command], true),  // ⌃⌥⌘R
+                ("Pause/Resume", 35, [.control, .option, .command], true),            // ⌃⌥⌘P
+                ("New Recording", 36, [.control, .command], false),                   // ⌃⌘↩
+                ("Record Display", 20, [.option, .command], false),                   // ⌥⌘3
+                ("Record Window", 21, [.option, .command], false),                    // ⌥⌘4
+                ("Record Area", 23, [.option, .command], false),                      // ⌥⌘5
+                ("Open Last Project", 6, [.option, .command], false),                 // ⌥⌘Z
+            ]
+            guard Hotkeys.table.count == expected.count else {
+                throw Fail(description: "hotkey table has \(Hotkeys.table.count) entries, want \(expected.count)")
+            }
+            for (got, want) in zip(Hotkeys.table, expected) {
+                guard got.title == want.title, got.keyCode == want.keyCode,
+                      got.modifiers == want.mods, got.alwaysActive == want.alwaysActive else {
+                    throw Fail(description: "hotkey \(got.title): got keyCode=\(got.keyCode) mods=\(got.modifiers) alwaysActive=\(got.alwaysActive), want \(want)")
+                }
+            }
+            var seenBindings = Set<String>()
+            for h in Hotkeys.table {
+                let binding = "\(h.keyCode)-\(h.modifiers.rawValue)"
+                guard seenBindings.insert(binding).inserted else {
+                    throw Fail(description: "duplicate hotkey binding on \(h.title)")
+                }
+            }
+
+            @MainActor func nonSeparators(_ menu: NSMenu) -> [NSMenuItem] { menu.items.filter { !$0.isSeparatorItem } }
+            @MainActor func checkItems(_ items: [NSMenuItem], _ expected: [(title: String, key: String, mods: NSEvent.ModifierFlags)], _ label: String) throws {
+                guard items.count == expected.count else {
+                    throw Fail(description: "\(label): \(items.count) items (\(items.map(\.title))), want \(expected.count)")
+                }
+                for (item, want) in zip(items, expected) {
+                    guard item.title == want.title else { throw Fail(description: "\(label): title \(item.title) != \(want.title)") }
+                    guard item.keyEquivalent == want.key else {
+                        throw Fail(description: "\(label) \(item.title): key \(item.keyEquivalent.debugDescription) != \(want.key.debugDescription)")
+                    }
+                    guard item.keyEquivalentModifierMask == want.mods else {
+                        throw Fail(description: "\(label) \(item.title): mods \(item.keyEquivalentModifierMask) != \(want.mods)")
+                    }
+                    guard item.action != nil, item.target != nil else {
+                        throw Fail(description: "\(label) \(item.title): missing target/action")
+                    }
+                }
+            }
+
+            try await MainActor.run {
+                let delegate = AppDelegate()
+
+                // SPEC §8 idle status menu (`reference/status-item-menu.png`).
+                let idle = delegate.buildIdleStatusMenu()
+                try checkItems(nonSeparators(idle), [
+                    ("New Recording…", "\r", [.control, .command]),
+                    ("Record Display", "3", [.option, .command]),
+                    ("Record Window", "4", [.option, .command]),
+                    ("Record Area", "5", [.option, .command]),
+                    ("Settings…", ",", [.command]),
+                    ("Show Recorder in Dock", "d", [.command]),
+                    ("Projects", "o", [.command, .shift]),
+                    ("Open…", "o", [.command]),
+                    ("Open Last Project", "z", [.option, .command]),
+                    ("Quit Recorder", "q", [.command]),
+                ], "idle menu")
+                guard idle.items.filter(\.isSeparatorItem).count == 4 else {
+                    throw Fail(description: "idle menu: \(idle.items.filter(\.isSeparatorItem).count) separators, want 4")
+                }
+
+                // SPEC §4.7 in-progress menu.
+                let recording = delegate.buildRecordingStatusMenu()
+                try checkItems(nonSeparators(recording), [
+                    ("Finish", "r", [.control, .option, .command]),
+                    ("Pause", "p", [.control, .option, .command]),
+                    ("Restart", "", [.command]),
+                    ("Delete", "", [.command]),
+                    ("Hide widget", "", [.command]),
+                ], "recording menu")
+                guard recording.items.filter(\.isSeparatorItem).count == 1 else {
+                    throw Fail(description: "recording menu: \(recording.items.filter(\.isSeparatorItem).count) separators, want 1")
+                }
+            }
+        },
         "waveform": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }
@@ -1053,6 +1155,165 @@ enum SelfTest {
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
+        // T-607: `AppDelegate.buildMainMenu` is `private`, so this builds its own small fixture menu
+        // (nested submenu, a separator, a disabled item, an item with no action) to exercise
+        // `CommandMenu.flatten` end to end: the flattened list's paths/exclusions, `Command.matches`
+        // against a couple of queries, and that `CommandMenu.perform` invokes the item's action on
+        // its target exactly once.
+        "command-menu": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            final class Target: NSObject {
+                var pingCount = 0
+                @objc func ping() { pingCount += 1 }
+                @objc func other() {}
+            }
+            let target = Target()
+
+            let main = NSMenu()
+
+            let file = NSMenu(title: "File")
+            let newRecording = NSMenuItem(title: "New Recording", action: #selector(Target.ping), keyEquivalent: "n")
+            newRecording.target = target
+            file.addItem(newRecording)
+            file.addItem(.separator())
+            let disabled = NSMenuItem(title: "Disabled Thing", action: #selector(Target.other), keyEquivalent: "")
+            disabled.target = target
+            disabled.isEnabled = false
+            file.addItem(disabled)
+            file.addItem(NSMenuItem(title: "No Action Item", action: nil, keyEquivalent: ""))
+            let fileItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+            fileItem.submenu = file
+            main.addItem(fileItem)
+
+            let edit = NSMenu(title: "Edit")
+            let undo = NSMenuItem(title: "Undo", action: #selector(Target.ping), keyEquivalent: "z")
+            undo.target = target
+            edit.addItem(undo)
+            let nested = NSMenu(title: "Nested")
+            let deepAction = NSMenuItem(title: "Deep Action", action: #selector(Target.ping), keyEquivalent: "d")
+            deepAction.target = target
+            deepAction.keyEquivalentModifierMask = [.command, .shift]
+            nested.addItem(deepAction)
+            let nestedItem = NSMenuItem(title: "Nested", action: nil, keyEquivalent: "")
+            nestedItem.submenu = nested
+            edit.addItem(nestedItem)
+            let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+            editItem.submenu = edit
+            main.addItem(editItem)
+
+            let commands = CommandMenu.flatten(main)
+            let titles = commands.map(\.title)
+
+            guard !titles.contains("Disabled Thing") else { throw Fail(description: "disabled item leaked into the flattened list") }
+            guard !titles.contains("No Action Item") else { throw Fail(description: "nil-action item leaked into the flattened list") }
+            guard !titles.contains("File"), !titles.contains("Edit"), !titles.contains("Nested") else {
+                throw Fail(description: "a submenu-parent item leaked in as a command: \(titles)")
+            }
+            guard commands.count == 3 else { throw Fail(description: "expected 3 commands, got \(commands.count): \(titles)") }
+
+            guard let newRecordingCmd = commands.first(where: { $0.title == "New Recording" }), newRecordingCmd.path == ["File"],
+                  newRecordingCmd.keyEquivalent == "⌘N" else {
+                throw Fail(description: "New Recording path/key wrong: \(String(describing: commands.first(where: { $0.title == "New Recording" })))")
+            }
+            guard let deepActionCmd = commands.first(where: { $0.title == "Deep Action" }), deepActionCmd.path == ["Edit", "Nested"],
+                  deepActionCmd.keyEquivalent == "⇧⌘D" else {
+                throw Fail(description: "Deep Action path/key wrong: \(String(describing: commands.first(where: { $0.title == "Deep Action" })))")
+            }
+
+            // Filtering: substring, subsequence, and no-match queries.
+            let byDeep = commands.filter { $0.matches("deep") }
+            guard byDeep.count == 1, byDeep[0].title == "Deep Action" else {
+                throw Fail(description: "query 'deep' matched \(byDeep.map(\.title)), want just Deep Action")
+            }
+            let bySubsequence = commands.filter { $0.matches("nwrec") } // subsequence of "File New Recording"
+            guard bySubsequence.contains(where: { $0.title == "New Recording" }) else {
+                throw Fail(description: "subsequence query 'nwrec' should match New Recording, matched \(bySubsequence.map(\.title))")
+            }
+            let byNothing = commands.filter { $0.matches("zzz-nope") }
+            guard byNothing.isEmpty else { throw Fail(description: "query 'zzz-nope' should match nothing, got \(byNothing.map(\.title))") }
+
+            // Perform: invokes the item's action on its target exactly once.
+            guard let toPerform = commands.first(where: { $0.title == "Undo" }) else { throw Fail(description: "Undo missing from flattened list") }
+            target.pingCount = 0
+            guard CommandMenu.perform(toPerform) else { throw Fail(description: "CommandMenu.perform returned false") }
+            guard target.pingCount == 1 else { throw Fail(description: "expected pingCount == 1, got \(target.pingCount)") }
+        },
+        // Offscreen render of `CheatSheetView` (SPEC §7.3's table, static SwiftUI grid) to a PNG for
+        // visual comparison against the spec table — not part of the automated pass/fail contract.
+        "cheatsheet-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: cheatsheet-png <out.png>") }
+            try await MainActor.run {
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 460),
+                                       styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .darkAqua) // forced before the hosting view exists
+                let hosting = NSHostingView(rootView: CheatSheetView())
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 640, height: 460)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                let fitted = hosting.fittingSize
+                hosting.frame = NSRect(origin: .zero, size: fitted)
+                window.setContentSize(fitted)
+                hosting.layoutSubtreeIfNeeded()
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try data.write(to: URL(fileURLWithPath: outPath))
+                print("wrote \(outPath)")
+            }
+        },
+        // Offscreen render of `CommandMenuView` with a small fixture command list (mixed path depths,
+        // with/without key equivalents) to a PNG for visual comparison — not part of the automated
+        // pass/fail contract (that's the `command-menu` case).
+        "command-menu-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: command-menu-png <out.png>") }
+            try await MainActor.run {
+                func fixture(_ title: String, _ path: [String], _ key: String) -> Command {
+                    Command(title: title, path: path, keyEquivalent: key,
+                            item: NSMenuItem(title: title, action: nil, keyEquivalent: ""))
+                }
+                let commands = [
+                    fixture("New Recording", ["File"], "⌘N"),
+                    fixture("Open…", ["File"], "⌘O"),
+                    fixture("Undo", ["Edit"], "⌘Z"),
+                    fixture("Split", ["Edit"], ""),
+                    fixture("Deep Action", ["Edit", "Nested"], "⇧⌘D"),
+                    fixture("Export…", ["Export"], "⌘E"),
+                ]
+
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+                                       styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .darkAqua) // forced before the hosting view exists
+                let hosting = NSHostingView(rootView: CommandMenuView(commands: commands, onClose: {}))
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 480, height: 420)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                let fitted = hosting.fittingSize
+                hosting.frame = NSRect(origin: .zero, size: NSSize(width: 480, height: fitted.height))
+                window.setContentSize(hosting.frame.size)
+                hosting.layoutSubtreeIfNeeded()
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try data.write(to: URL(fileURLWithPath: outPath))
+                print("wrote \(outPath)")
+            }
+        },
+        // Dev/QA tool (agent UI testing): screen/mouse/keyboard driver, see UIDriver.swift.
+        "screenshot": { args in try await UIDriver.screenshot(args) },
+        "click": { args in try await UIDriver.click(args) },
+        "key": { args in try await UIDriver.key(args) },
+        "drag": { args in try await UIDriver.drag(args) },
     ]
 
     /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and

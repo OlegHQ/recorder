@@ -296,13 +296,16 @@ Update the "Done" column whenever you tick a task.
   - PARTIAL: `CountdownOverlay.run(seconds:over:) async -> Bool` merged; `RecordingController.begin` must await it (T-111), then HUMAN check.
   - HUMAN: 3/5/10 work; Esc cancels.
 
-- [ ] **T-203 Recording widget** · SPEC §4.7 mockup — File `Recording/RecordingWidgetPanel.swift`. `FloatingPanel` with timer (`Theme.timecodeFont`), Finish / Pause⇄Resume / Restart / Delete (confirm alert). Right-click → Hide. Replaces the M1 status-item-only UI (status item keeps the same actions).
+- [~] **T-203 Recording widget** · SPEC §4.7 mockup — File `Recording/RecordingWidgetPanel.swift`. `FloatingPanel` with timer (`Theme.timecodeFont`), Finish / Pause⇄Resume / Restart / Delete (confirm alert). Right-click → Hide. Replaces the M1 status-item-only UI (status item keeps the same actions).
+  - WAITING ON HUMAN/UI-driver: merged. Widget appears at record start (shown BEFORE the capture filter snapshot so it is excluded), Finish/Pause/Restart/Delete (confirm alert, default = Keep Recording); AC-REC-2 pause test.
   - HUMAN: AC-REC-2 (pause 5 s: duration excludes it, no audio click, cursor aligned later in M4).
 
-- [ ] **T-204 Global hotkeys** — File `App/Hotkeys.swift` (do not reuse `EventRecorder`'s tap; it only lives while recording): `NSEvent.addGlobalMonitorForEvents(matching: .keyDown)` + local monitor; one `[(keyCode, mods, action)]` table matching every global default of SPEC §4.7: `⌃⌥⌘R` (start: show toolbar / finish), `⌃⌥⌘P` (pause/resume), `⌃⌘↩` (toolbar), `⌥⌘3/4/5` (toolbar + display/window/area picker), `⌥⌘Z` (open last project — no-op until T-207b wires it). All but R/P are ignored while recording (AC-APP-4). `// ponytail: fixed bindings; rebinding UI is T-609.`
+- [~] **T-204 Global hotkeys** — File `App/Hotkeys.swift` (do not reuse `EventRecorder`'s tap; it only lives while recording): `NSEvent.addGlobalMonitorForEvents(matching: .keyDown)` + local monitor; one `[(keyCode, mods, action)]` table matching every global default of SPEC §4.7: `⌃⌥⌘R` (start: show toolbar / finish), `⌃⌥⌘P` (pause/resume), `⌃⌘↩` (toolbar), `⌥⌘3/4/5` (toolbar + display/window/area picker), `⌥⌘Z` (open last project — no-op until T-207b wires it). All but R/P are ignored while recording (AC-APP-4). `// ponytail: fixed bindings; rebinding UI is T-609.`
+  - WAITING ON HUMAN: `--selftest menus` validates the hotkey table; hotkeys while another app is focused need a human (AC-APP-4).
   - HUMAN: hotkeys work while another app is focused.
 
-- [ ] **T-205 Hide dock icon / desktop icons** — `NSApp.setActivationPolicy(.accessory)` on start, `.regular` on finish. Desktop icons: answer SPEC open question 3 empirically (list `SCShareableContent.windows` where `owningApplication?.bundleIdentifier == "com.apple.finder"` and inspect `windowLayer`/title), exclude them, **write the answer into SPEC §9**.
+- [~] **T-205 Hide dock icon / desktop icons** — `NSApp.setActivationPolicy(.accessory)` on start, `.regular` on finish. Desktop icons: answer SPEC open question 3 empirically (list `SCShareableContent.windows` where `owningApplication?.bundleIdentifier == "com.apple.finder"` and inspect `windowLayer`/title), exclude them, **write the answer into SPEC §9**.
+  - WAITING ON HUMAN: SPEC §9 Q3 answered empirically (one Finder window at desktop-icon level); eyeball both toggles in a real recording.
   - HUMAN: both toggles behave.
 
 - [~] **T-206 Window resize presets** · SPEC §4.4 menu — File `Recording/WindowResizer.swift`: `static func resize(pid: pid_t, windowTitle: String?, to: CGSize)` via `AXUIElementCreateApplication` → `kAXWindowsAttribute` → match by title/frame → set `kAXSizeAttribute`. Add the `[Resize]` `NSMenu` to the window picker; sizes larger than the screen are disabled; saved sizes in `UserDefaults`; `Custom…` = `NSAlert` with two text fields.
@@ -314,7 +317,8 @@ Update the "Done" column whenever you tick a task.
   - HUMAN: values persist across relaunch.
   - WAITING ON HUMAN: confirm `⌘,` (main menu) and the toolbar gear menu's "Settings…" item both open the Settings window, and that projects-folder/fps/countdown/toggle changes persist across a relaunch.
 
-- [ ] **T-207b Status-item menu** · SPEC §8 mockup (`reference/status-item-menu.png`) — in `AppDelegate`: rebuild the idle status menu exactly as SPEC §8 (SF Symbols `record.circle`, `display`, `macwindow`, `rectangle.dashed`; key equivalents as listed). `Record Display/Window/Area` = `RecordingSettings.shared.mode = …` + `ToolbarController.shared.show()` + open that picker (reuse what the toolbar mode buttons call — one function, also used by T-204's table). `Show Recorder in Dock` = one persisted `Bool` → `NSApp.setActivationPolicy`, per the §8 rule. `Open Last Project` = newest `*.recorder` by modification date in the projects folder (opens in Finder until the editor exists in M3, then the editor). Main-menu File items reuse the same selectors.
+- [~] **T-207b Status-item menu** · SPEC §8 mockup (`reference/status-item-menu.png`) — in `AppDelegate`: rebuild the idle status menu exactly as SPEC §8 (SF Symbols `record.circle`, `display`, `macwindow`, `rectangle.dashed`; key equivalents as listed). `Record Display/Window/Area` = `RecordingSettings.shared.mode = …` + `ToolbarController.shared.show()` + open that picker (reuse what the toolbar mode buttons call — one function, also used by T-204's table). `Show Recorder in Dock` = one persisted `Bool` → `NSApp.setActivationPolicy`, per the §8 rule. `Open Last Project` = newest `*.recorder` by modification date in the projects folder (opens in Finder until the editor exists in M3, then the editor). Main-menu File items reuse the same selectors.
+  - WAITING ON HUMAN: `--selftest menus` OK (titles/order/key equivalents vs SPEC §8/§4.7, targets set); visual check vs `reference/status-item-menu.png`.
   - HUMAN: menu matches the mockup; AC-APP-4.
 
 - [ ] **T-208 M2 gate** — HUMAN: full pass of SPEC §4 mockups vs the app; list deviations in §Log.
@@ -605,8 +609,10 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - PARTIAL: Core pipeline stages (shake removal, loop, rotation, always-arrow) + 4 tests merged; Cursor-tab controls and Edit ▸ Hide Cursor in Selected Clip remain.
 - [x] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
 - [x] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
-- [ ] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
-- [ ] **T-608 Cheat sheet (⌘/)** — static SwiftUI grid of SPEC §7.3.
+- [~] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
+  - WAITING: `--selftest command-menu` OK + PNG reviewed by lane agent; `CommandMenu.show()` still needs its ⌘K menu binding (T-311).
+- [~] **T-608 Cheat sheet (⌘/)** — static SwiftUI grid of SPEC §7.3.
+  - WAITING: all 19 rows of SPEC §7.3 rendered (`cheatsheet-png`); `CheatSheet.show()` still needs its ⌘/ menu binding (T-311).
 - [ ] **T-609 Shortcut settings + Copy frame (⇧⌘C)** — rebind the global hotkeys (the T-204 table); copy current composed frame to the pasteboard as PNG.
 
 ---
@@ -668,3 +674,5 @@ T-310 / T-414 / core halves of T-503, T-602, T-605 · 2026-09-18 · merged; see 
 NOTE · agents can run TCC-gated checks through LaunchServices: `open -n --stdout OUT --stderr ERR build/Recorder.app --args --selftest <name> …` (shell-launched binaries inherit the terminal's missing grants).
 T-606 · 2026-09-18 · verified on master: `--selftest import` OK (package contents, measured source, single full clip, original untouched), staged via `stageThenMove` · deviations: no fps on `Source` (not in SPEC §5); imports get kind `.display`, no audio/camera flags
 T-605 · 2026-09-18 · verified on master: Core `presetRoundTripAndApply` + `--selftest presets` OK (save/list/apply through EditorModel = 1 undo step, export/import round-trip, delete) · deviations: "Presets ▾" menu sits above the inspector tab bar (SPEC gives no location)
+T-203/T-204/T-205/T-207b · 2026-09-18 · verified on master: `make app`, 47 tests, `--selftest menus` OK, real-TCC `record display 3` still OK after the `elapsed` refactor (3.0 s, 2880×1800), `finder-windows` answered SPEC §9 Q3 · deviations: `CaptureSession.elapsed` now host-clock based; widget shown before the exclusion snapshot (follow-up fix); Delete alert default = Keep Recording
+T-607/T-608 · 2026-09-18 · merged: `command-menu` selftest OK; root fix `NSApp` → `NSApplication.shared` (nil under --selftest); menu bindings pending T-311
