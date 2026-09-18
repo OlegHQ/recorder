@@ -20,6 +20,10 @@ final class PreviewView: MTKView {
     private let commandQueue: MTLCommandQueue
 
     private var player: AVPlayer?
+    /// T-504 selftest seam: the live item's identity/`audioMix`, so `audio-mix` can assert a
+    /// volume-only edit swaps `audioMix` without replacing the `AVPlayerItem` (no composition
+    /// rebuild). Not `private` — read-only, used only by `AudioMixSelfTest.swift`.
+    var currentItemForTest: AVPlayerItem? { player?.currentItem }
     private var screenOutput: AVPlayerItemVideoOutput?
     private var lastScreenPixelBuffer: CVPixelBuffer?
     private var statusObservation: NSKeyValueObservation?
@@ -35,6 +39,15 @@ final class PreviewView: MTKView {
     private var isSeeking = false
     private var pendingSeekTime: Double?
     private var lastClips: [Clip]
+    private var lastAudio: Audio
+
+    // T-504: the live item's mic/system composition tracks, kept so volumes/mutes can rebuild just
+    // the `AVAudioMix` (`refreshAudioMix`) without a composition rebuild/playback hiccup.
+    private var liveMicTrack: AVMutableCompositionTrack?
+    private var liveSystemTrack: AVMutableCompositionTrack?
+    // T-504: SOURCE time of the last playback tick's click-sound check — reset on every play start
+    // so a big seek/scrub never floods stale clicks (see `playClickSoundIfCrossed`).
+    private var lastClickCheckSourceTime: Double?
 
     /// Bounds the "no frame yet" redraw retry below (SPEC §6.2: "paused always shows a frame").
     private var pendingFrameRetries = 0
@@ -59,6 +72,7 @@ final class PreviewView: MTKView {
     init(model: EditorModel) {
         self.model = model
         self.lastClips = model.project.clips
+        self.lastAudio = model.project.audio
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             fatalError("no Metal device")
         }
@@ -158,6 +172,7 @@ final class PreviewView: MTKView {
         // only feature; leaving the player wherever the last hover looked would desync it from
         // `model.playhead`).
         if hoverTime != nil { performSeek(to: model.playhead) }
+        lastClickCheckSourceTime = model.timeMap.sourceTime(atOutput: model.playhead)
         model.isPlaying = true
         player.rate = rate
         cameraPlayer?.rate = rate
@@ -187,12 +202,29 @@ final class PreviewView: MTKView {
     @objc private func tick(_ link: CADisplayLink) {
         guard let player, let item = player.currentItem else { return }
         let t = player.currentTime().seconds
+        playClickSoundIfCrossed(outputTime: t)
         model.playhead = t
         if item.duration.isValid, t >= item.duration.seconds - 1.0 / 60 {
             pause()
             return
         }
         needsDisplay = true
+    }
+
+    /// T-504: "Mouse click sound" — preview plays it live via `NSSound` at each left `.down` event
+    /// crossed during playback (export mixes it into the exported audio instead, `Exporter`'s
+    /// `addClickTrack`). Instantiated fresh per play (cheap: `byReference: true` just holds the
+    /// bundled URL) so back-to-back clicks each get their own playback instead of fighting over one
+    /// shared, possibly-still-playing `NSSound`.
+    private static let clickSoundURL = Bundle.main.url(forResource: "click", withExtension: "caf")
+
+    private func playClickSoundIfCrossed(outputTime t: Double) {
+        guard model.project.cursor.clickSound, let url = Self.clickSoundURL else { return }
+        let sourceNow = model.timeMap.sourceTime(atOutput: t)
+        defer { lastClickCheckSourceTime = sourceNow }
+        guard let last = lastClickCheckSourceTime, sourceNow > last else { return }
+        guard model.events.clicks().contains(where: { $0.t > last && $0.t <= sourceNow }) else { return }
+        NSSound(contentsOf: url, byReference: true)?.play()
     }
 
     // MARK: - Keys (SPEC §7.3): Space, ←/→, ⇧←/⇧→, Home/End, J/K/L
@@ -222,10 +254,18 @@ final class PreviewView: MTKView {
                 guard let self else { return }
                 self.updateZoomTargetOverlay()
                 let clips = self.model.project.clips
+                let audio = self.model.project.audio
                 if clips != self.lastClips {
                     self.lastClips = clips
+                    self.lastAudio = audio
                     self.rebuildComposition()
                 } else {
+                    // T-504: volumes/mutes → rebuild ONLY the `AVAudioMix` on the live item, not a
+                    // full composition rebuild (no playback hiccup).
+                    if audio != self.lastAudio {
+                        self.lastAudio = audio
+                        self.refreshAudioMix()
+                    }
                     self.needsDisplay = true
                 }
                 self.observeProject()
@@ -254,13 +294,25 @@ final class PreviewView: MTKView {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
-                await MainActor.run { self.attach(composition: composition, audioMix: audioMix, resumeSeconds: resumeSeconds) }
+                let (composition, audioMix, micTrack, systemTrack) = try await makeComposition(package: packageURL, project: project)
+                await MainActor.run {
+                    self.liveMicTrack = micTrack
+                    self.liveSystemTrack = systemTrack
+                    self.attach(composition: composition, audioMix: audioMix, resumeSeconds: resumeSeconds)
+                }
             } catch {
                 // ponytail: a package whose screen.mov is missing/too short just shows an empty
                 // preview; recording/onboarding never hands the editor a project without one.
             }
         }
+    }
+
+    /// T-504: volumes/mutes changed but `clips` didn't — swap the live item's `AVAudioMix` for a
+    /// freshly built one over the SAME mic/system tracks (`makeAudioMix`, `FrameSource.swift`).
+    /// `AVPlayerItem.audioMix` takes effect live, no `replaceCurrentItem`/decode restart.
+    private func refreshAudioMix() {
+        guard let item = player?.currentItem else { return }
+        item.audioMix = makeAudioMix(project: model.project, micTrack: liveMicTrack, systemTrack: liveSystemTrack)
     }
 
     private func attach(composition: AVMutableComposition, audioMix: AVAudioMix, resumeSeconds: Double) {

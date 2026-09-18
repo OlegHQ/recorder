@@ -177,7 +177,7 @@ extension ZoomTargetMapping {
         let sourceTime = (zoom.start + zoom.end) / 2
         let outputTime = model.timeMap.outputTime(atSource: sourceTime) ?? sourceTime
 
-        let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
+        let (composition, audioMix, _, _) = try await makeComposition(package: packageURL, project: project)
         let item = AVPlayerItem(asset: composition)
         item.audioMix = audioMix
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [

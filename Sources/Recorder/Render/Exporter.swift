@@ -70,7 +70,34 @@ final class Exporter {
         let outputDuration = await model.timeMap.outputDuration
         try? FileManager.default.removeItem(at: destination)
 
-        let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
+        // T-504: `denoise` is applied EXPORT ONLY (preview always plays the raw mic) — pre-process
+        // mic.m4a into a temp file and hand its URL to `makeComposition` as the mic track's source.
+        // `// ponytail: no real noise suppression and no preview; add an audio tap if users ask.`
+        var micOverrideURL: URL?
+        var denoiseTempDir: URL?
+        if project.audio.denoise, project.source.hasMic {
+            let micURL = packageURL.appendingPathComponent("mic.m4a")
+            if FileManager.default.fileExists(atPath: micURL.path) {
+                let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-denoise-\(UUID().uuidString)")
+                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+                let processedURL = tempDir.appendingPathComponent("mic-denoised.caf")
+                try denoiseMicAudio(input: micURL, output: processedURL)
+                micOverrideURL = processedURL
+                denoiseTempDir = tempDir
+            }
+        }
+        defer { if let denoiseTempDir { try? FileManager.default.removeItem(at: denoiseTempDir) } }
+
+        let (composition, audioMix, _, _) = try await makeComposition(package: packageURL, project: project, micURL: micOverrideURL)
+
+        // T-504: "Mouse click sound" — mixed into the export audio at each left `.down` event that
+        // survives the clip cuts (export only; the preview plays it live via `NSSound`,
+        // `PreviewView.playClickSoundIfCrossed`).
+        if project.cursor.clickSound {
+            let clicks = await model.events.clicks()
+            let timeMap = await model.timeMap
+            try? await addClickTrack(to: composition, audioMix: audioMix, clicks: clicks, timeMap: timeMap)
+        }
 
         guard let device = MTLCreateSystemDefaultDevice(), let commandQueue = device.makeCommandQueue() else {
             throw ExportError.failed("no Metal device")
@@ -233,6 +260,88 @@ final class Exporter {
     }
 }
 
+// MARK: - T-504 audio: export-only denoise + click sound
+
+/// SPEC/T-504: 80 Hz one-pole high-pass (removes hum/rumble) then peak normalise to −1 dBFS, over
+/// the whole mic file — a plain array pass, no `AVAudioEngine`/`AVAudioUnit` graph needed for a
+/// static-file transform. `// ponytail: no real noise suppression, a high-pass + normalise only;
+/// add a spectral denoiser only if users ask.` Writes linear PCM (`.caf`) so decoding it back for
+/// the composition never re-compresses on top of the source AAC.
+private func denoiseMicAudio(input: URL, output: URL) throws {
+    let file = try AVAudioFile(forReading: input)
+    let format = file.processingFormat
+    let frameCount = AVAudioFrameCount(file.length)
+    guard frameCount > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+        throw Exporter.ExportError.failed("couldn't allocate a PCM buffer for \(input.lastPathComponent)")
+    }
+    try file.read(into: buffer)
+    guard let data = buffer.floatChannelData else {
+        throw Exporter.ExportError.failed("\(input.lastPathComponent) has no float channel data")
+    }
+    let frames = Int(buffer.frameLength)
+    let channels = Int(format.channelCount)
+
+    let dt = 1.0 / format.sampleRate
+    let rc = 1.0 / (2 * Double.pi * 80)
+    let alpha = Float(rc / (rc + dt))
+    for c in 0..<channels {
+        let channel = data[c]
+        var prevX: Float = 0, prevY: Float = 0
+        for i in 0..<frames {
+            let x = channel[i]
+            let y = alpha * (prevY + x - prevX)
+            channel[i] = y
+            prevX = x; prevY = y
+        }
+    }
+
+    var peak: Float = 0
+    for c in 0..<channels {
+        let channel = data[c]
+        for i in 0..<frames { peak = max(peak, abs(channel[i])) }
+    }
+    if peak > 0 {
+        let targetPeak = Float(pow(10, -1.0 / 20))   // −1 dBFS
+        let gain = targetPeak / peak
+        for c in 0..<channels {
+            let channel = data[c]
+            for i in 0..<frames { channel[i] *= gain }
+        }
+    }
+
+    let outFile = try AVAudioFile(forWriting: output, settings: format.settings)
+    try outFile.write(from: buffer)
+}
+
+/// SPEC/T-504: mixes `Resources/click.caf` into the export audio at each left `.down` event that
+/// survives the clip cuts (`TimeMap.outputTime(atSource:)` — a click inside a removed range simply
+/// has no output time and is skipped). Adds one more composition audio track + `AVAudioMix` input
+/// parameter alongside mic/system, so it goes through the same reader/writer pass as everything else.
+private func addClickTrack(to composition: AVMutableComposition, audioMix: AVMutableAudioMix, clicks: [InputEvent], timeMap: TimeMap) async throws {
+    guard let clickURL = Bundle.main.url(forResource: "click", withExtension: "caf") else { return }
+    let clickAsset = AVURLAsset(url: clickURL)
+    guard let clickSource = try await clickAsset.loadTracks(withMediaType: .audio).first else { return }
+    let clickDuration = try await clickAsset.load(.duration)
+    guard clickDuration > .zero,
+          let clicksTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { return }
+
+    var lastEnd = CMTime.zero
+    for event in clicks {
+        guard let outputSeconds = timeMap.outputTime(atSource: event.t) else { continue }
+        let start = CMTime(seconds: outputSeconds, preferredTimescale: 600)
+        // ponytail: clicks closer together than the click sound's own length are dropped, not
+        // layered — `insertTimeRange` can't overlap within one track, and back-to-back clicks that
+        // close together are rare enough not to warrant a second track.
+        guard start >= lastEnd else { continue }
+        try? clicksTrack.insertTimeRange(CMTimeRange(start: .zero, duration: clickDuration), of: clickSource, at: start)
+        lastEnd = start + clickDuration
+    }
+
+    let params = AVMutableAudioMixInputParameters(track: clicksTrack)
+    params.setVolume(1, at: .zero)
+    audioMix.inputParameters += [params]
+}
+
 // MARK: - GIF export (T-507)
 
 /// SPEC §6.8's GIF row: same decode/compositor pipeline as `run()`'s MP4 loop above — `makeComposition`,
@@ -252,7 +361,7 @@ extension Exporter {
             print("warning: GIF export duration is \(Int(outputDuration))s — SPEC §6.8 recommends keeping GIFs under 60s")
         }
 
-        let (composition, _) = try await makeComposition(package: packageURL, project: project)
+        let (composition, _, _, _) = try await makeComposition(package: packageURL, project: project)
 
         guard let device = MTLCreateSystemDefaultDevice(), let commandQueue = device.makeCommandQueue() else {
             throw ExportError.failed("no Metal device")
@@ -482,7 +591,7 @@ enum ExporterSelfTest {
         let outputSize = compositor.outputSize(for: project, longEdge: 960)
         let width = Int(outputSize.width), height = Int(outputSize.height)
 
-        let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
+        let (composition, audioMix, _, _) = try await makeComposition(package: packageURL, project: project)
         let videoTracks = composition.tracks(withMediaType: .video)
         let hasCamera = videoTracks.count > 1
 

@@ -622,7 +622,7 @@ extension Compositor {
         let model = try loadEditorModel(package: packageURL)
         let project = model.project
 
-        let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
+        let (composition, audioMix, _, _) = try await makeComposition(package: packageURL, project: project)
         let item = AVPlayerItem(asset: composition)
         item.audioMix = audioMix
         item.audioTimePitchAlgorithm = .spectral

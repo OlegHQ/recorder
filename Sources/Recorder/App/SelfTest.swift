@@ -82,6 +82,30 @@ enum SelfTest {
             }
             print("wrote 12 wallpapers to \(dir.path)")
         },
+        // T-504: throwaway generator (like `make-wallpapers` above) — a few-ms decaying tick
+        // (2200 Hz tone, fast exponential decay), synthesized ourselves via `AVAudioFile` (no
+        // third-party assets). Run once from the repo root (`--selftest make-click-sound`) and
+        // commit the result; re-run only if the sound needs to change.
+        "make-click-sound": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let url = URL(fileURLWithPath: "Resources/click.caf")
+            let sampleRate = 44_100.0
+            let duration = 0.04
+            guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(sampleRate * duration)) else {
+                throw Fail(description: "couldn't allocate a PCM buffer for click.caf")
+            }
+            buffer.frameLength = buffer.frameCapacity
+            let channel = buffer.floatChannelData![0]
+            for i in 0..<Int(buffer.frameLength) {
+                let t = Double(i) / sampleRate
+                let envelope = exp(-t * 90)
+                channel[i] = Float(sin(2 * .pi * 2200 * t) * envelope)
+            }
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+            print("wrote \(url.path)")
+        },
         "render": { args in try Compositor.runRenderSelfTest(args) },
         "composition": { args in try await runCompositionSelfTest(args) },
         "preview-frame": { args in try await Compositor.runPreviewFrameSelfTest(args) },
@@ -1599,6 +1623,9 @@ enum SelfTest {
         "zoom-target-png": { args in try await ZoomTargetMapping.runPNGSelfTest(args) },
         // AC-TL-7: hover preview (see `PreviewView.hoverTime`).
         "hover-preview": { args in try await PreviewView.runHoverPreviewSelfTest(args) },
+        // T-504: live AVAudioMix rebuild, export volume/mute/denoise/click (see
+        // `Render/AudioMixSelfTest.swift`).
+        "audio-mix": { args in try await AudioMixSelfTest.run(args) },
     ]
 
     /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and

@@ -9,7 +9,18 @@ enum FrameSourceError: Error { case missingScreenTrack, trackCreationFailed }
 /// clip) for screen, camera, mic, system — used by both the preview player (T-306) and the
 /// exporter so clip cuts/speed changes and audio come from the same source (SPEC §6.2, §5).
 /// Track order: video[0] = screen, video[1] = camera (if present); audio[0] = mic, audio[1] = system.
-func makeComposition(package: URL, project: Project) async throws -> (AVMutableComposition, AVAudioMix) {
+///
+/// Also returns the mic/system `AVMutableCompositionTrack`s (`nil` when the project has none) so a
+/// caller can rebuild just the `AVAudioMix` later (T-504: `PreviewView.refreshAudioMix` — volumes/
+/// mutes change without a composition rebuild/playback hiccup) via `makeAudioMix` below, without
+/// re-inserting any media.
+///
+/// `micURL`, when given, replaces `mic.m4a` as the mic track's SOURCE (T-504: the exporter's
+/// export-only denoise pass builds a processed temp file and passes it here; preview never does,
+/// so it always plays the raw mic, per the task).
+func makeComposition(package: URL, project: Project, micURL: URL? = nil) async throws
+    -> (composition: AVMutableComposition, audioMix: AVMutableAudioMix,
+        micTrack: AVMutableCompositionTrack?, systemTrack: AVMutableCompositionTrack?) {
     let composition = AVMutableComposition()
 
     // Every `AVURLAsset` below is kept alive (a `var …Asset: AVURLAsset?` at function scope, not a
@@ -48,7 +59,7 @@ func makeComposition(package: URL, project: Project) async throws -> (AVMutableC
     var micTrack: AVMutableCompositionTrack?
     var micSource: AVAssetTrack?
     if project.source.hasMic {
-        let micAsset = AVURLAsset(url: package.appendingPathComponent("mic.m4a"))
+        let micAsset = AVURLAsset(url: micURL ?? package.appendingPathComponent("mic.m4a"))
         micAssetKeepAlive = micAsset
         micSource = try await micAsset.loadTracks(withMediaType: .audio).first
         if micSource != nil {
@@ -87,6 +98,17 @@ func makeComposition(package: URL, project: Project) async throws -> (AVMutableC
         cursor = cursor + outputDuration
     }
 
+    let audioMix = makeAudioMix(project: project, micTrack: micTrack, systemTrack: systemTrack)
+    // `audioTimePitchAlgorithm = .spectral` (SPEC §6.2) is a property of the AVPlayerItem/
+    // AVAssetExportSession that plays this composition, not of the composition/mix themselves —
+    // set on the `AVPlayerItem` in `PreviewView.attach` (T-306) and the exporter (T-505).
+    return (composition, audioMix, micTrack, systemTrack)
+}
+
+/// T-504: the volume/mute half of `makeComposition` above, factored out so a live `AVPlayerItem`'s
+/// mix can be rebuilt from the SAME already-built mic/system tracks when only `project.audio`
+/// changes — no composition rebuild, no playback hiccup (`PreviewView.refreshAudioMix`).
+func makeAudioMix(project: Project, micTrack: AVMutableCompositionTrack?, systemTrack: AVMutableCompositionTrack?) -> AVMutableAudioMix {
     var inputParameters: [AVMutableAudioMixInputParameters] = []
     if let micTrack {
         let params = AVMutableAudioMixInputParameters(track: micTrack)
@@ -100,10 +122,7 @@ func makeComposition(package: URL, project: Project) async throws -> (AVMutableC
     }
     let audioMix = AVMutableAudioMix()
     audioMix.inputParameters = inputParameters
-    // `audioTimePitchAlgorithm = .spectral` (SPEC §6.2) is a property of the AVPlayerItem/
-    // AVAssetExportSession that plays this composition, not of the composition/mix themselves —
-    // set on the `AVPlayerItem` in `PreviewView.attach` (T-306) and the exporter (T-505).
-    return (composition, audioMix)
+    return audioMix
 }
 
 /// `AVPlayerItemVideoOutput` has no per-track selection — it always yields the composited/"current"
@@ -163,7 +182,7 @@ func runCompositionSelfTest(_ args: [String]) async throws {
     guard let packagePath = args.first else { throw SelfTestArgError.usage("composition <package>") }
     let package = URL(fileURLWithPath: packagePath)
     let project = try Project.load(from: package.appendingPathComponent("project.json"))
-    let (composition, _) = try await makeComposition(package: package, project: project)
+    let (composition, _, _, _) = try await makeComposition(package: package, project: project)
 
     let actual = composition.duration.seconds
     let expected = TimeMap(project.clips).outputDuration
