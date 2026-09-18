@@ -42,7 +42,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | Milestone | Tasks | Done |
 |---|---|---|
 | M0 Foundations | T-001…T-006 | 6/6 |
-| M1 Record | T-101…T-114 | 1/14 |
+| M1 Record | T-101…T-114 | 2/14 |
 | M2 Record+ | T-201…T-208 | 0/8 |
 | M3 Editor shell | T-301…T-313 | 0/13 |
 | M4 Timeline | T-401…T-418 | 0/18 |
@@ -143,7 +143,7 @@ Update the "Done" column whenever you tick a task.
   - HUMAN: grant both permissions to `/Applications/Recorder.app` after `make install`; confirm AC-ONB-1/2/3.
   - WAITING ON HUMAN: run `make install`, grant Screen Recording and Accessibility to `/Applications/Recorder.app` in System Settings, then confirm AC-ONB-1 (window appears fresh / doesn't when both granted), AC-ONB-2 (rows flip within 2 s, Relaunch button appears/works if needed), AC-ONB-3 (Continue disabled until both granted).
 
-- [ ] **T-103 Floating panel base**
+- [x] **T-103 Floating panel base**
   - File: `Sources/Recorder/Recording/FloatingPanel.swift`
   ```swift
   /// Borderless, non-activating, above everything, on all Spaces, HUD material, radius 16. Every recording-flow window uses this.
@@ -587,3 +587,4 @@ T-003 · 2026-09-18 · HUMAN confirmed: user ran the app, menu bar is fine · de
 T-006 · 2026-09-18 · verified: `make test FILTER=eventLog` passes 1/1 (`eventLogRoundTrip`, exercises encode/decode round trip plus `moves()` incl. drag and `clicks()` filtered to left `.down`); `make test` passes 5/5; `make build` succeeds · deviations: none
 T-101 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `build/Recorder.app/Contents/MacOS/Recorder --selftest permissions` prints `screen=false accessibility=false` then `SELFTEST permissions OK`, exit 0; `make test` passes 5/5 · deviations: registered the `permissions` case directly in `SelfTest.swift`'s `cases` dictionary literal (same place `metal` was registered by T-004) rather than adding a second registration mechanism
 T-102 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `make test` passes 5/5; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: AppDelegate's skeleton placeholder window replaced with a conditional show of `OnboardingView` only when `!Permissions.allGranted`; when all granted nothing is shown yet (toolbar arrives in T-104), per task instruction. HUMAN verification of AC-ONB-1/2/3 (needs real TCC grants via `make install`) not yet done — task marked `[~]`.
+T-103 · 2026-09-18 · verified: `make build` succeeds with `Sources/Recorder/Recording/FloatingPanel.swift` added (`FloatingPanel: NSPanel`, `.borderless`/`.nonactivatingPanel`, level `CGShieldingWindowLevel()-1`, `.canJoinAllSpaces`/`.fullScreenAuxiliary`, `isMovableByWindowBackground`, `NSVisualEffectView(.hudWindow)` content wrapper with radius-16 + 1px `Theme.stroke` border, `canBecomeKey == true`, static `allWindowIDs`); `make test` passes 5/5 · deviations: added a `static func register(_ window: NSWindow)` (not in the task's code block) backing the weak window list, since T-107's overlay windows (not `FloatingPanel` instances) also need to register into the same list for `allWindowIDs`/T-106 capture exclusion — `FloatingPanel.init` calls it on itself, no other behavior added.
