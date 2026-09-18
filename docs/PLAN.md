@@ -256,7 +256,8 @@ Update the "Done" column whenever you tick a task.
     Add outputs for `.screen`, `.audio`, `.microphone` on one serial queue. `// ponytail: one queue for all three outputs; split if audio ever drops.`
   - Selftest `record display 3`: records main display 3 s to a temp package; asserts `screen.mov` has a video track, duration 2.5–3.5 s, size == display pixels, `events.json` exists. Verify: run it (needs T-102 HUMAN done).
 
-- [ ] **T-111 Recording flow glue**
+- [~] **T-111 Recording flow glue**
+  - WAITING ON HUMAN: built + merged. Record 10 s of a display, a window and an area → each package has a playable cursor-less `screen.mov` (AC-AREA-2, AC-WIN-3); countdown 3/5/10 + Esc (T-202); camera selected → `camera.mov` present (T-201).
   - File: `Sources/Recorder/Recording/RecordingController.swift`
   ```swift
   @MainActor final class RecordingController {
@@ -270,11 +271,13 @@ Update the "Done" column whenever you tick a task.
   - Do: `begin` → close overlays/toolbar → create `~/Movies/Recorder/Recording <yyyy-MM-dd HH.mm.ss>.recorder/` → `CaptureSession.start`. `finish` → `CaptureSession.finish` → write `events.json` → build `Project` (source, one clip `0…duration`, defaults) → `project.save` → for now `NSWorkspace.shared.activateFileViewerSelecting([package])` (editor arrives in M3). Minimal stop UI for M1: status item title shows `● mm:ss`, its menu gains `Finish Recording`.
   - Verify: HUMAN records 10 s of a display, a window and an area; each package opens in Finder ("Show Package Contents") with playable `screen.mov` **without a cursor**; AC-AREA-2, AC-WIN-3.
 
-- [ ] **T-112 Highlight recorded area**
+- [~] **T-112 Highlight recorded area**
+  - WAITING ON HUMAN: outline visible while recording an area/window, absent from `screen.mov` (AC-TB-1).
   - Do (in `RecordingController`): when `highlightArea` and target is area/window: a click-through overlay window (`ignoresMouseEvents = true`, in `allWindowIDs`) drawing a 2 px accent outline 2 px outside the rect. Remove on finish.
   - HUMAN: outline visible while recording, absent in `screen.mov`. AC-TB-1.
 
-- [ ] **T-113 Crash-safe recording** · AC-REC-3
+- [~] **T-113 Crash-safe recording** · AC-REC-3
+  - WAITING ON HUMAN: `--selftest recover` OK (synthetic orphan package). Human: start recording, `pkill -9 Recorder`, relaunch → project.json exists, screen.mov plays (AC-REC-3).
   - Do: on launch scan the projects folder for packages that have `screen.mov` but no `project.json`; for each, build the default `Project` from the asset's duration/size and save it. (Fragmented writing from T-110 makes the `.mov` readable.)
   - HUMAN: start a recording, run `pkill -9 Recorder`, relaunch: `project.json` now exists in the package and `screen.mov` plays.
 
@@ -406,7 +409,8 @@ Update the "Done" column whenever you tick a task.
 - [ ] **T-307 Editor window** · SPEC §6.1 mockup — File `Editor/EditorWindowController.swift`: `NSSplitView`-free manual layout (preview | 300 pt inspector) over a timeline placeholder (`NSView`, 220 pt, height draggable 160–420). Top bar in the titlebar (`NSTitlebarAccessoryViewController`): `‹ Projects`, title (click = rename), aspect `NSPopUpButton`, Crop, Export (disabled until M5). `RecordingController.finish` and the library now open this window instead of Finder.
   - HUMAN: layout matches the mockup; AC-REC-4 (editor visible < 2 s after Finish).
 
-- [ ] **T-308 Inspector shell + Background tab** · SPEC §6.6 — Files `Editor/Inspector/InspectorView.swift`, `Inspector/BackgroundTab.swift`, `Inspector/LabeledSlider.swift`.
+- [~] **T-308 Inspector shell + Background tab** · SPEC §6.6 — Files `Editor/Inspector/InspectorView.swift`, `Inspector/BackgroundTab.swift`, `Inspector/LabeledSlider.swift`.
+  - WAITING ON HUMAN: `--selftest inspector` OK (1 drag = 1 undo step, autosave); coordinator reviewed `inspector-png` vs §6.6. Human: AC-INS-1 once hosted in the editor window (T-307). Known gap: system `.heic` wallpapers fall back to flat colour until Compositor loads absolute paths.
   - Do: `LabeledSlider(title:, value: Binding<Double>, range:, default:, format:)` — the **only** slider component: label left, value right (double-click to type), ⌥-click resets, wraps `model.beginGesture/commitGesture`. Tab bar with 6 SF Symbol buttons (`1`–`6` keys); non-implemented tabs show `Text("Coming in M4/M5")`. Background tab: kind picker, wallpaper grid (bundled `Resources/Wallpapers/*.jpg` + `/System/Library/Desktop Pictures/*.heic` thumbnails), `ColorPicker`s, image `NSOpenPanel` (copy file into the package as `background.<ext>`), Blur/Padding/Corners/Inset/Shadow sliders.
     Wallpapers: generate 12 abstract gradient JPEGs with a throwaway selftest `make-wallpapers` (Core Image `CILinearGradient`/`CIRadialGradient` blends) and commit them. Update the Makefile `app` target: `cp -R Resources/Wallpapers $(APP)/Contents/Resources/`.
   - HUMAN: AC-INS-1 for every Background control.
@@ -474,7 +478,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   ```
   - Tests (AC-ZM-1): `springStartsAtZeroEndsAtOne` · `criticallyDampedIsMonotonicNoOvershoot` · `stepConvergesToClosedForm` (|step-sim − value(at:)| < 0.01 at dt = 1/240).
 
-- [ ] **T-404 TimelineView: geometry + static drawing** · SPEC §7.1
+- [~] **T-404 TimelineView: geometry + static drawing** · SPEC §7.1
+  - WAITING ON HUMAN: merged; coordinator reviewed `timeline-png` vs §7.1. Human look in the real editor after T-307.
   - File: `Sources/Recorder/Editor/TimelineView.swift` (+ `TimelineGeometry.swift` in **Core**, pure, tested).
   ```swift
   // Core
@@ -490,10 +495,12 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - View: flipped `NSView`, `wantsLayer = true`, draws in `draw(_ dirtyRect:)` with Core Graphics only. Lanes top→bottom: ruler 22, clip 44, zoom 32, layout 28 (only if `source.hasCamera`), mask 28 (hidden until T-601). Blocks: rounded rect radius 10, fill from Theme (`clip`, `accent`, `layout`, `mask`), 1 px inner highlight, label (`🔍 2.0× A`, `2× ⏩`). Zoom x-extents = `timeMap.outputTime(atSource:)` of start/end, clipped to visible clips (torn edge `⌇` when partially hidden). Playhead + cap + timecode. Observe `model` with `withObservationTracking` → `needsDisplay = true`.
   - HUMAN: static look vs SPEC §7.1 mockup.
 
-- [ ] **T-405 Timeline navigation** · SPEC §7.2 "Navigation" — `scrollWheel` (pan; `⌘` = zoom at mouse), `magnify(with:)` (pinch at mouse), `⌘=`/`⌘-` (anchor playhead), `⇧Z`/Fit button, slider in the timeline toolbar. Click/drag on ruler = scrub (`model.playhead`, preview seeks coalesced). Page-wise auto-scroll during playback; manual scroll disables it until next play. Hover line + timecode tooltip (`NSTrackingArea`, `mouseMoved`).
+- [~] **T-405 Timeline navigation** · SPEC §7.2 "Navigation" — `scrollWheel` (pan; `⌘` = zoom at mouse), `magnify(with:)` (pinch at mouse), `⌘=`/`⌘-` (anchor playhead), `⇧Z`/Fit button, slider in the timeline toolbar. Click/drag on ruler = scrub (`model.playhead`, preview seeks coalesced). Page-wise auto-scroll during playback; manual scroll disables it until next play. Hover line + timecode tooltip (`NSTrackingArea`, `mouseMoved`).
+  - WAITING ON HUMAN: AC-TL-4 pinch/scroll anchoring with a real trackpad, after T-307.
   - HUMAN: AC-TL-4 (pinch keeps the time under the pointer fixed).
 
-- [ ] **T-406 Hit-testing + cursors + selection** · SPEC §7.2 table
+- [~] **T-406 Hit-testing + cursors + selection** · SPEC §7.2 table
+  - WAITING ON HUMAN: hit-test assertions pass in `timeline-png`; cursors per §7.2 table need a human after T-307.
   ```swift
   enum TimelineHit { case playhead, clipEdge(Int, Edge), clipBody(Int), cutBubble(afterClip: Int),
                      blockEdge(UUID, Edge), blockBody(UUID), emptyLane(Lane, source: Double), ruler, none }
@@ -641,3 +648,7 @@ KNOWN ISSUE · `--selftest library` flaked 1/7 on master: `ProjectStore.duplicat
 T-107/T-108 fix · 2026-09-18 · root causes: (1) window hit-test used an unordered `SCShareableContent.windows` list and picked the first match instead of the front-most — now ordered via `CGWindowListCopyWindowInfo` front-to-back, matched by `windowID`; (2) the hover point was double-flipped (`NSHostingView` is always top-left/flipped, confirmed with a standalone `swift` snippet) — now built from `NSEvent.mouseLocation` directly; (3) `SourcePickerWindow` never forced first responder onto its content view on `makeKeyAndOrderFront` (same bug `FloatingPanel` documents), so `Esc` reached nothing after a mode switch — confirmed with a standalone script (`firstResponder === window`, not the view, without the fix) — added the same override; (4) `Esc`'s handler called `ToolbarController.show()` to re-key the toolbar, which also re-opened the just-closed overlay — replaced every overlay/toolbar `cancelOperation` with one shared `ToolbarController.handleEscape()`; (5) area-selection `minSize` enforcement in `SelectionRectView.resized(...)` grew a too-small rect from the wrong corner (always `(minX,minY)`), dragging the anchor instead of the tracked edge — confirmed by reverting the fix and re-running `--selftest pickers` (anchor moved `700→800`) — now grows the dragged edge only, anchor fixed; also guarded the Size/Position fields from writing into `rect` mid-drag. Verified: `make build`/`make app`/`make test` (35/35) all pass; new `--selftest pickers` (create/resize drag math + window hit-test ordering) → `SELFTEST pickers OK`; launch smoke (alive 3 s, killed own PID). T-107/T-108 left `[~]`, WAITING ON HUMAN notes updated with re-check items (AC-WIN-1, AC-AREA-1, AC-TB-4).
 T-301 fix · 2026-09-18 · root cause: duplicate/rename moved the package into the watched folder before rewriting project.json → stale title could stick; now staged in an item-replacement dir then moved · verified: `--selftest library` 30/30 (agent) + 15/15 (coordinator)
 T-302 · 2026-09-18 · verified: `make app`, 35 tests, `library-png` render reviewed by coordinator · deviations: opens reveal in Finder until T-307; HUMAN pending
+T-107/T-108 fix · 2026-09-18 · merged (b131bb7): flipped hover point + unordered window list; min-size clamp moved the drag anchor; overlay never first responder + Esc handler reopened the overlay → one `ToolbarController.handleEscape()`; `--selftest pickers` OK · HUMAN re-check pending
+T-111/T-112/T-113 · 2026-09-18 · verified on master: `make app`, 38 tests, `--selftest recover` OK, launch smoke · deviations: `CameraCapture.current` weak static for the camera hand-off; editor hand-off call site marked in RecordingController.finish; finish fills zooms via generateAutoZooms (T-410 wire, menu items still open) and writes thumbnail.jpg
+T-308 · 2026-09-18 · verified on master: `--selftest inspector` OK, PNG reviewed · deviations: `LabeledSlider` gained `onEditingChanged`; 12 generated wallpapers in Resources/Wallpapers (Makefile copies them); gradient angle has no control
+T-404/T-405/T-406 · 2026-09-18 · verified on master: TimelineGeometry tests (3) green, `timeline-png` with hit-test assertions OK, PNG reviewed · deviations: minimal TimelineToolbar (Fit + zoom slider); cut-bubble hit box sits in an 8 pt sliver above the clip lane
