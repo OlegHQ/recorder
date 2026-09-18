@@ -53,6 +53,9 @@ final class Compositor {
     private lazy var textureLoader = MTKTextureLoader(device: device)
     private var backgroundCache: [String: MTLTexture] = [:]
     private var cursorImageCache: [String: CursorImage] = [:]
+    // T-602: chip label -> its rendered texture (rounded background + Core-Text-drawn label baked
+    // in together, straight alpha) — cached per string so a repeated shortcut doesn't re-render.
+    private var keyChipTextureCache: [String: MTLTexture] = [:]
 
     /// `package` is the project's `.recorder` directory, for `cursors/<id>.png`/`.json` (T-413);
     /// `nil` for the synthetic `render` selftest, which never sets `FrameState.cursor`.
@@ -153,6 +156,13 @@ final class Compositor {
                 let rectPx = Self.lerp(bubble, full, t)
                 drawCamera(camera, project: s.project, rectPx: rectPx, alpha: cameraAlpha, outputSize: s.outputSize, encoder: encoder)
             }
+        }
+
+        // Pass 5: keyboard-shortcut chip (SPEC §6.2 pass 4 "key overlay", §6.6 Keys tab, T-602) —
+        // bottom-centre of the whole canvas (not "screen space": like the camera bubble, it doesn't
+        // zoom/pan with the content).
+        if let chip = s.keyChip {
+            drawKeyChip(chip, outputSize: s.outputSize, encoder: encoder)
         }
 
         encoder.endEncoding()
@@ -472,6 +482,68 @@ final class Compositor {
         let v0 = contentUV.y + (contentUV.w - contentUV.y) * ty0
         let v1 = contentUV.y + (contentUV.w - contentUV.y) * ty1
         return SIMD4(u0, v0, u1, v1)
+    }
+
+    // MARK: - Pass 5: key chip (SPEC §6.2 pass 4, §6.6 Keys tab, T-602)
+
+    /// Draws `chip`'s texture (`chipTexture`, below) as a straight quad, bottom-centre of the whole
+    /// canvas, faded by age via mode 2's `globalAlpha` (`Shaders.swift`). SPEC gives the overlay
+    /// 1.2 s ("for 1.2 s") but no fade curve, so a straightforward linear fade over the last 0.3 s
+    /// of that hold is used here — `// ponytail: no eased fade curve; revisit only if a mockup asks
+    /// for one.`
+    private func drawKeyChip(_ chip: FrameState.KeyChipState, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        guard let texture = chipTexture(label: chip.label) else { return }
+        let hold = 1.2, fadeOut = 0.3
+        let alpha = chip.age > hold - fadeOut ? max(0, (hold - chip.age) / fadeOut) : 1.0
+        guard alpha > 0 else { return }
+
+        let shortEdge = min(outputSize.width, outputSize.height)
+        let textureAspect = Double(texture.width) / Double(max(texture.height, 1))
+        let height = 0.07 * shortEdge
+        let width = height * textureAspect
+        let marginBottom = 0.05 * shortEdge
+        let rectPx = CGRect(x: (outputSize.width - width) / 2, y: outputSize.height - marginBottom - height,
+                             width: width, height: height)
+
+        var u = Uniforms()
+        u.rectNDC = ndcRect(rectPx, in: outputSize)
+        u.uvRect = SIMD4(0, 0, 1, 1)
+        u.mode = 2
+        u.globalAlpha = Float(alpha)
+        encoder.setFragmentTexture(texture, index: 0)
+        draw(u, encoder: encoder)
+        encoder.setFragmentTexture(dummyTexture, index: 0)
+    }
+
+    /// Renders `label` once to a straight-alpha RGBA texture — a rounded pill background (Core
+    /// Graphics) with the text centred on it (Core Text, via `NSAttributedString.draw(at:)`) baked
+    /// into the SAME bitmap, cached by `label` so a repeated shortcut is drawn once.
+    private func chipTexture(label: String) -> MTLTexture? {
+        if let cached = keyChipTextureCache[label] { return cached }
+        let font = NSFont.monospacedSystemFont(ofSize: 30, weight: .semibold)
+        let text = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: NSColor.white])
+        let textSize = text.size()
+        let paddingX: CGFloat = 26, paddingY: CGFloat = 15
+        let size = CGSize(width: max(1, ceil(textSize.width + paddingX * 2)), height: max(1, ceil(textSize.height + paddingY * 2)))
+        let width = Int(size.width), height = Int(size.height)
+
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        let bgRect = CGRect(origin: .zero, size: size)
+        NSBezierPath(roundedRect: bgRect, xRadius: size.height / 2, yRadius: size.height / 2).addClip()
+        NSColor.black.withAlphaComponent(0.72).setFill()
+        bgRect.fill()
+        text.draw(at: CGPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2))
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let cgImage = ctx.makeImage(),
+              let texture = try? textureLoader.newTexture(cgImage: cgImage, options: [.SRGB: false]) else { return nil }
+        keyChipTextureCache[label] = texture
+        return texture
     }
 
     // MARK: - Shared helpers

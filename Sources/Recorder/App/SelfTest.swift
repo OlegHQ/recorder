@@ -1626,6 +1626,38 @@ enum SelfTest {
         // T-504: live AVAudioMix rebuild, export volume/mute/denoise/click (see
         // `Render/AudioMixSelfTest.swift`).
         "audio-mix": { args in try await AudioMixSelfTest.run(args) },
+        // T-602 (+ T-601): writes a persistent `/tmp/M6Fixture.recorder` (real screen.mov, a few
+        // low-fps HEVC frames — same lesson as T-504's fixture: a from-scratch H.264 encode measured
+        // ~1 s/frame to decode back in this sandboxed environment, HEVC doesn't) with `keys.show`
+        // on and two `.key` events, so `--selftest parity /tmp/M6Fixture.recorder` (which samples
+        // inside the chip's fade window whenever `project.keys.show` is set — see
+        // `ExporterSelfTest.runParitySelfTest`) exercises the renderer's key-chip pass end to end.
+        // Not cleaned up on exit — meant to be reused across runs, like `/tmp/CamFixture.recorder`.
+        "make-m6-fixture": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let url = URL(fileURLWithPath: "/tmp/M6Fixture.recorder")
+            try? FileManager.default.removeItem(at: url)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+
+            try await Self.synthesizeMovie(at: url.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 3, frameCount: 9)
+
+            var project = Project(
+                title: "M6 Fixture",
+                source: Source(kind: .display, pixelWidth: 640, pixelHeight: 360, scale: 1, duration: 3.0)
+            )
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 3.0, speed: 1)]
+            project.keys.show = true
+            try project.save(to: url.appendingPathComponent("project.json"))
+
+            // ⌘K at t=0.5 (holds until 1.7), ⇧⌘S at t=2.0 (holds until 3.2, past the fixture's end
+            // — exercises a chip still fading at the very last sampled frame too).
+            let events = EventLog(events: [
+                InputEvent(t: 0.5, k: .key, keyCode: 0x28, mods: 0x100000),        // ⌘K
+                InputEvent(t: 2.0, k: .key, keyCode: 0x01, mods: 0x120000),        // ⇧⌘S
+            ])
+            try JSONEncoder().encode(events).write(to: url.appendingPathComponent("events.json"))
+            print("wrote \(url.path)")
+        },
     ]
 
     /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and

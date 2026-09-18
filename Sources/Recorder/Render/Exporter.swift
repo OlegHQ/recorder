@@ -583,6 +583,12 @@ enum ExporterSelfTest {
         if let layout = project.layouts.first, let fade = timeMap.outputTime(atSource: layout.start + 0.15) {
             times.insert(fade)
         }
+        // T-602: inside a key chip's fade-out window (not just its opaque hold) — the last 0.3 s
+        // before `activeKeyChip`'s 1.2 s hold expires (`Compositor.drawKeyChip`'s own fade window).
+        if project.keys.show, let keyEvent = model.events.events.first(where: { $0.k == .key }),
+           let chipTime = timeMap.outputTime(atSource: keyEvent.t + 1.05) {
+            times.insert(chipTime)
+        }
         let orderedTimes = times.filter { $0 >= 0 && $0 < duration }.sorted()
 
         guard let device = MTLCreateSystemDefaultDevice() else { throw SelfTestArgError.usage("no Metal device") }

@@ -17,6 +17,13 @@ struct FrameState {
         init(luma: MTLTexture, chroma: MTLTexture? = nil) { self.luma = luma; self.chroma = chroma }
     }
 
+    /// T-602 Keys tab: the active chip label + its age (seconds since the key was pressed), or
+    /// `nil` when `keys.show` is off or no `.key` event is within `activeKeyChip`'s hold window.
+    struct KeyChipState {
+        var label: String
+        var age: Double
+    }
+
     var outputSize: CGSize
     var screen: Texture?
     var camera: Texture?
@@ -25,6 +32,11 @@ struct FrameState {
     var cursor: CursorSample?              // nil until T-413
     var layoutKind: Layout.Kind?           // T-503: the active layout block, if any
     var layoutAmount: Double = 0           // T-503: its 0…1 cross-fade amount at this instant
+    // T-601/T-602: `sourceTime` itself — `project.masks`/the key chip are both keyed by it, and
+    // (unlike `view`/`cursor`) there's nothing to pre-sample into a table, so `Compositor` reads it
+    // straight off `FrameState` instead of re-deriving it from `TimeMap` (which it has no access to).
+    var sourceTime: Double = 0
+    var keyChip: KeyChipState?
     var project: Project
 }
 
@@ -45,8 +57,15 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
     let prevView = model.cameraPath.sample(atSource: sourceTime - 1.0 / 60)
     let cursor = model.cursorPath.sample(atSource: sourceTime)
     let (layoutKind, layoutAmount) = layoutMix(layouts: model.project.layouts, atSource: sourceTime)
+    // T-602: the active key chip, if the Keys tab's "Show keyboard shortcuts" is on and a `.key`
+    // event is within `activeKeyChip`'s hold window (`RecorderCore/KeyChips.swift`, already merged).
+    var keyChip: FrameState.KeyChipState?
+    if model.project.keys.show, let chip = activeKeyChip(events: model.events.events, atSource: sourceTime) {
+        keyChip = FrameState.KeyChipState(label: chip.label, age: chip.age)
+    }
     return FrameState(outputSize: size, screen: screen, camera: camera, view: view, prevView: prevView, cursor: cursor,
-                       layoutKind: layoutKind, layoutAmount: layoutAmount, project: model.project)
+                       layoutKind: layoutKind, layoutAmount: layoutAmount, sourceTime: sourceTime, keyChip: keyChip,
+                       project: model.project)
 }
 
 /// `project.json` + `events.json` (if present — a fresh/recovered package may not have one yet) →
