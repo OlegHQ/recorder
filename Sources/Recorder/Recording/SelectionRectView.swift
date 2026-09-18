@@ -49,6 +49,9 @@ final class SelectionRectView: NSView {
 
     private static func clamp(_ r: CGRect, to limit: CGRect, minSize: CGSize) -> CGRect {
         guard !limit.isEmpty else { return r }
+        // No selection yet (SPEC §4.5 "No rect yet: crosshair cursor, drag to create") — leave it empty
+        // instead of inflating to `minSize`; a real drag/resize never starts from a zero-size rect.
+        if r.width == 0 && r.height == 0 { return r }
         var size = CGSize(width: min(max(r.width, minSize.width), limit.width),
                            height: min(max(r.height, minSize.height), limit.height))
         size = CGSize(width: max(size.width, 0), height: max(size.height, 0))

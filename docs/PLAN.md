@@ -49,8 +49,8 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | M0 Foundations | T-001…T-006 | 6/6 |
 | M1 Record | T-101…T-114 | 5/14 |
 | M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
-| M3 Editor shell | T-301…T-313 | 0/13 |
-| M4 Timeline | T-401…T-418 | 0/18 |
+| M3 Editor shell | T-301…T-313 | 2/13 |
+| M4 Timeline | T-401…T-418 | 5/18 |
 | M5 Ship | T-501…T-509 | 0/9 |
 | M6 Polish | T-601…T-609 | 0/9 |
 
@@ -214,12 +214,14 @@ Update the "Done" column whenever you tick a task.
   - HUMAN: AC-DSP-1, AC-WIN-1 vs `reference/…13.02.15.png`, `…13.02.25.png`.
   - WAITING ON HUMAN: run `make run` (or `make install` yourself), select Display mode and Window mode from the toolbar, and confirm against the two reference screenshots — AC-DSP-1 (moving the mouse to another display moves the title/button there within one frame) and AC-WIN-1 (hover highlight tracks the front-most window under the cursor, including across displays). This machine has no Screen Recording/Accessibility TCC grants for this agent, so the overlays couldn't be visually driven or screenshotted here.
 
-- [ ] **T-108 Area overlay** · SPEC §4.5 mockup
+- [~] **T-108 Area overlay** · SPEC §4.5 mockup
   - File: `Sources/Recorder/Recording/AreaSelectionOverlay.swift`
   - Do: overlay window on the display under the mouse hosting `SelectionRectView` + a small `FloatingPanel` with the Size/Position fields (SwiftUI `TextField(value:format:.number)`), two-way bound to `rect`. Remember last rect per display in `UserDefaults` keyed by `CGDirectDisplayID`. Start button below the toolbar.
   - HUMAN: AC-AREA-1 vs `reference/…13.02.32.png`.
+  - WAITING ON HUMAN: run `make run` (or `make install`), select Area mode from the toolbar, and confirm against `reference/Screenshot 2026-09-18 at 13.02.32.png` (AC-AREA-1) — drag-to-create, move, resize by all 8 handles, ⇧ (aspect lock) and ⌥ (resize from centre), arrow-key nudge (1 px / 10 px with ⇧), the Size/Position fields staying in sync both ways, the Start button below the toolbar, and that the last rect is remembered per display across reopen. This machine has no Screen Recording/Accessibility TCC grants for this agent, so the overlay couldn't be visually driven here.
 
-- [ ] **T-109 EventRecorder** · SPEC §4.8
+- [~] **T-109 EventRecorder** · SPEC §4.8
+  - WAITING ON HUMAN: built + merged (lane-capture); selftest fails cleanly from an agent shell (TCC -3801). run `make app && build/Recorder.app/Contents/MacOS/Recorder --selftest events 3` from your own terminal while wiggling the mouse and typing a few letters → `SELFTEST events OK`.
   - File: `Sources/Recorder/Recording/EventRecorder.swift`
   ```swift
   final class EventRecorder {
@@ -234,7 +236,8 @@ Update the "Done" column whenever you tick a task.
     Cursor: 60 Hz `DispatchSourceTimer` reads `NSCursor.currentSystem`; hash `tiffRepresentation` (SHA256 via CryptoKit, first 8 hex); new hash → write largest rep as `cursors/<id>.png` + `<id>.json` `{hotX,hotY,scale}`; emit `.cursor`. Coalesce `.move` closer than 1/240 s.
   - Selftest `events 3`: records 3 s into a temp dir, prints counts per kind; OK if ≥1 cursor image exists. HUMAN: wiggle the mouse while it runs.
 
-- [ ] **T-110 CaptureSession (screen + audio writers)** · SPEC §4.8
+- [~] **T-110 CaptureSession (screen + audio writers)** · SPEC §4.8
+  - WAITING ON HUMAN: built + merged (lane-capture); selftest fails cleanly from an agent shell (TCC -3801). run `build/Recorder.app/Contents/MacOS/Recorder --selftest record display 3` from your own terminal → `SELFTEST record OK`.
   - File: `Sources/Recorder/Recording/CaptureSession.swift`
   ```swift
   final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
@@ -297,11 +300,14 @@ Update the "Done" column whenever you tick a task.
 - [ ] **T-205 Hide dock icon / desktop icons** — `NSApp.setActivationPolicy(.accessory)` on start, `.regular` on finish. Desktop icons: answer SPEC open question 3 empirically (list `SCShareableContent.windows` where `owningApplication?.bundleIdentifier == "com.apple.finder"` and inspect `windowLayer`/title), exclude them, **write the answer into SPEC §9**.
   - HUMAN: both toggles behave.
 
-- [ ] **T-206 Window resize presets** · SPEC §4.4 menu — File `Recording/WindowResizer.swift`: `static func resize(pid: pid_t, windowTitle: String?, to: CGSize)` via `AXUIElementCreateApplication` → `kAXWindowsAttribute` → match by title/frame → set `kAXSizeAttribute`. Add the `[Resize]` `NSMenu` to the window picker; sizes larger than the screen are disabled; saved sizes in `UserDefaults`; `Custom…` = `NSAlert` with two text fields.
+- [~] **T-206 Window resize presets** · SPEC §4.4 menu — File `Recording/WindowResizer.swift`: `static func resize(pid: pid_t, windowTitle: String?, to: CGSize)` via `AXUIElementCreateApplication` → `kAXWindowsAttribute` → match by title/frame → set `kAXSizeAttribute`. Add the `[Resize]` `NSMenu` to the window picker; sizes larger than the screen are disabled; saved sizes in `UserDefaults`; `Custom…` = `NSAlert` with two text fields.
+  - HUMAN: AC-WIN-2.
+  - WAITING ON HUMAN: run `make run` (or `make install`), select Window mode, hover a window, click `[Resize]` next to its size (SPEC §4.4 mockup — same row as "1440 × 834"), and confirm: choosing a quick/ratio-submenu preset actually resizes the real window and the on-screen highlight + size label immediately reflect its new frame; any preset larger than that window's display is greyed out/disabled; `Custom…` opens an `NSAlert` with Width/Height fields and resizes + remembers that size; "Save current size" and previously-saved sizes appear in the menu across reopen. This machine has no Screen Recording/Accessibility TCC grants for this agent (`--selftest permissions` → `screen=false accessibility=false`), so the picker/menu couldn't be visually driven or a real window resized here.
   - HUMAN: AC-WIN-2.
 
-- [ ] **T-207 Settings window (minimal)** · SPEC §8 — File `App/SettingsView.swift`: SwiftUI `Form` with General (projects folder via `NSOpenPanel`) and Recording (fps 30/60, countdown, 3 toggles) bound to `RecordingSettings`. `⌘,`.
+- [~] **T-207 Settings window (minimal)** · SPEC §8 — File `App/SettingsView.swift`: SwiftUI `Form` with General (projects folder via `NSOpenPanel`) and Recording (fps 30/60, countdown, 3 toggles) bound to `RecordingSettings`. `⌘,`.
   - HUMAN: values persist across relaunch.
+  - WAITING ON HUMAN: confirm `⌘,` (main menu) and the toolbar gear menu's "Settings…" item both open the Settings window, and that projects-folder/fps/countdown/toggle changes persist across a relaunch.
 
 - [ ] **T-207b Status-item menu** · SPEC §8 mockup (`reference/status-item-menu.png`) — in `AppDelegate`: rebuild the idle status menu exactly as SPEC §8 (SF Symbols `record.circle`, `display`, `macwindow`, `rectangle.dashed`; key equivalents as listed). `Record Display/Window/Area` = `RecordingSettings.shared.mode = …` + `ToolbarController.shared.show()` + open that picker (reuse what the toolbar mode buttons call — one function, also used by T-204's table). `Show Recorder in Dock` = one persisted `Bool` → `NSApp.setActivationPolicy`, per the §8 rule. `Open Last Project` = newest `*.recorder` by modification date in the projects folder (opens in Finder until the editor exists in M3, then the editor). Main-menu File items reuse the same selectors.
   - HUMAN: menu matches the mockup; AC-APP-4.
@@ -312,7 +318,7 @@ Update the "Done" column whenever you tick a task.
 
 ## M3 — Editor shell  (SPEC §5.1, §6.1, §6.2, §6.6 Background, §6.7)
 
-- [ ] **T-301 ProjectStore** · SPEC §5.1
+- [x] **T-301 ProjectStore** · SPEC §5.1
   - File: `Sources/Recorder/Library/ProjectStore.swift`
   ```swift
   @Observable final class ProjectStore {
@@ -329,7 +335,7 @@ Update the "Done" column whenever you tick a task.
 - [ ] **T-302 Library window** · SPEC §5.1 mockup — File `Library/LibraryView.swift`: `LazyVGrid(.adaptive(minimum: 220))`, search field, context menu, inline rename, empty state, `New Recording` button. Open on launch (when permissions OK) and `⇧⌘O`. Document open: `application(_:open:)` for `.recorder` packages; already-open project → focus its window.
   - HUMAN: AC-LIB-2, AC-LIB-3.
 
-- [ ] **T-303 EditorModel (state + undo + autosave)** · SPEC §2 "Undo", §5 "Autosave"
+- [x] **T-303 EditorModel (state + undo + autosave)** · SPEC §2 "Undo", §5 "Autosave"
   - File: `Sources/Recorder/Editor/EditorModel.swift`
   ```swift
   @MainActor @Observable final class EditorModel {
@@ -417,7 +423,7 @@ Update the "Done" column whenever you tick a task.
 
 Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 
-- [ ] **T-401 TimelineOps: clips** · SPEC §7.4
+- [x] **T-401 TimelineOps: clips** · SPEC §7.4
   - File: `Sources/RecorderCore/TimelineOps.swift`. Tests: `Tests/RecorderCoreTests/TimelineOpsTests.swift`.
   ```swift
   public enum Edge: Sendable { case leading, trailing }
@@ -435,7 +441,7 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Invariants (SPEC §7.4): clips sorted by `sourceStart`, non-overlapping, each ≥ 0.1 s, speed 0.25…16, count ≥ 1. Every mutating op ends with `assert(checkInvariants() == nil)`.
   - Tests (exactly): `splitProducesTwoClipsSameSpeed` · `splitNearEdgeRefused` · `removeLastClipRefused` · `trimClampsToNeighbour` · `splitRemoveRestoreIsIdentity` (AC-TL-2) · `randomOpsKeepInvariants` (seeded `SystemRandomNumberGenerator` replacement: write a 5-line LCG; 1 000 iterations; AC-TL-1).
 
-- [ ] **T-402 TimelineOps: zooms & generic blocks**
+- [x] **T-402 TimelineOps: zooms & generic blocks**
   ```swift
   public extension Project {
       mutating func addZoom(atSource s: Double, length: Double = 3, mode: Zoom.Mode) -> UUID?   // fits into the free gap; nil if gap < 0.5 s
@@ -448,7 +454,7 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Layout/mask blocks get the same three ops — implement **once** over a private `protocol TimedBlock { var id: UUID; var start: Double; var end: Double }` that `Zoom`, `Layout`, `Mask` adopt (three conformers ⇒ allowed), with `minLength` parameter (0.5 s).
   - Tests: `zoomsNeverOverlap` (random moves/resizes, 1 000 iters) · `addZoomFitsGap` · `snapPicksNearest`.
 
-- [ ] **T-403 Spring** · SPEC §6.3
+- [x] **T-403 Spring** · SPEC §6.3
   - File: `Sources/RecorderCore/Spring.swift`
   ```swift
   public struct Spring: Sendable {
@@ -506,9 +512,10 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 - [ ] **T-410 AutoZoom** · SPEC §6.4
   - File: `Sources/RecorderCore/AutoZoom.swift` — `public func generateAutoZooms(clicks: [InputEvent], duration: Double) -> [Zoom]` implementing the 5 numbered rules literally.
   - Tests (AC-AZ-1): `clusterByTimeAndDistance` · `mergeCloseZooms` · `dropShortAndClamp` · `outputSortedNonOverlappingDeterministic`.
+  - CORE DONE (lane-autozoom merged 2026-09-18, 4 tests green); only the Wire line below remains → tick after T-111/T-311.
   - Wire: `RecordingController.finish` fills `project.zooms`; Edit ▸ Regenerate Auto Zooms / Remove All Zooms.
 
-- [ ] **T-411 CursorPath** · SPEC §6.5
+- [x] **T-411 CursorPath** · SPEC §6.5
   - File: `Sources/RecorderCore/CursorPath.swift`
   ```swift
   public struct CursorSample: Sendable { public var x, y, prevX, prevY: Double; public var imageID: String?; public var alpha, rotation, clickScale: Double }
@@ -520,7 +527,7 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Pipeline order exactly as SPEC §6.5 (shake removal → spring follow → idle hide → loop → rotation → click pulse → hidden ranges). M4 implements: spring follow, idle hide, click pulse, imageID, hidden flag. The rest are `// T-604`.
   - Tests (AC-CUR-1): `smoothedNeverLeadsRaw` · `settlesWithinHalfPixelAfterRest` · `idleHidesAfterTwoSeconds` · `sampleIsOrderIndependent`.
 
-- [ ] **T-412 CameraPath** · SPEC §6.3
+- [x] **T-412 CameraPath** · SPEC §6.3
   - File: `Sources/RecorderCore/CameraPath.swift`
   ```swift
   public struct ViewTransform: Sendable, Equatable { public var cx, cy, scale: Double; public static let identity = ViewTransform(cx: 0.5, cy: 0.5, scale: 1) }
@@ -605,3 +612,16 @@ T-102 · 2026-09-18 · HUMAN confirmed: user granted both permissions via onboar
 T-104 fix · 2026-09-18 · root cause(s): `Recording/FloatingPanel.swift` panel `level` was `CGShieldingWindowLevel()-1` (the system screen-shield level, ~2.1e9, non-interactive by design) instead of SPEC §4's `.screenSaver-1`, and `content` was never made first responder (`initialFirstResponder` only auto-populates from the designated initializer's contentView, which is replaced after `super.init`) so `cancelOperation(_:)`/Esc never fired · verified: `make app`/`make test` (5/5) pass; headless in-process repro via synthetic `NSEvent`s (`panel.sendEvent`, no TCC needed) confirmed first responder now lands on the content view and Esc closes the panel across repeated runs; alive-after-3s smoke check clean · not verified here (no GUI/TCC in this environment): on-screen HUD vibrancy vs. white background, and the camera/mic/system-audio/gear `NSMenu` popups (not exercised headlessly to avoid hanging in `NSMenu`'s nested tracking loop) — re-check needed, T-104 stays `[~]`.
 T-107 · 2026-09-18 · verified: `make build`/`make app` succeed with `Sources/Recorder/Recording/SourcePickerOverlay.swift` added (`SourcePickerOverlay` enum: `show(mode:)`/`close()`/`startRecording(target:)`/`flip(_:in:)`; private `SourcePickerWindow: NSPanel` one per `NSScreen` at `.screenSaver-2`, registered via `FloatingPanel.register`; private `SourcePickerState` `@Observable` shared across screens; SwiftUI `SourcePickerContentView` + `StartRecordingButton`); `make test` passes 5/5; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: the "one function" for "set mode + show its picker" (reused by T-207b's status menu and T-204's hotkeys per their own PLAN wording) lives on `ToolbarController` as `selectMode(_ mode:)` (sets `RecordingSettings.shared.mode` then calls `SourcePickerOverlay.show(mode:)`), not inside the new file itself — matches the existing `.shared.show()/.close()` singleton pattern AppDelegate already calls into, and both T-207b's and T-204's own task text point at "what the toolbar mode buttons call" as that one function. `ToolbarView`'s mode buttons now call `onSelectMode(mode)` instead of setting `settings.mode` directly (new closure param); `ToolbarController.show()` also calls `SourcePickerOverlay.show(mode:)` so the picker is visible whenever the toolbar is (matches SPEC §4.2's flow and lets the two reference screenshots be compared directly), and `ToolbarController.close()` now also calls `SourcePickerOverlay.close()` (ⓧ closes toolbar+overlay together per SPEC). AC-TB-4 (Esc closes overlays first, then toolbar) wired by making the overlay under the mouse the key window; its `cancelOperation` closes the overlay and re-shows/re-keys the toolbar panel (via `ToolbarController.shared.show()`, a no-op panel-recreation since one already exists) so a second Esc reaches the toolbar's own `cancelOperation`. `NSTrackingArea(options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved])` on each overlay's content view drives both "active display" (enter/exit) and window-mode hit-testing (continuous move), per the task's "(tracking area)" hint. Window list (`SCShareableContent.windows`) is fetched once when the picker opens, not re-polled while open — `// ponytail:` comment with upgrade path (periodic refresh) since SPEC only requires live *hover* tracking, not a live window list. `SourcePickerWindow`'s screen property is named `targetScreen` (not `screen`) because `NSWindow` already declares a `screen` property (compile error otherwise). Not HUMAN-verified: this machine has no Screen Recording/Accessibility TCC grants for this agent, so the overlays' on-screen appearance vs. the two reference screenshots (AC-DSP-1, AC-WIN-1) couldn't be checked — task marked `[~]`.
 T-104 polish · 2026-09-18 · root cause(s), all in the shared `Recording/FloatingPanel.swift`: (A) `.hudWindow` blends with whatever is behind the window, so over a bright app it read as washed-out mid-grey instead of near-black — fixed by forcing `effect.appearance = NSAppearance(named: .vibrantDark)` and adding an opaque-layer `Theme.bgPanel` tint view (alpha 0.7) between the effect view and `content`. (B) `layer.cornerRadius`+`masksToBounds` doesn't clip an `NSVisualEffectView`'s behind-window blur, leaking square corners past the rounded shape with a rectangular shadow — fixed with a resizable rounded-rect `NSImage` (`capInsets`/`resizingMode = .stretch`, radius `Theme.Radius.panel`) set as `effect.maskImage`, `masksToBounds` removed (kept `cornerRadius` only so the 1px `Theme.stroke` layer border still follows the rounded shape), `invalidateShadow()` called after layout so the window shadow follows the mask. (C) `ToolbarController.popUp` anchored menus at `NSEvent.mouseLocation`, overlapping the toolbar — fixed to keep mouse-x but anchor the menu's bottom edge to `panel.frame.maxY` so menus open above the toolbar like the reference · verified: `make app` builds and signs with `Recorder Dev`; `make test` passes 5/5; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · not verified here: no display/WindowServer access in this environment (`screencapture` fails with "could not create image from display"), so the on-screen dark-HUD tint, clean rounded corners/shadow, and menu position above the toolbar could not be visually confirmed — re-check needed, T-104 stays `[~]`.
+T-108 · 2026-09-18 · verified: `make build`/`make app`/`make test` (5/5) all pass; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: added `Sources/Recorder/Recording/AreaSelectionOverlay.swift` (`AreaSelectionOverlay` enum `show()`/`close()` wired the same way as `SourcePickerOverlay`; private `AreaSelectionWindow: NSPanel` at `.screenSaver-2` hosting `SelectionRectView` full-screen plus the reused `StartRecordingButton` positioned below the toolbar's 40pt-above-Dock line; private `AreaSelectionState` `@Observable` bridge that persists the rect to `UserDefaults` (`NSStringFromRect`/`NSRectFromString`, keyed `"area.rect.<displayID>"`) on every change and converts between `SelectionRectView`'s bottom-left view coords and `CaptureTarget.area`'s top-left display-point coords; `AreaFieldsView` SwiftUI panel with `TextField(value:format:.number)` Size/Position fields two-way bound via `AreaSelectionState.topLeft`). Minimal wiring outside the named file, all load-bearing: `SourcePickerOverlay.show(mode:)`/`close()` now route `.area` to `AreaSelectionOverlay.show()`/always call `AreaSelectionOverlay.close()` (so `ToolbarController.selectMode(.area)`, mode-switching, and closing the toolbar all show/hide the right overlay — no changes needed in `ToolbarController.swift` itself, it already calls through `SourcePickerOverlay.show(mode:)`/`close()`); `StartRecordingButton` and the `NSScreen.displayID` extension un-`private`-ed in `SourcePickerOverlay.swift` for reuse instead of duplicating ~30 lines of button+menu code. Root-cause fix in the shared `SelectionRectView.swift`: `clamp(_:to:minSize:)` was inflating a fresh `.zero` rect to `minSize` (100×100) the instant `limit` was set, so opening the overlay always showed a pre-drawn rect instead of SPEC §4.5's "No rect yet: crosshair cursor, drag to create" — fixed by leaving an exactly-zero rect untouched (a real drag/resize never starts from zero, so create/resize/move behavior for T-105's existing users, i.e. the future crop sheet, is unchanged). Esc closes the overlay and re-keys the toolbar exactly like `SourcePickerWindow.cancel()` (`AreaSelectionWindow.cancelOperation`/`AreaFieldsHostingView.cancelOperation`), so a second Esc reaches the toolbar per AC-TB-4. Not HUMAN-verified: this machine has no Screen Recording/Accessibility TCC grant for this agent, so the overlay's on-screen appearance vs. `reference/…13.02.32.png`, drag/resize/⇧/⌥/arrow-key behavior, Size/Position field sync, and per-display rect persistence across reopen couldn't be exercised — task marked `[~]`.
+T-401 · 2026-09-18 · verified: core-lane merged, `make test` 14/14 on master (6 listed tests) · deviations: interior restoreCut with differing neighbour speeds re-inserts the range as a 1× clip; split also refuses pieces < 0.1 s source
+T-402 · 2026-09-18 · verified: `make test` 14/14 on master (3 listed tests) · deviations: ids stay `String` in JSON, public ops take `UUID` and convert at the boundary; addZoom starts at `s` and shrinks to the gap; layouts/masks share the zoom invariants
+T-410 (core only) · 2026-09-18 · verified: `make test` in lane, 4 listed tests · deviations: rule 5 clamps before dropping < 1 s so no short zoom survives at the ends; wiring pending
+T-207 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `make test` passes 18/18; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: added `RecordingSettings.fps` (default 60) and `.projectsFolder` (default `~/Movies/Recorder`) — SPEC §8 properties the class lacked, same one-`UserDefaults`-key-per-property style as the rest of the class; `SettingsWindow` (in `App/SettingsView.swift`) is the one reusable window (`enum` with a cached `NSWindow`, `.titled, .closable`, hosting `SettingsView` via `NSHostingView`), opened by `AppDelegate.openSettings` (wired to the "Recorder ▸ Settings…" `⌘,` item, which previously had `action: nil`) and by `ToolbarController.openSettingsWindow` (wired to the gear menu's "Settings…" item, previously inert per its own T-207 comment, now removed). Scope matches this task's text exactly (General: projects folder only; Recording: fps 30/60, countdown, the 3 toggles) — SPEC §8's "default export settings" / "after recording: open editor" General fields and the Shortcuts pane are out of scope (M6 / other tasks) per the task's own wording. Not HUMAN-verified: no display/WindowServer or TCC grant in this environment, so opening the window via `⌘,`/gear-menu and value persistence across a real relaunch couldn't be visually confirmed — task marked `[~]`.
+T-301 · 2026-09-18 · verified: lane-library merged; `--selftest library` OK on master · deviations: thumbnail is read-only here (writing belongs to T-111 finish); SelfTest harness now pumps the main run loop instead of blocking on a semaphore (cases using DispatchQueue.main hung)
+T-303 · 2026-09-18 · verified: `--selftest model` OK on master (undo/redo equality, 10-update gesture = 1 undo step, autosave on disk after 0.6 s) · deviations: none
+T-403 · 2026-09-18 · verified: lane-paths merged, `make test` 29/29 on master · deviations: the plan's 0.01 step-vs-closed-form bound is unreachable for semi-implicit Euler at dt = 1/240 (error ∝ (ω·dt)²); measured peaks focused 0.015, smooth 0.010, cursorSmooth 0.022, cursorMedium 0.038, cursorRapid 0.071 — test asserts per-preset bounds over the whole transient + < 1e-3 settled
+T-411 · 2026-09-18 · verified: 4 listed tests green · deviations: shake removal/loop/rotation are `// T-604` comments per plan; 0.5 px tolerance assumes a 1920 px wide source
+T-412 · 2026-09-18 · verified: 4 listed tests green · deviations: test renamed `cameraSampleIsOrderIndependent` (free-function test names share one namespace with T-411's `sampleIsOrderIndependent`)
+T-109 · 2026-09-18 · verified: lane-capture merged, `make app` OK; `--selftest events 3` exits 1 cleanly without TCC (agent shell) · deviations: none; HUMAN run pending
+T-110 · 2026-09-18 · verified: `make app` OK; `--selftest record display 3` exits 1 cleanly without TCC · deviations: `finish()` returns `Source` (the type is top-level in Core, not nested in `Project`); HUMAN run pending
+T-206 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `make test` passes 29/29; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: `WindowResizer.resize` matches the AX window by title only (falls back to the front-most AX window when the title is nil/unmatched) since the normative signature carries no frame param — noted as `// ponytail:` with an upgrade path; the `[Resize]` control sits next to the size line ("1440 × 834  [Resize]") per the SPEC §4.4 ASCII mockup rather than next to the Start-recording button (the task text's looser paraphrase); 9:16/16:10/Square submenu sizes aren't listed verbatim in SPEC §4.4 (only 4:3's five sizes are) so five round numbers per ratio were chosen matching the 4:3 list's pattern; saved sizes stored in `UserDefaults` as `[[Double]]` under key `WindowResizer.savedSizes`. Not HUMAN-verified: no Screen Recording/Accessibility TCC grant for this agent, so AC-WIN-2 (real resize + highlight/size-label follows, oversize presets disabled, Custom… remembered) couldn't be exercised — task marked `[~]`.

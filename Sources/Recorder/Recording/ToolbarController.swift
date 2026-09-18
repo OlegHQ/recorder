@@ -204,8 +204,7 @@ final class ToolbarController: NSObject {
         menu.addItem(countdown)
         menu.addItem(.separator())
 
-        // Settings window arrives in T-207; item stays present but inert (nil action auto-disables it).
-        menu.addItem(NSMenuItem(title: "Settings…", action: nil, keyEquivalent: ","))
+        menu.addItem(menuItem("Settings…", key: ",", action: #selector(openSettingsWindow)))
         popUp(menu)
     }
 
@@ -213,6 +212,7 @@ final class ToolbarController: NSObject {
     @objc private func toggleHideDockIcon() { RecordingSettings.shared.hideDockIcon.toggle() }
     @objc private func toggleHighlightArea() { RecordingSettings.shared.highlightArea.toggle() }
     @objc private func selectCountdown(_ sender: NSMenuItem) { RecordingSettings.shared.countdown = sender.tag }
+    @objc private func openSettingsWindow() { SettingsWindow.show() }
 }
 
 /// `Esc` closes the toolbar (AC-TB-4) via the standard `cancelOperation(_:)` responder action

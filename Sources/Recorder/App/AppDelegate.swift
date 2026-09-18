@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = Self.buildMainMenu()
         statusItem = Self.buildStatusItem()
         wireNewRecording()
+        wireSettings()
 
         if !Permissions.allGranted {
             showOnboarding()
@@ -47,6 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ToolbarController.shared.show()
     }
 
+    @objc private func openSettings() {
+        SettingsWindow.show()
+    }
+
     /// Wires the "New Recording" items built by `buildMainMenu`/`buildStatusItem` to `ToolbarController` (T-104).
     private func wireNewRecording() {
         for item in [NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Recording"),
@@ -54,6 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item?.target = self
             item?.action = #selector(newRecording)
         }
+    }
+
+    /// Wires the "Recorder ▸ Settings…" item built by `buildMainMenu` (T-207).
+    private func wireSettings() {
+        let item = NSApp.mainMenu?.item(withTitle: "Recorder")?.submenu?.item(withTitle: "Settings…")
+        item?.target = self
+        item?.action = #selector(openSettings)
     }
 
     // MARK: - Main menu (SPEC §8, titles/order/key equivalents normative)
