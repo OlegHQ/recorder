@@ -1593,6 +1593,10 @@ enum SelfTest {
         // calls out: invariants hold after every op, each gesture is exactly one undo step, `Esc`
         // mid-drag/mid-split-mode reverts, split refuses near edges, snapping lands on/off candidates.
         "timeline-ops": { _ in try await runTimelineOpsSelfTest() },
+        // T-415: manual zoom target overlay — mapping round trip + synthetic drag (see
+        // `Render/ZoomTargetMapping.swift`).
+        "zoom-target": { args in try await ZoomTargetMapping.runSelfTest(args) },
+        "zoom-target-png": { args in try await ZoomTargetMapping.runPNGSelfTest(args) },
     ]
 
     /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and

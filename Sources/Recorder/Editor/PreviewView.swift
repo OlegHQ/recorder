@@ -44,6 +44,18 @@ final class PreviewView: MTKView {
     // continuous position to follow live; the bubble snaps to the nearest corner on mouse-up.
     private var cameraDragActive = false
 
+    // T-415: manual-zoom-target overlay — a `SelectionRectView` subview covering the whole preview,
+    // shown only while a `.manual` zoom is selected (SPEC §6.6 "with a manual zoom selected, a
+    // rectangle overlay shows the zoom target and can be dragged"). `PreviewView` overrides `hitTest`
+    // (below) to keep routing every mouse event through its own `mouseDown`/`mouseDragged`/`mouseUp`
+    // (same pattern as the camera-bubble drag) and forwards to `zoomTargetView` by calling its
+    // handlers directly — that gives a `mouseUp`-time drag-end signal (`isDragging` just before the
+    // forwarded call) without adding a second mouse-handling mechanism or subclassing
+    // `SelectionRectView` (`final`).
+    private let zoomTargetView = SelectionRectView(frame: .zero)
+    private var zoomTargetContentRect: CGRect = .zero
+    private var zoomTargetGestureActive = false
+
     init(model: EditorModel) {
         self.model = model
         self.lastClips = model.project.clips
@@ -57,8 +69,17 @@ final class PreviewView: MTKView {
         isPaused = true
         enableSetNeedsDisplay = true
         colorPixelFormat = .bgra8Unorm
+
+        zoomTargetView.allowsResize = false
+        zoomTargetView.minSize = CGSize(width: 1, height: 1)
+        zoomTargetView.isHidden = true
+        zoomTargetView.autoresizingMask = [.width, .height]
+        zoomTargetView.onChange = { [weak self] r in self?.zoomTargetRectChanged(r) }
+        addSubview(zoomTargetView)
+
         rebuildComposition()
         observeProject()
+        observeSelection()
     }
 
     @available(*, unavailable)
@@ -71,6 +92,7 @@ final class PreviewView: MTKView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         needsDisplay = true
+        updateZoomTargetOverlay()
     }
 
     // MARK: - Transport (SPEC §7.3; `TransportBar` below calls these)
@@ -174,6 +196,7 @@ final class PreviewView: MTKView {
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.updateZoomTargetOverlay()
                 let clips = self.model.project.clips
                 if clips != self.lastClips {
                     self.lastClips = clips
@@ -182,6 +205,20 @@ final class PreviewView: MTKView {
                     self.needsDisplay = true
                 }
                 self.observeProject()
+            }
+        }
+    }
+
+    // T-415: `model.selection` lives outside `project` (it's UI state, not saved), so it needs its
+    // own `withObservationTracking` — same one-more-registration-per-fire pattern as `observeProject`.
+    private func observeSelection() {
+        withObservationTracking {
+            _ = model.selection
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.updateZoomTargetOverlay()
+                self.observeSelection()
             }
         }
     }
@@ -301,7 +338,15 @@ final class PreviewView: MTKView {
         }
         let screenTexture = pixelBuffer.flatMap { textureCache.texture(from: $0) }
         let cameraTexture = currentCameraPixelBuffer().flatMap { textureCache.texture(from: $0) }
-        let state = makeFrameState(model: model, outputTime: model.playhead, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
+        var state = makeFrameState(model: model, outputTime: model.playhead, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
+
+        // T-415: a `.manual` zoom selected ⇒ show the UN-zoomed frame (SPEC §6.6) so the target
+        // overlay (`zoomTargetView`) is drawn against the same un-zoomed content it's positioned
+        // over. Preview-only override — `makeFrameState`/export are untouched.
+        if selectedManualZoom() != nil {
+            state.view = .identity
+            state.prevView = .identity
+        }
 
         compositor.render(state, to: drawable.texture, commandBuffer: commandBuffer, viewport: viewportRect)
         commandBuffer.present(drawable)
@@ -336,6 +381,60 @@ final class PreviewView: MTKView {
         return lastCameraPixelBuffer
     }
 
+    // MARK: - Manual zoom target (SPEC §6.6, T-415)
+
+    /// The selected zoom, if it's the only selected block and its mode is `.manual` — the one state
+    /// that shows the target overlay (SPEC §6.6: "with a manual zoom selected…").
+    private func selectedManualZoom() -> Zoom? {
+        guard model.selection.count == 1, let id = model.selection.first else { return nil }
+        guard let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }) else { return nil }
+        return zoom.mode == .manual ? zoom : nil
+    }
+
+    private func updateZoomTargetOverlay() {
+        guard let zoom = selectedManualZoom() else {
+            zoomTargetView.isHidden = true
+            return
+        }
+        zoomTargetView.isHidden = false
+        zoomTargetView.frame = bounds
+        let content = ZoomTargetMapping.contentRect(viewBounds: bounds.size, project: model.project)
+        zoomTargetContentRect = content
+        zoomTargetView.limit = content
+        zoomTargetView.aspect = content.height > 0 ? content.width / content.height : nil
+        // Don't fight the mouse mid-drag (same guard `CropSheet`/`AreaSelectionOverlay` use for their
+        // own field-commit races) — `zoomTargetRectChanged` is already updating `zoom.center` live.
+        if !zoomTargetView.isDragging {
+            zoomTargetView.rect = ZoomTargetMapping.rect(center: zoom.center, scale: zoom.scale, in: content)
+        }
+        needsDisplay = true
+    }
+
+    /// `zoomTargetView.onChange`: fires on every rect mutation, including `updateZoomTargetOverlay`'s
+    /// own programmatic assignment above — only a real drag (bracketed by `beginGesture`/
+    /// `commitGesture` in `zoomTargetDragEnded`) turns a change into a `Project` edit.
+    private func zoomTargetRectChanged(_ r: CGRect) {
+        guard let zoom = selectedManualZoom() else { return }
+        if zoomTargetView.isDragging, !zoomTargetGestureActive {
+            model.beginGesture()
+            zoomTargetGestureActive = true
+        }
+        guard zoomTargetGestureActive else { return }
+        let center = ZoomTargetMapping.center(fromRect: r, in: zoomTargetContentRect)
+        let zoomID = zoom.id
+        model.update { project in
+            guard let idx = project.zooms.firstIndex(where: { $0.id == zoomID }) else { return }
+            project.zooms[idx].center = center
+        }
+        needsDisplay = true
+    }
+
+    private func zoomTargetDragEnded() {
+        guard zoomTargetGestureActive else { return }
+        zoomTargetGestureActive = false
+        model.commitGesture("Move Zoom Target")
+    }
+
     // MARK: - Camera drag (SPEC §6.6 Camera tab, T-502)
 
     /// This view isn't flipped (AppKit default, bottom-left origin/y-up) — mouse points are
@@ -358,7 +457,19 @@ final class PreviewView: MTKView {
                        width: local.width, height: local.height)
     }
 
+    // T-415: never let AppKit's default hit-testing hand events straight to `zoomTargetView` (it
+    // would bypass everything below) — `self` stays the one dispatch point, same as the camera
+    // bubble, which has no subview of its own at all.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+
     override func mouseDown(with event: NSEvent) {
+        guard zoomTargetView.isHidden else {
+            zoomTargetView.mouseDown(with: event)
+            window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
+            return
+        }
         let p = convert(event.locationInWindow, from: nil)
         if model.project.source.hasCamera, cameraBubbleRectInBounds().contains(p) {
             cameraDragActive = true
@@ -369,6 +480,7 @@ final class PreviewView: MTKView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard zoomTargetView.isHidden else { zoomTargetView.mouseDragged(with: event); return }
         guard cameraDragActive else { super.mouseDragged(with: event); return }
         // No live follow: `Camera.corner` is the only stored position (four discrete corners) — the
         // bubble snaps to whichever corner the mouse is released over, like the recording-time
@@ -376,6 +488,12 @@ final class PreviewView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard zoomTargetView.isHidden else {
+            let wasDragging = zoomTargetView.isDragging
+            zoomTargetView.mouseUp(with: event)
+            if wasDragging { zoomTargetDragEnded() }
+            return
+        }
         guard cameraDragActive else { super.mouseUp(with: event); return }
         cameraDragActive = false
         let p = convert(event.locationInWindow, from: nil)
