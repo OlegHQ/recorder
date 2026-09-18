@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Dispatch
 import Foundation
@@ -110,6 +111,49 @@ enum SelfTest {
             try await Task.sleep(nanoseconds: 700_000_000)
             let onDisk = try Project.load(from: projectURL)
             guard onDisk.title == "Persisted" else { throw Fail(description: "autosave didn't persist: \(onDisk.title)") }
+        },
+        // T-404: offscreen render of a fixture Project (3 clips incl. one sped-up, 2 zooms, one
+        // torn by a cut, a camera layout, playhead mid-way) to PNG, so the static drawing can be
+        // eyeballed against SPEC §7.1 without a running editor window (T-307 isn't built yet).
+        "timeline-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: timeline-png <out.png>") }
+
+            var project = Project(
+                title: "Fixture",
+                source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 2, duration: 60, hasCamera: true)
+            )
+            project.clips = [
+                Clip(sourceStart: 0, sourceEnd: 15, speed: 1),
+                Clip(sourceStart: 15, sourceEnd: 35, speed: 2),   // sped up: 20 source s -> 10 output s
+                Clip(sourceStart: 40, sourceEnd: 60, speed: 1),   // 35...40 is a cut
+            ]
+            project.zooms = [
+                Zoom(start: 5, end: 9, scale: 2, mode: .auto),          // fully inside clip 0
+                Zoom(start: 30, end: 38, scale: 1.6, mode: .manual),    // torn: 35...38 falls in the cut
+            ]
+            project.layouts = [Layout(start: 0, end: 15, kind: .cameraFull)]
+
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-timeline-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let model = await EditorModel(packageURL: tmp, project: project, events: EventLog())
+            let outputDuration = await model.timeMap.outputDuration
+            await MainActor.run { model.playhead = outputDuration / 2 }
+
+            let png: Data? = await MainActor.run {
+                let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 160))
+                view.model = model
+                view.geometry.pxPerSecond = (view.frame.width - TimelineView.gutter) / (outputDuration + 3)
+                view.needsDisplay = true
+                guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+                view.cacheDisplay(in: view.bounds, to: rep)
+                return rep.representation(using: .png, properties: [:])
+            }
+            guard let png else { throw Fail(description: "no PNG data") }
+            try png.write(to: URL(fileURLWithPath: outPath))
         },
     ]
 
