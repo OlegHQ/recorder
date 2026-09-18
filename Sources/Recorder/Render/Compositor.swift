@@ -123,7 +123,6 @@ final class Compositor {
         // Pass 2: screen (rounded rect + shadow + crop/zoom UV + motion blur, SPEC §6.2 pass 2,
         // T-501). Pass 3 (cursor) shares the same content rect + crop/zoom UV mapping so it lands
         // in "screen space" and zooms with the content (SPEC §6.2 pass 3, T-413).
-        // ponytail: pass 4 (camera/masks) lands with T-502.
         if let screen = s.screen {
             let rectPx = screenRect(output: s.outputSize, cropAspect: cropAspect(s.project), padding: s.project.frame.padding)
             let contentUV = cropUV(s.project.crop, view: s.view)
@@ -132,6 +131,13 @@ final class Compositor {
             if let cursor = s.cursor, cursor.alpha > 0 {
                 drawCursor(cursor, project: s.project, rectPx: rectPx, contentUV: contentUV, outputSize: s.outputSize, encoder: encoder)
             }
+        }
+
+        // Pass 4: camera (rounded-rect SDF quad, SPEC §6.2 pass 4, §6.6 Camera, T-502) — bubble in
+        // its corner. Cross-fading it with a Layout block lands with T-503.
+        if let camera = s.camera {
+            let rectPx = Self.cameraBubbleRect(project: s.project, outputSize: s.outputSize, viewScale: s.view.scale)
+            drawCamera(camera, project: s.project, rectPx: rectPx, outputSize: s.outputSize, encoder: encoder)
         }
 
         encoder.endEncoding()
@@ -304,7 +310,70 @@ final class Compositor {
         return SIMD2(Float(bx - outputSize.width / 2), Float(by - outputSize.height / 2))
     }
 
-    // ponytail: pass 4 (camera/masks) lands with T-502.
+    // MARK: - Pass 4: camera (SPEC §6.2 pass 4, §6.6 Camera, T-502)
+
+    /// Camera bubble placement — reused by both `render` (with the live zoom `viewScale`, for
+    /// `shrinkWhenZoomed`) and `PreviewView`'s drag hit-testing (which only needs the un-zoomed
+    /// rect, `viewScale: 1`), so the margin/size formula lives exactly once.
+    static let cameraMarginFraction = 0.02
+
+    static func cameraBubbleRect(project: Project, outputSize: CGSize, viewScale: Double = 1) -> CGRect {
+        let short = min(outputSize.width, outputSize.height)
+        var side = project.camera.size * short
+        if project.camera.shrinkWhenZoomed {
+            let t = min(max((viewScale - 1) / (2 - 1), 0), 1)
+            side *= 1 + (0.7 - 1) * t   // lerp(1, 0.7, t) — SPEC §6.2 pass 4 formula
+        }
+        let margin = cameraMarginFraction * short
+        let x: Double, y: Double
+        switch project.camera.corner {
+        case .topLeft: x = margin; y = margin
+        case .topRight: x = outputSize.width - margin - side; y = margin
+        case .bottomLeft: x = margin; y = outputSize.height - margin - side
+        case .bottomRight: x = outputSize.width - margin - side; y = outputSize.height - margin - side
+        }
+        return CGRect(x: x, y: y, width: side, height: side)
+    }
+
+    /// Draws the camera texture in a rounded-rect SDF quad (reusing modes 3/4, same as the screen
+    /// pass) — square-cropped ("cover") from the camera's own aspect, mirrored when `camera.mirror`.
+    /// No motion blur (SPEC §6.2 only asks for it on the screen/cursor passes): `prevUvRect ==
+    /// uvRect` so the shared shader's tap loop is a no-op average.
+    private func drawCamera(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        var u = Uniforms()
+        u.rectNDC = SIMD4(-1, 1, 1, -1)
+        let contentUV = cameraContentUV(texture: texture, mirror: project.camera.mirror)
+        u.uvRect = extrapolatedUV(contentUV, contentRect: rectPx, to: outputSize)
+        u.prevUvRect = u.uvRect
+        u.pixelSize = SIMD2(Float(outputSize.width), Float(outputSize.height))
+        u.contentSize = SIMD2(Float(rectPx.width), Float(rectPx.height))
+        u.contentOffset = SIMD2(Float(rectPx.midX - outputSize.width / 2), Float(rectPx.midY - outputSize.height / 2))
+        u.radius = Float(project.camera.roundness * min(rectPx.width, rectPx.height) / 2)
+        u.shadowAlpha = Float(project.camera.shadow)
+        u.shadowBlur = Float(0.04 * min(outputSize.width, outputSize.height))
+        u.mode = texture.chroma != nil ? 4 : 3
+        encoder.setFragmentTexture(texture.luma, index: 0)
+        encoder.setFragmentTexture(texture.chroma ?? dummyTexture, index: 1)
+        draw(u, encoder: encoder)
+        encoder.setFragmentTexture(dummyTexture, index: 0)
+        encoder.setFragmentTexture(dummyTexture, index: 1)
+    }
+
+    /// Centre-crops the camera texture's own aspect to a square ("cover" fit — the bubble is always
+    /// square), mirrored horizontally when set.
+    private func cameraContentUV(texture: FrameState.Texture, mirror: Bool) -> SIMD4<Float> {
+        let w = Double(texture.luma.width), h = Double(texture.luma.height)
+        guard w > 0, h > 0 else { return SIMD4(0, 0, 1, 1) }
+        let aspect = w / h
+        var u0 = 0.0, v0 = 0.0, u1 = 1.0, v1 = 1.0
+        if aspect > 1 {
+            u0 = (1 - 1 / aspect) / 2; u1 = 1 - u0
+        } else if aspect < 1 {
+            v0 = (1 - aspect) / 2; v1 = 1 - v0
+        }
+        if mirror { swap(&u0, &u1) }
+        return SIMD4(Float(u0), Float(v0), Float(u1), Float(v1))
+    }
 
     /// `id == nil` (or a load failure) falls back to the plain system arrow — AppKit already ships
     /// it, so there's no need to bundle our own default cursor asset. Cached per package + id.
@@ -540,6 +609,30 @@ extension Compositor {
             throw SelfTestArgError.usage("CVPixelBuffer -> MTLTexture failed")
         }
 
+        // T-502: camera, decoded the same way `PreviewView.attachCamera` does — `isolateTrack` since
+        // `AVPlayerItemVideoOutput` can't select a track out of the shared composition.
+        var cameraTexture: FrameState.Texture?
+        let videoTracks = composition.tracks(withMediaType: .video)
+        if videoTracks.count > 1 {
+            let cameraComposition = isolateTrack(videoTracks[1], duration: composition.duration)
+            let cameraItem = AVPlayerItem(asset: cameraComposition)
+            let cameraOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+            ])
+            cameraItem.add(cameraOutput)
+            let cameraPlayer = AVPlayer(playerItem: cameraItem)
+            while cameraItem.status == .unknown { try await Task.sleep(nanoseconds: 10_000_000) }
+            if cameraItem.status == .readyToPlay {
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    cameraPlayer.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in cont.resume() }
+                }
+                if let cameraPixelBuffer = cameraOutput.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) {
+                    cameraTexture = textureCache.texture(from: cameraPixelBuffer)
+                }
+            }
+        }
+
         let outputSize = compositor.outputSize(for: project, longEdge: 1920)
         let width = Int(outputSize.width), height = Int(outputSize.height)
         let targetDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
@@ -551,7 +644,7 @@ extension Compositor {
             throw SelfTestArgError.usage("failed to set up Metal resources")
         }
 
-        let state = makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: nil, size: outputSize)
+        let state = makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
         compositor.render(state, to: target, commandBuffer: commandBuffer)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
