@@ -1494,6 +1494,9 @@ enum SelfTest {
             var counts: [String: Int] = [:]
             for e in log.events { counts[e.k.rawValue, default: 0] += 1 }
             print("SELFTEST events counts=\(counts)")
+            if let bad = log.events.first(where: { $0.t < 0 || $0.t > seconds + 1 }) {
+                throw NSError(domain: "SelfTest.events", code: 3, userInfo: [NSLocalizedDescriptionKey: "event t=\(bad.t) outside 0…\(seconds)s (clock conversion broken)"])
+            }
             let cursorFiles = (try? FileManager.default.contentsOfDirectory(atPath: cursorsDir.path)) ?? []
             guard cursorFiles.contains(where: { $0.hasSuffix(".png") }) else {
                 throw NSError(domain: "SelfTest.events", code: 2, userInfo: [NSLocalizedDescriptionKey: "no cursor image written (need at least one)"])

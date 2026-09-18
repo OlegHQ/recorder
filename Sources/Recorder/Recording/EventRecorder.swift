@@ -71,8 +71,8 @@ final class EventRecorder {
 
     // MARK: - Clock
 
-    /// `mach_absolute_time()`-based ticks converted to seconds via `mach_timebase_info`, matching
-    /// `CGEventTimestamp` (also mach ticks) and `t0HostTime` (host-time clock — same base).
+    /// `mach_absolute_time()` converted to seconds via `mach_timebase_info` — the same base as
+    /// `t0HostTime` (host-time clock).
     private static func hostSeconds(_ ticks: UInt64 = mach_absolute_time()) -> Double {
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
@@ -130,7 +130,9 @@ final class EventRecorder {
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
-        let t = outputTime(EventRecorder.hostSeconds(event.timestamp))
+        // `CGEvent.timestamp` is already nanoseconds (not mach ticks): on Apple Silicon the 125/3
+        // timebase would inflate it ~41.7× and push every event past the end of the recording.
+        let t = outputTime(Double(event.timestamp) / 1_000_000_000)
         guard t >= 0 else { return } // pre-t0 stragglers
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
