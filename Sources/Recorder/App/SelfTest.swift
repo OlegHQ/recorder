@@ -599,6 +599,93 @@ enum SelfTest {
                 }
             }
         },
+        // T-207b/T-204: builds the status menu in both states and the global hotkey table (no live
+        // status item / window needed) and checks them against SPEC §4.7/§8's titles, order and key
+        // equivalents, that no two hotkeys share a binding, and every menu item has a target and action.
+        "menus": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            // SPEC §4.7 global hotkey table (T-204).
+            let expected: [(title: String, keyCode: UInt16, mods: NSEvent.ModifierFlags, alwaysActive: Bool)] = [
+                ("Start/Finish Recording", 15, [.control, .option, .command], true),  // ⌃⌥⌘R
+                ("Pause/Resume", 35, [.control, .option, .command], true),            // ⌃⌥⌘P
+                ("New Recording", 36, [.control, .command], false),                   // ⌃⌘↩
+                ("Record Display", 20, [.option, .command], false),                   // ⌥⌘3
+                ("Record Window", 21, [.option, .command], false),                    // ⌥⌘4
+                ("Record Area", 23, [.option, .command], false),                      // ⌥⌘5
+                ("Open Last Project", 6, [.option, .command], false),                 // ⌥⌘Z
+            ]
+            guard Hotkeys.table.count == expected.count else {
+                throw Fail(description: "hotkey table has \(Hotkeys.table.count) entries, want \(expected.count)")
+            }
+            for (got, want) in zip(Hotkeys.table, expected) {
+                guard got.title == want.title, got.keyCode == want.keyCode,
+                      got.modifiers == want.mods, got.alwaysActive == want.alwaysActive else {
+                    throw Fail(description: "hotkey \(got.title): got keyCode=\(got.keyCode) mods=\(got.modifiers) alwaysActive=\(got.alwaysActive), want \(want)")
+                }
+            }
+            var seenBindings = Set<String>()
+            for h in Hotkeys.table {
+                let binding = "\(h.keyCode)-\(h.modifiers.rawValue)"
+                guard seenBindings.insert(binding).inserted else {
+                    throw Fail(description: "duplicate hotkey binding on \(h.title)")
+                }
+            }
+
+            @MainActor func nonSeparators(_ menu: NSMenu) -> [NSMenuItem] { menu.items.filter { !$0.isSeparatorItem } }
+            @MainActor func checkItems(_ items: [NSMenuItem], _ expected: [(title: String, key: String, mods: NSEvent.ModifierFlags)], _ label: String) throws {
+                guard items.count == expected.count else {
+                    throw Fail(description: "\(label): \(items.count) items (\(items.map(\.title))), want \(expected.count)")
+                }
+                for (item, want) in zip(items, expected) {
+                    guard item.title == want.title else { throw Fail(description: "\(label): title \(item.title) != \(want.title)") }
+                    guard item.keyEquivalent == want.key else {
+                        throw Fail(description: "\(label) \(item.title): key \(item.keyEquivalent.debugDescription) != \(want.key.debugDescription)")
+                    }
+                    guard item.keyEquivalentModifierMask == want.mods else {
+                        throw Fail(description: "\(label) \(item.title): mods \(item.keyEquivalentModifierMask) != \(want.mods)")
+                    }
+                    guard item.action != nil, item.target != nil else {
+                        throw Fail(description: "\(label) \(item.title): missing target/action")
+                    }
+                }
+            }
+
+            try await MainActor.run {
+                let delegate = AppDelegate()
+
+                // SPEC §8 idle status menu (`reference/status-item-menu.png`).
+                let idle = delegate.buildIdleStatusMenu()
+                try checkItems(nonSeparators(idle), [
+                    ("New Recording…", "\r", [.control, .command]),
+                    ("Record Display", "3", [.option, .command]),
+                    ("Record Window", "4", [.option, .command]),
+                    ("Record Area", "5", [.option, .command]),
+                    ("Settings…", ",", [.command]),
+                    ("Show Recorder in Dock", "d", [.command]),
+                    ("Projects", "o", [.command, .shift]),
+                    ("Open…", "o", [.command]),
+                    ("Open Last Project", "z", [.option, .command]),
+                    ("Quit Recorder", "q", [.command]),
+                ], "idle menu")
+                guard idle.items.filter(\.isSeparatorItem).count == 4 else {
+                    throw Fail(description: "idle menu: \(idle.items.filter(\.isSeparatorItem).count) separators, want 4")
+                }
+
+                // SPEC §4.7 in-progress menu.
+                let recording = delegate.buildRecordingStatusMenu()
+                try checkItems(nonSeparators(recording), [
+                    ("Finish", "r", [.control, .option, .command]),
+                    ("Pause", "p", [.control, .option, .command]),
+                    ("Restart", "", [.command]),
+                    ("Delete", "", [.command]),
+                    ("Hide widget", "", [.command]),
+                ], "recording menu")
+                guard recording.items.filter(\.isSeparatorItem).count == 1 else {
+                    throw Fail(description: "recording menu: \(recording.items.filter(\.isSeparatorItem).count) separators, want 1")
+                }
+            }
+        },
         "waveform": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }

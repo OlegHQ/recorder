@@ -31,9 +31,8 @@ struct Hotkey {
                alwaysActive: false, action: { showAndSelect(.window) }),
         Hotkey(keyCode: KeyCode.five, modifiers: [.option, .command], title: "Record Area",
                alwaysActive: false, action: { showAndSelect(.area) }),
-        // No-op until T-207b wires "Open Last Project" (needs the newest-package lookup that task adds).
         Hotkey(keyCode: KeyCode.z, modifiers: [.option, .command], title: "Open Last Project",
-               alwaysActive: false, action: {}),
+               alwaysActive: false, action: { AppDelegate.openLastProject() }),
     ]
 
     private static func showAndSelect(_ mode: RecordingSettings.Mode) {
