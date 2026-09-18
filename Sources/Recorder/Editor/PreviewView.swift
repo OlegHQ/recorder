@@ -25,6 +25,13 @@ final class PreviewView: MTKView {
     private var statusObservation: NSKeyValueObservation?
     private var displayLink: CADisplayLink?
 
+    // T-502: camera.mov decode. `AVPlayerItemVideoOutput` has no per-track selection, so the camera
+    // gets its own player over an `isolateTrack`-built single-track composition, kept in lockstep
+    // with `player` (every seek/rate change mirrored) — see `FrameSource.isolateTrack`.
+    private var cameraPlayer: AVPlayer?
+    private var cameraOutput: AVPlayerItemVideoOutput?
+    private var lastCameraPixelBuffer: CVPixelBuffer?
+
     private var isSeeking = false
     private var pendingSeekTime: Double?
     private var lastClips: [Clip]
@@ -32,6 +39,10 @@ final class PreviewView: MTKView {
     /// Bounds the "no frame yet" redraw retry below (SPEC §6.2: "paused always shows a frame").
     private var pendingFrameRetries = 0
     private static let maxFrameRetries = 30
+    // T-502: drag-to-reposition the camera bubble — `nil` unless the drag started inside it.
+    // `Camera.corner` is the only stored position (four discrete corners, SPEC §6.6), so there's no
+    // continuous position to follow live; the bubble snaps to the nearest corner on mouse-up.
+    private var cameraDragActive = false
 
     init(model: EditorModel) {
         self.model = model
@@ -93,17 +104,23 @@ final class PreviewView: MTKView {
             self.needsDisplay = true
             if self.pendingSeekTime != nil { self.performPendingSeek() }
         }
+        // Best-effort: the camera bubble only needs to be roughly in sync, not gate the main seek's
+        // completion callback (AC-ED-2 parity is graded on the screen path; export reads camera
+        // frame-accurately off its own reader, T-505).
+        cameraPlayer?.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     private func setRate(_ rate: Float) {
         guard rate != 0, let player else { pause(); return }
         model.isPlaying = true
         player.rate = rate
+        cameraPlayer?.rate = rate
         startDisplayLink()
     }
 
     private func pause() {
         player?.pause()
+        cameraPlayer?.pause()
         model.isPlaying = false
         stopDisplayLink()
         needsDisplay = true
@@ -198,9 +215,8 @@ final class PreviewView: MTKView {
         screenOutput = output
         lastScreenPixelBuffer = nil
         pendingFrameRetries = 0
-        // ponytail: camera.mov's video output lands with the camera compositing pass (T-502/M4) —
-        // nothing consumes FrameState.camera yet (Compositor doesn't draw a camera quad), and
-        // AVPlayerItemVideoOutput has no per-track selection without a custom AVVideoComposition.
+
+        attachCamera(from: composition)
 
         // A freshly attached item has no decoded frame yet — `copyPixelBuffer` returns nil until
         // one exists, so drawing right away (or on a bare `readyToPlay`, which doesn't guarantee the
@@ -227,6 +243,35 @@ final class PreviewView: MTKView {
         let time = CMTime(seconds: resumeSeconds, preferredTimescale: 600)
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             self?.needsDisplay = true
+        }
+        cameraPlayer?.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// T-502: `composition`'s video track[1] (camera), isolated into its own single-track
+    /// composition/player since `AVPlayerItemVideoOutput` can't select a track out of a shared item
+    /// (`FrameSource.isolateTrack`). No-op when the project has no second video track.
+    private func attachCamera(from composition: AVMutableComposition) {
+        let videoTracks = composition.tracks(withMediaType: .video)
+        guard videoTracks.count > 1 else {
+            cameraPlayer = nil; cameraOutput = nil; lastCameraPixelBuffer = nil
+            return
+        }
+        let cameraComposition = isolateTrack(videoTracks[1], duration: composition.duration)
+        let item = AVPlayerItem(asset: cameraComposition)
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+        ])
+        item.add(output)
+        cameraOutput = output
+        lastCameraPixelBuffer = nil
+        if let cameraPlayer {
+            cameraPlayer.replaceCurrentItem(with: item)
+        } else {
+            let newPlayer = AVPlayer(playerItem: item)
+            newPlayer.actionAtItemEnd = .pause
+            newPlayer.volume = 0
+            cameraPlayer = newPlayer
         }
     }
 
@@ -255,7 +300,8 @@ final class PreviewView: MTKView {
             scheduleFrameRetryIfNeeded()
         }
         let screenTexture = pixelBuffer.flatMap { textureCache.texture(from: $0) }
-        let state = makeFrameState(model: model, outputTime: model.playhead, screen: screenTexture, camera: nil, size: viewportRect.size)
+        let cameraTexture = currentCameraPixelBuffer().flatMap { textureCache.texture(from: $0) }
+        let state = makeFrameState(model: model, outputTime: model.playhead, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
 
         compositor.render(state, to: drawable.texture, commandBuffer: commandBuffer, viewport: viewportRect)
         commandBuffer.present(drawable)
@@ -279,6 +325,71 @@ final class PreviewView: MTKView {
             lastScreenPixelBuffer = buffer
         }
         return lastScreenPixelBuffer
+    }
+
+    private func currentCameraPixelBuffer() -> CVPixelBuffer? {
+        guard let output = cameraOutput else { return nil }
+        let time = output.itemTime(forHostTime: CACurrentMediaTime())
+        if let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) {
+            lastCameraPixelBuffer = buffer
+        }
+        return lastCameraPixelBuffer
+    }
+
+    // MARK: - Camera drag (SPEC §6.6 Camera tab, T-502)
+
+    /// This view isn't flipped (AppKit default, bottom-left origin/y-up) — mouse points are
+    /// converted straight from the event, and the camera-bubble geometry below is expressed in that
+    /// same convention (unlike `Compositor`'s own top-left/y-down canvas space).
+    private func viewportRectInBounds() -> CGRect {
+        let unit = compositor.outputSize(for: model.project, longEdge: 1000)   // aspect only
+        let aspect = unit.width / unit.height
+        return screenRect(output: bounds.size, cropAspect: aspect, padding: 0)
+    }
+
+    /// `Compositor.cameraBubbleRect` is top-left/y-down (canvas pixel space); flip it into this
+    /// view's bottom-left/y-up bounds space instead of duplicating the margin/size formula.
+    /// Ignores `shrinkWhenZoomed` (uses `viewScale: 1`) — a reasonable hit-test simplification, the
+    /// bubble only shrinks a little and dragging mid-zoom is a rare edge case.
+    private func cameraBubbleRectInBounds() -> CGRect {
+        let viewport = viewportRectInBounds()
+        let local = Compositor.cameraBubbleRect(project: model.project, outputSize: viewport.size)
+        return CGRect(x: viewport.minX + local.minX, y: viewport.minY + (viewport.height - local.maxY),
+                       width: local.width, height: local.height)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if model.project.source.hasCamera, cameraBubbleRectInBounds().contains(p) {
+            cameraDragActive = true
+        } else {
+            cameraDragActive = false
+            super.mouseDown(with: event)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard cameraDragActive else { super.mouseDragged(with: event); return }
+        // No live follow: `Camera.corner` is the only stored position (four discrete corners) — the
+        // bubble snaps to whichever corner the mouse is released over, like the recording-time
+        // bubble (`CameraBubblePanel.snap()`).
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard cameraDragActive else { super.mouseUp(with: event); return }
+        cameraDragActive = false
+        let p = convert(event.locationInWindow, from: nil)
+        let viewport = viewportRectInBounds()
+        let corner: Camera.Corner
+        switch (p.x < viewport.midX, p.y < viewport.midY) {
+        case (true, true): corner = .bottomLeft
+        case (true, false): corner = .topLeft
+        case (false, true): corner = .bottomRight
+        case (false, false): corner = .topRight
+        }
+        if corner != model.project.camera.corner {
+            model.edit("Camera position") { $0.camera.corner = corner }
+        }
     }
 }
 

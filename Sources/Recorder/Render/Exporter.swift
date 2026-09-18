@@ -458,16 +458,21 @@ enum ExporterSelfTest {
 
         // ≥ 5 times spread across the timeline, plus: one exactly on a likely (30 fps) frame
         // boundary (`FrameHold`'s floor-selection must still match the player there), one inside
-        // the last clip when it's sped up (composition's `scaleTimeRange` region), and one inside
-        // the first enabled zoom (view/cursor sampling under a non-identity `ViewTransform`).
+        // the last clip when it's sped up (composition's `scaleTimeRange` region), one inside a
+        // zoom's spring transition (not just its settled midpoint, T-501: `view != prevView`, so
+        // motion blur is actually engaged), and one inside a layout's cross-fade (T-503).
         var times: Set<Double> = [duration * 0.08, duration * 0.28, duration * 0.5, duration * 0.73, duration * 0.92]
         let boundary = (Double(Int(duration * 15)) / 30.0)
         if boundary > 0, boundary < duration { times.insert(boundary) }
         if let lastClip = project.clips.last, lastClip.speed != 1 {
             times.insert(duration - lastClip.outputDuration / 2)
         }
-        if let zoom = project.zooms.first(where: \.enabled), let mid = timeMap.outputTime(atSource: (zoom.start + zoom.end) / 2) {
-            times.insert(mid)
+        if let zoom = project.zooms.first(where: \.enabled) {
+            if let mid = timeMap.outputTime(atSource: (zoom.start + zoom.end) / 2) { times.insert(mid) }
+            if let transition = timeMap.outputTime(atSource: zoom.start + 0.15) { times.insert(transition) }
+        }
+        if let layout = project.layouts.first, let fade = timeMap.outputTime(atSource: layout.start + 0.15) {
+            times.insert(fade)
         }
         let orderedTimes = times.filter { $0 >= 0 && $0 < duration }.sorted()
 
@@ -478,6 +483,8 @@ enum ExporterSelfTest {
         let width = Int(outputSize.width), height = Int(outputSize.height)
 
         let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
+        let videoTracks = composition.tracks(withMediaType: .video)
+        let hasCamera = videoTracks.count > 1
 
         // Preview path: AVPlayerItemVideoOutput, seek + copyPixelBuffer (same as PreviewView.draw).
         let item = AVPlayerItem(asset: composition)
@@ -491,19 +498,47 @@ enum ExporterSelfTest {
         while item.status == .unknown { try await Task.sleep(nanoseconds: 10_000_000) }
         guard item.status == .readyToPlay else { throw SelfTestArgError.usage("preview item failed: \(String(describing: item.error))") }
 
+        // Preview path, camera (T-502): isolated single-track composition/player, same technique as
+        // `PreviewView.attachCamera` — `AVPlayerItemVideoOutput` has no per-track selection.
+        var cameraPlayer: AVPlayer?
+        var cameraPreviewOutput: AVPlayerItemVideoOutput?
+        if hasCamera {
+            let cameraItem = AVPlayerItem(asset: isolateTrack(videoTracks[1], duration: composition.duration))
+            let cOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+            ])
+            cameraItem.add(cOutput)
+            let p = AVPlayer(playerItem: cameraItem)
+            while cameraItem.status == .unknown { try await Task.sleep(nanoseconds: 10_000_000) }
+            guard cameraItem.status == .readyToPlay else { throw SelfTestArgError.usage("preview camera item failed: \(String(describing: cameraItem.error))") }
+            cameraPlayer = p
+            cameraPreviewOutput = cOutput
+        }
+
         // Export path: AVAssetReaderTrackOutput, sequential decode via FrameHold (same as Exporter).
         let reader = try AVAssetReader(asset: composition)
-        guard let screenTrack = composition.tracks(withMediaType: .video).first else { throw SelfTestArgError.usage("no video track") }
+        guard let screenTrack = videoTracks.first else { throw SelfTestArgError.usage("no video track") }
         let exportOutput = AVAssetReaderTrackOutput(track: screenTrack, outputSettings: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             kCVPixelBufferMetalCompatibilityKey as String: true,
         ])
         reader.add(exportOutput)
+        var cameraExportOutput: AVAssetReaderTrackOutput?
+        if hasCamera {
+            let o = AVAssetReaderTrackOutput(track: videoTracks[1], outputSettings: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+            ])
+            reader.add(o)
+            cameraExportOutput = o
+        }
         guard reader.startReading() else { throw SelfTestArgError.usage("reader failed to start") }
         let hold = FrameHold(output: exportOutput)
+        let cameraHold = cameraExportOutput.map(FrameHold.init)
 
-        func render(_ texture: FrameState.Texture?, outputTime: Double) async throws -> [UInt8] {
-            let state = await makeFrameState(model: model, outputTime: outputTime, screen: texture, camera: nil, size: outputSize)
+        func render(_ texture: FrameState.Texture?, camera: FrameState.Texture?, outputTime: Double) async throws -> [UInt8] {
+            let state = await makeFrameState(model: model, outputTime: outputTime, screen: texture, camera: camera, size: outputSize)
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .shared
@@ -541,9 +576,25 @@ enum ExporterSelfTest {
                 throw SelfTestArgError.usage("decoded size mismatch at t=\(t): preview=\(previewSize) export=\(exportSize)")
             }
 
+            var previewCameraTex: FrameState.Texture?
+            var exportCameraTex: FrameState.Texture?
+            if hasCamera, let cameraPlayer, let cameraPreviewOutput, let cameraHold {
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    cameraPlayer.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in cont.resume() }
+                }
+                guard let previewCameraPB = cameraPreviewOutput.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) else {
+                    throw SelfTestArgError.usage("no preview-path camera pixel buffer at t=\(t)")
+                }
+                previewCameraTex = textureCache.texture(from: previewCameraPB)
+                guard let exportCameraPB = cameraHold.imageBuffer(upTo: t) else {
+                    throw SelfTestArgError.usage("no export-path camera pixel buffer at t=\(t)")
+                }
+                exportCameraTex = textureCache.texture(from: exportCameraPB)
+            }
+
             // (3) both call `makeFrameState` with the identical outputTime/size (see `render` above).
-            let previewBytes = try await render(previewTex, outputTime: t)
-            let exportBytes = try await render(exportTex, outputTime: t)
+            let previewBytes = try await render(previewTex, camera: previewCameraTex, outputTime: t)
+            let exportBytes = try await render(exportTex, camera: exportCameraTex, outputTime: t)
             var tMaxDelta = 0
             for i in 0..<previewBytes.count {
                 let delta = abs(Int(previewBytes[i]) - Int(exportBytes[i]))

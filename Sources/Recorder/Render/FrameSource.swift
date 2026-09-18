@@ -12,7 +12,21 @@ enum FrameSourceError: Error { case missingScreenTrack, trackCreationFailed }
 func makeComposition(package: URL, project: Project) async throws -> (AVMutableComposition, AVAudioMix) {
     let composition = AVMutableComposition()
 
+    // Every `AVURLAsset` below is kept alive (a `var …Asset: AVURLAsset?` at function scope, not a
+    // `let` scoped inside its own `if`) until the `insertTimeRange` calls near the bottom finish —
+    // T-502 fix: an asset scoped only inside its `if project.source.has…` block gets deallocated
+    // (tearing down its decode session) as soon as that block exits, even though the `AVAssetTrack`
+    // extracted from it is still held; a *later* `insertTimeRange(_:of:at:)` using that track then
+    // fails with a generic `AVFoundationErrorDomain` -11800/-12780 (confirmed by reproducing it with
+    // a minimal two-video-track composition: identical code succeeds when the source asset is kept
+    // alive in an outer scope, fails when it's only reachable via its already-extracted track).
+    var screenAssetKeepAlive: AVURLAsset?
+    var cameraAssetKeepAlive: AVURLAsset?
+    var micAssetKeepAlive: AVURLAsset?
+    var systemAssetKeepAlive: AVURLAsset?
+
     let screenAsset = AVURLAsset(url: package.appendingPathComponent("screen.mov"))
+    screenAssetKeepAlive = screenAsset
     guard let screenSource = try await screenAsset.loadTracks(withMediaType: .video).first else {
         throw FrameSourceError.missingScreenTrack
     }
@@ -24,6 +38,7 @@ func makeComposition(package: URL, project: Project) async throws -> (AVMutableC
     var cameraSource: AVAssetTrack?
     if project.source.hasCamera {
         let cameraAsset = AVURLAsset(url: package.appendingPathComponent("camera.mov"))
+        cameraAssetKeepAlive = cameraAsset
         cameraSource = try await cameraAsset.loadTracks(withMediaType: .video).first
         if cameraSource != nil {
             cameraTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
@@ -34,6 +49,7 @@ func makeComposition(package: URL, project: Project) async throws -> (AVMutableC
     var micSource: AVAssetTrack?
     if project.source.hasMic {
         let micAsset = AVURLAsset(url: package.appendingPathComponent("mic.m4a"))
+        micAssetKeepAlive = micAsset
         micSource = try await micAsset.loadTracks(withMediaType: .audio).first
         if micSource != nil {
             micTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
@@ -44,6 +60,7 @@ func makeComposition(package: URL, project: Project) async throws -> (AVMutableC
     var systemSource: AVAssetTrack?
     if project.source.hasSystemAudio {
         let systemAsset = AVURLAsset(url: package.appendingPathComponent("system.m4a"))
+        systemAssetKeepAlive = systemAsset
         systemSource = try await systemAsset.loadTracks(withMediaType: .audio).first
         if systemSource != nil {
             systemTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
@@ -87,6 +104,20 @@ func makeComposition(package: URL, project: Project) async throws -> (AVMutableC
     // AVAssetExportSession that plays this composition, not of the composition/mix themselves —
     // set on the `AVPlayerItem` in `PreviewView.attach` (T-306) and the exporter (T-505).
     return (composition, audioMix)
+}
+
+/// `AVPlayerItemVideoOutput` has no per-track selection — it always yields the composited/"current"
+/// video, so a second simultaneous track (camera, T-502) needs its own single-track composition to
+/// get its own output. Copies `track`'s already-composed timeline (any `scaleTimeRange` a caller
+/// applied to the parent composition is baked into `track`'s segments) into a fresh composition.
+/// Shared by `PreviewView`'s live camera output and the `preview-frame`/`parity` selftests, which
+/// build the same "preview path" outside `PreviewView`.
+func isolateTrack(_ track: AVAssetTrack, duration: CMTime) -> AVMutableComposition {
+    let isolated = AVMutableComposition()
+    if let newTrack = isolated.addMutableTrack(withMediaType: track.mediaType, preferredTrackID: kCMPersistentTrackID_Invalid) {
+        try? newTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: track, at: .zero)
+    }
+    return isolated
 }
 
 /// Zero-copy `CVPixelBuffer` → `MTLTexture`, cached per-buffer generation by `CVMetalTextureCache`.

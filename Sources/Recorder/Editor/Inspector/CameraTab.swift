@@ -2,10 +2,10 @@ import SwiftUI
 import RecorderCore
 
 /// SPEC §6.6 Camera tab: Size, Position (corner), Roundness, Shadow, Mirror, Shrink when zoomed —
-/// every `Camera` field. Disabled with an empty-state line when the project has no camera track
-/// (`source.hasCamera == false`, T-502 UI half). "[+ Add fullscreen layout]" in the mockup adds a
-/// `Layout` block, not a `Camera` field — that's the Layout track/panel, T-503's own scope, so it's
-/// left out here.
+/// every `Camera` field — plus "[+ Add fullscreen layout]" (adds a `cameraFull` `Layout` block at
+/// the playhead's SOURCE time, via `Project.addLayout`, the same generic block op the layout
+/// lane's own empty-lane click uses). Disabled with an empty-state line when the project has no
+/// camera track (`source.hasCamera == false`).
 struct CameraTab: View {
     let model: EditorModel
 
@@ -39,8 +39,25 @@ struct CameraTab: View {
                 .toggleStyle(.checkbox)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.textPrimaryColor)
+
+            Button(action: addFullscreenLayout) {
+                Label("Add fullscreen layout", systemImage: "plus")
+            }
         }
         .disabled(!hasCamera)
+    }
+
+    /// SPEC §6.6 Camera tab's "[+ Add fullscreen layout]": one `cameraFull` `Layout` block at the
+    /// playhead's SOURCE time (`TimeMap`, per CLAUDE.md's "source-time storage" rule), selected
+    /// afterwards so its panel shows immediately.
+    private func addFullscreenLayout() {
+        let sourceTime = model.timeMap.sourceTime(atOutput: model.playhead)
+        var newID: UUID?
+        model.edit("Add Layout") { newID = $0.addLayout(atSource: sourceTime, kind: .cameraFull) }
+        if let newID {
+            model.selectedClip = nil
+            model.selection = [newID]
+        }
     }
 
     /// Four corner buttons (◰ ◳ ◱ ◲, SPEC §6.6's own glyphs) mirroring `Camera.Corner`'s case order.
