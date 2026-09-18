@@ -26,8 +26,20 @@ final class TimelineView: NSView {
     static let zoomHeight: CGFloat = 32
     static let layoutHeight: CGFloat = 28
     static let blockRadius: CGFloat = 10
+    /// SPEC §7.2 "Navigation": zoom range is whole project ↔ 1 frame = 8 pt, at 60 fps.
+    static let maxPxPerSecond: Double = 8 * 60
+
+    // MARK: - Navigation state (T-405)
+
+    private var autoScrollEnabled = true
+    private var wasPlaying = false
+    private var dragKind: DragKind?
+    private enum DragKind { case scrub }
+    private var hoverX: CGFloat?
+    private var trackingArea: NSTrackingArea?
 
     override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -50,11 +62,25 @@ final class TimelineView: NSView {
         withObservationTracking {
             _ = model.project
             _ = model.playhead
+            _ = model.isPlaying
         } onChange: { [weak self] in
             DispatchQueue.main.async {
-                self?.needsDisplay = true
-                self?.observeModel()
+                guard let self, let model = self.model else { return }
+                // "manual scroll disables auto-scroll until playback restarts" (SPEC §7.2).
+                if model.isPlaying, !self.wasPlaying { self.autoScrollEnabled = true }
+                self.wasPlaying = model.isPlaying
+                self.autoScrollIfNeeded()
+                self.needsDisplay = true
+                self.observeModel()
             }
+        }
+    }
+
+    /// During playback, scroll a full page right once the playhead exits the right edge.
+    private func autoScrollIfNeeded() {
+        guard let model, model.isPlaying, autoScrollEnabled else { return }
+        if geometry.x(forOutput: model.playhead) >= geometry.width {
+            geometry.scrollX = clampScrollX(geometry.scrollX + geometry.width)
         }
     }
 
@@ -107,6 +133,7 @@ final class TimelineView: NSView {
         if hasLayoutLane { drawLayoutLane(project, timeMap) }
         drawLaneDividers()
         drawPlayhead(model.playhead)
+        drawHover()
     }
 
     private func drawLaneDividers() {
@@ -293,6 +320,26 @@ final class TimelineView: NSView {
         label.draw(at: CGPoint(x: chip.minX + 4, y: chip.minY + 2), withAttributes: attrs)
     }
 
+    /// 1 px white @ 30% line following the mouse, with a timecode tooltip (SPEC §7.1 "hover line").
+    private func drawHover() {
+        guard let hoverX, hoverX > Self.gutter else { return }
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: hoverX, y: 0))
+        line.line(to: CGPoint(x: hoverX, y: contentHeight))
+        line.lineWidth = 1
+        Theme.textPrimary.withAlphaComponent(0.3).setStroke()
+        line.stroke()
+
+        let t = geometry.output(forX: Double(hoverX) - Double(Self.gutter))
+        let attrs: [NSAttributedString.Key: Any] = [.font: Theme.timecodeFont(10), .foregroundColor: Theme.textSecondary]
+        let label = playheadLabel(t) as NSString
+        let size = label.size(withAttributes: attrs)
+        let chip = CGRect(x: hoverX + 4, y: contentHeight - size.height - 6, width: size.width + 8, height: size.height + 4)
+        Theme.bgControl.withAlphaComponent(0.9).setFill()
+        NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4).fill()
+        label.draw(at: CGPoint(x: chip.minX + 4, y: chip.minY + 2), withAttributes: attrs)
+    }
+
     // MARK: - Timecode formatting
 
     private func rulerLabel(_ t: Double, interval: Double) -> String {
@@ -312,5 +359,176 @@ final class TimelineView: NSView {
 
     private func formatSpeed(_ speed: Double) -> String {
         speed.truncatingRemainder(dividingBy: 1) == 0 ? String(format: "%.0f", speed) : String(format: "%.1f", speed)
+    }
+
+    // MARK: - Zoom range + fit (SPEC §7.2 "Navigation")
+
+    /// The px/s that fits the whole project's output duration in the current view width — the
+    /// low end of the zoom range ("whole project ↔ 1 frame = 8 pt").
+    private func minPxPerSecond() -> Double {
+        guard let model else { return 8 }
+        let duration = model.timeMap.outputDuration
+        return duration > 0 ? geometry.width / duration : 8
+    }
+
+    private func clampScrollX(_ x: Double) -> Double {
+        let maxX = max(0, (model?.timeMap.outputDuration ?? 0) * geometry.pxPerSecond - geometry.width)
+        return min(max(0, x), maxX)
+    }
+
+    /// `⇧Z` / the Fit button: zooms out (or in) to show the whole project.
+    func fit() {
+        geometry.pxPerSecond = minPxPerSecond()
+        geometry.scrollX = 0
+        needsDisplay = true
+    }
+
+    private func zoom(by factor: Double, anchorX: Double) {
+        geometry.zoom(by: factor, anchorX: anchorX, minPxPerSecond: minPxPerSecond(), maxPxPerSecond: Self.maxPxPerSecond)
+        geometry.scrollX = clampScrollX(geometry.scrollX)
+        needsDisplay = true
+    }
+
+    /// 0...1 position for a "slider in the timeline toolbar" (linear over the zoom range).
+    var zoomSliderValue: Double {
+        let lo = minPxPerSecond(), hi = Self.maxPxPerSecond
+        guard hi > lo else { return 0 }
+        return (geometry.pxPerSecond - lo) / (hi - lo)
+    }
+
+    func setZoom(sliderValue: Double) {
+        let lo = minPxPerSecond(), hi = Self.maxPxPerSecond
+        let target = lo + (hi - lo) * min(max(sliderValue, 0), 1)
+        zoom(by: target / geometry.pxPerSecond, anchorX: geometry.x(forOutput: model?.playhead ?? 0))
+    }
+
+    /// View-local x (past the gutter, as `geometry` expects) for a point already converted to
+    /// this view's coordinate space.
+    private func geometryX(_ p: NSPoint) -> Double { Double(p.x) - Double(Self.gutter) }
+
+    // MARK: - Scroll / pinch (SPEC §7.2 "Navigation")
+
+    override func scrollWheel(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if event.modifierFlags.contains(.command) {
+            zoom(by: exp(Double(event.scrollingDeltaY) * 0.01), anchorX: geometryX(p))
+        } else {
+            geometry.scrollX = clampScrollX(geometry.scrollX - Double(event.scrollingDeltaX))
+            autoScrollEnabled = false
+            needsDisplay = true
+        }
+    }
+
+    override func magnify(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        zoom(by: 1 + Double(event.magnification), anchorX: geometryX(p))
+    }
+
+    // MARK: - Keyboard (⌘=/⌘- anchored at the playhead, ⇧Z = fit)
+
+    override func keyDown(with event: NSEvent) {
+        let cmd = event.modifierFlags.contains(.command)
+        let shift = event.modifierFlags.contains(.shift)
+        let chars = event.charactersIgnoringModifiers
+        if cmd, chars == "=" || chars == "+", let model {
+            zoom(by: 1.4, anchorX: geometry.x(forOutput: model.playhead))
+        } else if cmd, chars == "-", let model {
+            zoom(by: 1 / 1.4, anchorX: geometry.x(forOutput: model.playhead))
+        } else if shift, chars?.lowercased() == "z" {
+            fit()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    // MARK: - Ruler scrub (click/drag on the ruler moves the playhead; SPEC §7.2 "Navigation")
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        let p = convert(event.locationInWindow, from: nil)
+        guard p.y <= Self.rulerHeight else { return }
+        dragKind = .scrub
+        scrub(toViewX: p.x)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard dragKind == .scrub else { return }
+        scrub(toViewX: convert(event.locationInWindow, from: nil).x)
+    }
+
+    override func mouseUp(with event: NSEvent) { dragKind = nil }
+
+    private func scrub(toViewX viewX: CGFloat) {
+        guard let model else { return }
+        let t = geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0)))
+        model.playhead = min(max(0, t), model.timeMap.outputDuration)
+    }
+
+    // MARK: - Hover line + timecode tooltip (`NSTrackingArea`, `mouseMoved`)
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved], owner: self)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        hoverX = convert(event.locationInWindow, from: nil).x
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hoverX = nil
+        needsDisplay = true
+    }
+}
+
+/// SPEC §7.1's 32 pt toolbar row above the ruler: just the Fit button and zoom slider that T-405
+/// drives (`TimelineView.fit()`/`setZoom(sliderValue:)`). The split/zoom/undo/redo buttons belong
+/// to whichever task implements those actions (T-407, T-409, already-wired undo/redo menu items).
+final class TimelineToolbar: NSView {
+    weak var timelineView: TimelineView? {
+        didSet { syncSlider() }
+    }
+
+    private let fitButton = NSButton(title: "Fit", target: nil, action: nil)
+    private let slider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        fitButton.bezelStyle = .rounded
+        fitButton.target = self
+        fitButton.action = #selector(fitTapped)
+        slider.target = self
+        slider.action = #selector(sliderChanged)
+
+        let stack = NSStackView(views: [fitButton, slider])
+        stack.orientation = .horizontal
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func syncSlider() {
+        guard let timelineView else { return }
+        slider.doubleValue = timelineView.zoomSliderValue
+    }
+
+    @objc private func fitTapped() {
+        timelineView?.fit()
+        syncSlider()
+    }
+
+    @objc private func sliderChanged() {
+        timelineView?.setZoom(sliderValue: slider.doubleValue)
     }
 }
