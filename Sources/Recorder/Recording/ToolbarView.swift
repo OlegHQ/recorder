@@ -6,6 +6,7 @@ import AVFoundation
 struct ToolbarView: View {
     var settings = RecordingSettings.shared
     var onClose: () -> Void
+    var onSelectMode: (RecordingSettings.Mode) -> Void
     var onCamera: () -> Void
     var onMicrophone: () -> Void
     var onSystemAudio: () -> Void
@@ -46,7 +47,7 @@ struct ToolbarView: View {
 
     private func modeButton(_ mode: RecordingSettings.Mode, symbol: String, title: String) -> some View {
         let selected = settings.mode == mode
-        return Button { settings.mode = mode } label: {
+        return Button { onSelectMode(mode) } label: {
             VStack(spacing: 2) {
                 Image(systemName: symbol).font(.system(size: 16))
                 Text(title).font(Font(Theme.captionFont))

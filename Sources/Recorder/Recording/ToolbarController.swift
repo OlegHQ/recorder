@@ -15,10 +15,15 @@ final class ToolbarController: NSObject {
     func show() {
         // Onboarding (T-102) owns this window while permissions are missing (AC-ONB-1).
         guard Permissions.allGranted else { return }
-        if let panel { panel.makeKeyAndOrderFront(nil); return }
+        if let panel {
+            panel.makeKeyAndOrderFront(nil)
+            SourcePickerOverlay.show(mode: RecordingSettings.shared.mode)
+            return
+        }
 
         let view = ToolbarHostingView(rootView: ToolbarView(
             onClose: { [weak self] in self?.close() },
+            onSelectMode: { [weak self] mode in self?.selectMode(mode) },
             onCamera: { [weak self] in self?.showCameraMenu() },
             onMicrophone: { [weak self] in self?.showMicrophoneMenu() },
             onSystemAudio: { [weak self] in self?.showSystemAudioMenu() },
@@ -31,14 +36,24 @@ final class ToolbarController: NSObject {
         p.makeKeyAndOrderFront(nil)
         panel = p
         observeDevices()
+        SourcePickerOverlay.show(mode: RecordingSettings.shared.mode)
     }
 
-    /// `ⓧ` or `Esc`: close the toolbar (and, later, any overlay); the app keeps running (SPEC §4.2, AC-TB-4).
+    /// `ⓧ` or `Esc`: close the toolbar and any overlay; the app keeps running (SPEC §4.2, AC-TB-4).
     func close() {
+        SourcePickerOverlay.close()
         panel?.orderOut(nil)
         panel = nil
         deviceObservers.forEach(NotificationCenter.default.removeObserver)
         deviceObservers.removeAll()
+    }
+
+    /// Sets the recording mode and shows its picker overlay (SPEC §4.2: "selecting a source mode
+    /// immediately shows that mode's overlay"). The one entry point for mode selection — reused by the
+    /// toolbar buttons here, the status-item menu (T-207b) and global hotkeys (T-204).
+    func selectMode(_ mode: RecordingSettings.Mode) {
+        RecordingSettings.shared.mode = mode
+        SourcePickerOverlay.show(mode: mode)
     }
 
     /// Bottom-centre of the display under the mouse, 40 pt above the Dock (`visibleFrame` already excludes it).
