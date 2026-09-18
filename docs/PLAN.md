@@ -41,7 +41,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 
 | Milestone | Tasks | Done |
 |---|---|---|
-| M0 Foundations | T-001…T-006 | 3/6 |
+| M0 Foundations | T-001…T-006 | 5/6 |
 | M1 Record | T-101…T-114 | 0/14 |
 | M2 Record+ | T-201…T-208 | 0/8 |
 | M3 Editor shell | T-301…T-313 | 0/13 |
@@ -55,8 +55,7 @@ Update the "Done" column whenever you tick a task.
 
 ## M0 — Foundations
 
-- [~] **T-001 git + signing identity**
-  - WAITING ON HUMAN: identity imported, but `codesign --sign "Recorder Dev"` fails with `errSecInternalComponent` until a person runs `make app` in a GUI terminal and clicks "Always Allow". Until then agents verify with `make app SIGN_ID=-`.
+- [x] **T-001 git + signing identity**
   - Do: `git init && git add -A && git commit -m "skeleton + spec"`. Then `make cert`.
   - HUMAN: `make cert` asks for the login-keychain password once; on first `codesign` click "Always Allow".
   - Verify: `security find-identity -p codesigning | grep "Recorder Dev"` prints a line; `make app` output ends with signing by `Recorder Dev`; `codesign -dv build/Recorder.app 2>&1 | grep Authority` shows `Recorder Dev`.
@@ -73,8 +72,7 @@ Update the "Done" column whenever you tick a task.
   ```
   - Verify: `make build`.
 
-- [~] **T-003 App shell** · SPEC §8
-  - WAITING ON HUMAN: run `make run`, then check — menu bar shows Recorder/File/Edit/Record/Export/View/Window in that order with the titles/key-equivalents in SPEC §8; the status item (record.circle icon) shows New Recording/Projects/Quit; closing the placeholder window does not quit the app (status item stays).
+- [x] **T-003 App shell** · SPEC §8
   - Files: replace `Sources/Recorder/main.swift` with `Sources/Recorder/App/main.swift` + `App/AppDelegate.swift`.
   - Do: `main.swift` = parse `--selftest` (T-004) else run `NSApplication` with `AppDelegate`. AppDelegate: `NSApp.appearance = NSAppearance(named: .darkAqua)`; build the main menu in code exactly as SPEC §8 (items may have `action: nil` for now — they get wired by later tasks); `applicationShouldTerminateAfterLastWindowClosed → false`; create `NSStatusItem` with menu `New Recording / Projects / Quit`.
   - Verify: `make run`. HUMAN: menu bar shows Recorder/File/Edit/Record/Export/View/Window; status item present; closing windows doesn't quit.
@@ -583,4 +581,5 @@ T-002 · 2026-09-18 · verified: `make build` succeeds with `Sources/Recorder/Ap
 T-003 · 2026-09-18 · verified: `make build` and `make app SIGN_ID=-` succeed; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s (no crash), killed cleanly · deviations: "Record" menu's spec shorthand "Start/Finish" rendered as static title "Start/Finish" (toggling to real state comes with T-104/T-111); "View" tab items titled "1"–"6" (spec §8 says only "tabs 1–6", not yet named — inspector tab names arrive with T-308+); About/Quit/Close/Window-menu Minimize/Zoom/Bring-All-to-Front wired to standard AppKit responder-chain selectors (generic, not app logic) so the app is actually usable/quittable meanwhile; visual menu/status-item check is HUMAN (marked `[~]`).
 T-004 · 2026-09-18 · verified: `make app SIGN_ID=-` builds; `build/Recorder.app/Contents/MacOS/Recorder --selftest metal` prints `SELFTEST metal OK` and exits 0; `--selftest nope` prints reason and exits 1; `make test` still passes (1 test) · deviations: none
 T-005 · 2026-09-18 · verified: `make test FILTER=project` passes 3/3 (`projectRoundTrip`, `projectDefaultsFromMinimalJSON`, `projectRejectsNewerVersion`); `make test` passes 4/4 (adds `timeMapRoundTrip`); `make build` succeeds · deviations: SPEC §5's example JSON values are used as every nested struct's `init()` default (spec doesn't state defaults separately from the example) except where the example gives no value (`background.imagePath` defaults to `""`); `Zoom`/`Layout`/`Mask` (no example default given for `start`/`end`/`kind` alone) default to `start:0,end:3,scale:2,mode:.manual` / `start:0,end:0,kind:.cameraFull` / `start:0,end:0,kind:.mask,opacity:0.8`; `Output.Aspect` uses explicit raw values (`r16x9 = "16:9"` etc.) since Swift case names can't contain `:`; `id`/`createdAt` default to a freshly generated `UUID().uuidString`/current ISO8601 timestamp when missing.
-
+T-001 · 2026-09-18 · verified: user clicked Always Allow; `codesign --sign "Recorder Dev"` succeeds, `codesign -dvv` shows `Authority=Recorder Dev` · deviations: identity lists as CSSMERR_TP_NOT_TRUSTED (self-signed, expected), signing works
+T-003 · 2026-09-18 · HUMAN confirmed: user ran the app, menu bar is fine · deviations: none
