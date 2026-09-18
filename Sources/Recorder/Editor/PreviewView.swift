@@ -35,7 +35,7 @@ final class PreviewView: MTKView {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             fatalError("no Metal device")
         }
-        compositor = try! Compositor(device: device)
+        compositor = try! Compositor(device: device, package: model.packageURL)
         textureCache = TextureCache(device: device)
         commandQueue = queue
         super.init(frame: .zero, device: device)

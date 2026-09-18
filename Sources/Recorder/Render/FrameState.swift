@@ -30,9 +30,16 @@ struct FrameState {
 /// (AC-ED-2). `screen`/`camera` are already-decoded for this instant by the caller (an
 /// `AVPlayerItemVideoOutput` in the preview, an `AVAssetReaderTrackOutput` in the exporter); `size`
 /// is the render target's pixel size.
-/// `// ponytail: view/prevView/cursor stay .identity/nil — CameraPath/CursorPath sampling at
-/// model.timeMap.sourceTime(atOutput:) lands with T-413 ("Paths into the renderer + cursor pass").`
+///
+/// `view`/`prevView`/`cursor` come from `model`'s cached `CameraPath`/`CursorPath` (rebuilt on edit,
+/// not here — T-413) sampled at `outputTime`'s SOURCE time via `TimeMap`, per SPEC §6.2's
+/// `FrameState(t_out)` formula: `prevView` samples the camera path `1/60 s` earlier in source time
+/// (for motion blur, T-501), not through `TimeMap` a second time.
 @MainActor
 func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.Texture?, camera: FrameState.Texture?, size: CGSize) -> FrameState {
-    FrameState(outputSize: size, screen: screen, camera: camera, project: model.project)
+    let sourceTime = model.timeMap.sourceTime(atOutput: outputTime)
+    let view = model.cameraPath.sample(atSource: sourceTime)
+    let prevView = model.cameraPath.sample(atSource: sourceTime - 1.0 / 60)
+    let cursor = model.cursorPath.sample(atSource: sourceTime)
+    return FrameState(outputSize: size, screen: screen, camera: camera, view: view, prevView: prevView, cursor: cursor, project: model.project)
 }
