@@ -367,21 +367,41 @@ enum SelfTest {
         },
         // Renders `InspectorView` offscreen (300 pt wide, dark appearance) to a PNG for visual
         // comparison against the SPEC §6.6 mockup. Not part of the automated pass/fail contract.
+        // `args[1]` picks the variant (T-414): a `Background.Kind` raw value (unchanged default
+        // behaviour), or "zoom"/"clip" (selects a fixture block so `ZoomPanel`/`ClipPanel` render
+        // in place of the tabs) or "cursor" (opens the Cursor tab).
         "inspector-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard let outPath = args.first else { throw Fail(description: "usage: inspector-png <out.png>") }
+            guard let outPath = args.first else { throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|cursor]") }
             try await MainActor.run {
                 let fm = FileManager.default
                 let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-png-\(UUID().uuidString)")
                 try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
                 defer { try? fm.removeItem(at: tmp) }
                 var project = Project(title: "Inspector PNG")
-                if let kind = args[safe: 1].flatMap(Background.Kind.init(rawValue:)) { project.background.kind = kind }
+                project.clips = [
+                    Clip(sourceStart: 0, sourceEnd: 41.2, speed: 1),
+                    Clip(sourceStart: 41.2, sourceEnd: 61.8, speed: 2),
+                ]
+                let zoom = Zoom(start: 3, end: 7, scale: 2, mode: .manual)
+                project.zooms = [zoom]
+
+                let variant = args[safe: 1]
+                var initialTab: InspectorView.Tab = .background
+                switch variant {
+                case "zoom", "clip": break
+                case "cursor": initialTab = .cursor
+                default:
+                    if let kind = variant.flatMap(Background.Kind.init(rawValue:)) { project.background.kind = kind }
+                }
+
                 try project.save(to: tmp.appendingPathComponent("project.json"))
                 let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+                if variant == "zoom" { model.selection = [UUID(uuidString: zoom.id)!] }
+                if variant == "clip" { model.selectedClip = 1 }
 
                 let height: CGFloat = 760
-                let hosting = NSHostingView(rootView: InspectorView(model: model))
+                let hosting = NSHostingView(rootView: InspectorView(model: model, initialTab: initialTab))
                 hosting.appearance = NSAppearance(named: .darkAqua)
                 hosting.frame = NSRect(x: 0, y: 0, width: 300, height: height)
 
@@ -399,6 +419,104 @@ enum SelfTest {
                 }
                 try data.write(to: URL(fileURLWithPath: outPath))
                 print("wrote \(outPath)")
+            }
+        },
+        // T-414: exercises the exact closures `ZoomPanel`/`ClipPanel`/`CursorTab`'s controls call.
+        // Zoom: Level slider drag (begin -> 10 updates -> commit), Mode change, Remove — each one
+        // undo step, invariants hold throughout. Clip: a speed preset == `setSpeed` + one undo
+        // step. Cursor: size/style edits persist via autosave.
+        "inspector-panels": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-panels-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            let projectURL = tmp.appendingPathComponent("project.json")
+
+            var original = Project(
+                title: "Panels Test",
+                source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 2, duration: 20)
+            )
+            original.clips = [
+                Clip(sourceStart: 0, sourceEnd: 10, speed: 1),
+                Clip(sourceStart: 10, sourceEnd: 20, speed: 1),
+            ]
+            let zoom = Zoom(start: 2, end: 5, scale: 2, mode: .manual)
+            original.zooms = [zoom]
+            try original.save(to: projectURL)
+            let zoomID = UUID(uuidString: zoom.id)!
+
+            let model = await EditorModel(packageURL: tmp, project: original, events: EventLog())
+
+            // --- Zoom panel: Level `LabeledSlider` drag == one undo step. ---
+            let beforeLevel = await model.project
+            await model.beginGesture()
+            for i in 0..<10 {
+                let v = 1.2 + Double(i + 1) / 10 * (5 - 1.2)
+                await model.update { project in
+                    guard let idx = project.zooms.firstIndex(where: { $0.id == zoom.id }) else { return }
+                    project.zooms[idx].scale = v
+                }
+            }
+            await model.commitGesture("Zoom level")
+            let afterLevel = await model.project
+            guard afterLevel.zooms[0].scale != beforeLevel.zooms[0].scale else {
+                throw Fail(description: "level drag didn't change scale")
+            }
+            if let err = afterLevel.checkInvariants() { throw Fail(description: "invariants broke after level drag: \(err)") }
+
+            // --- Mode change: a plain `model.edit`, one more undo step. ---
+            await model.edit("Zoom") { project in
+                guard let idx = project.zooms.firstIndex(where: { $0.id == zoom.id }) else { return }
+                project.zooms[idx].mode = .auto
+            }
+            let afterMode = await model.project
+            guard afterMode.zooms[0].mode == .auto else { throw Fail(description: "mode change didn't apply") }
+
+            // --- Remove: `Project.removeBlock`, one more undo step. ---
+            await model.edit("Remove zoom") { $0.removeBlock(zoomID) }
+            let afterDelete = await model.project
+            guard afterDelete.zooms.isEmpty else { throw Fail(description: "remove didn't delete the zoom") }
+            if let err = afterDelete.checkInvariants() { throw Fail(description: "invariants broke after remove: \(err)") }
+
+            // Exactly 3 undo steps (level, mode, delete): unwind one at a time, a 4th is a no-op.
+            await model.undo()
+            guard await model.project == afterMode else { throw Fail(description: "undo 1 should revert only the delete") }
+            await model.undo()
+            guard await model.project == afterLevel else { throw Fail(description: "undo 2 should revert only the mode change") }
+            await model.undo()
+            guard await model.project == beforeLevel else { throw Fail(description: "undo 3 should restore the pre-drag project") }
+            await model.undo()
+            guard await model.project == beforeLevel else {
+                throw Fail(description: "a 4th undo changed the project — more than 3 undo steps were recorded")
+            }
+            await model.redo(); await model.redo(); await model.redo()
+            guard await model.project == afterDelete else { throw Fail(description: "redo didn't replay all 3 steps") }
+
+            // --- Clip panel: a speed preset == `Project.setSpeed`, one undo step. ---
+            let beforeSpeed = await model.project
+            await model.edit("Speed") { $0.setSpeed(0, 2) }
+            let afterSpeed = await model.project
+            guard afterSpeed.clips[0].speed == 2 else { throw Fail(description: "speed preset didn't apply: \(afterSpeed.clips[0].speed)") }
+            if let err = afterSpeed.checkInvariants() { throw Fail(description: "invariants broke after speed change: \(err)") }
+            await model.undo()
+            guard await model.project == beforeSpeed else { throw Fail(description: "speed preset should be exactly one undo step") }
+            await model.redo()
+
+            // Remove clip: `Project.removeClip`, one undo step.
+            await model.edit("Remove clip") { _ = $0.removeClip(1) }
+            let afterRemoveClip = await model.project
+            guard afterRemoveClip.clips.count == 1 else { throw Fail(description: "remove clip didn't remove") }
+            if let err = afterRemoveClip.checkInvariants() { throw Fail(description: "invariants broke after remove clip: \(err)") }
+            await model.undo()
+
+            // --- Cursor tab: size/style edits persist via autosave. ---
+            await model.edit("Cursor size") { $0.cursor.size = 3 }
+            await model.edit("Cursor movement") { $0.cursor.style = .rapid }
+            try await Task.sleep(nanoseconds: 700_000_000)
+            let onDisk = try Project.load(from: projectURL)
+            guard onDisk.cursor.size == 3, onDisk.cursor.style == .rapid else {
+                throw Fail(description: "autosave didn't persist cursor edits: \(onDisk.cursor)")
             }
         },
         "recover": { _ in
