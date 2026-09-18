@@ -171,6 +171,12 @@ enum SelfTest {
             print("SELFTEST record duration=\(source.duration) size=\(Int(naturalSize.width))x\(Int(naturalSize.height))")
             try? FileManager.default.removeItem(at: packageURL)
         },
+        "waveform": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }
+            let peaks = try Waveform.peaks(for: URL(fileURLWithPath: path))
+            print("peaks=\(peaks.count) max=\(peaks.max() ?? 0)")
+        },
     ]
 
     static func runIfRequested() {
