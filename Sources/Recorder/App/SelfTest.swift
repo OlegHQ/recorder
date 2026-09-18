@@ -671,6 +671,69 @@ private func runTimelineOpsSelfTest() async throws {
     func px(_ outputSeconds: Double) -> CGFloat { gutter + CGFloat(outputSeconds * view.geometry.pxPerSecond) }
 
     try await runSplitSelfTest(model: model, view: view, px: px)
+    try runFitOnFirstLayoutSelfTest()
+}
+
+/// T-405 fix: "the timeline opens fitted" (SPEC §7.2 "Navigation") — regardless of whether the
+/// model or the first real layout (non-zero width) happens first — and a later resize never
+/// re-fits, whether or not the user has zoomed manually in between.
+@MainActor
+private func runFitOnFirstLayoutSelfTest() throws {
+    let fm = FileManager.default
+
+    func shortProject() throws -> (model: EditorModel, cleanup: () -> Void) {
+        let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-timeline-fit-\(UUID().uuidString)")
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        var project = Project(title: "Fit Fixture", source: Source(duration: 3)) // a short, 3 s project
+        project.clips = [Clip(sourceStart: 0, sourceEnd: 3, speed: 1)]
+        let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+        return (model, { try? fm.removeItem(at: tmp) })
+    }
+
+    // model attached, then the first layout.
+    do {
+        let (model, cleanup) = try shortProject()
+        defer { cleanup() }
+        let view = TimelineView(frame: .zero)
+        view.model = model
+        view.setFrameSize(NSSize(width: 900, height: 160))
+        let expected = view.geometry.width / 3
+        guard abs(view.geometry.pxPerSecond - expected) < 0.01 else {
+            throw TimelineOpsFail(description: "didn't fit on first layout (model-then-layout): pxPerSecond \(view.geometry.pxPerSecond), expected ~\(expected)")
+        }
+        // A later resize doesn't re-fit — only the first layout does.
+        view.setFrameSize(NSSize(width: 1200, height: 160))
+        guard abs(view.geometry.pxPerSecond - expected) < 0.01 else {
+            throw TimelineOpsFail(description: "a later resize re-fit the timeline")
+        }
+    }
+
+    // The first layout, then the model attached (duration only becomes known second).
+    do {
+        let (model, cleanup) = try shortProject()
+        defer { cleanup() }
+        let view = TimelineView(frame: .zero)
+        view.setFrameSize(NSSize(width: 900, height: 160))
+        view.model = model
+        let expected = view.geometry.width / 3
+        guard abs(view.geometry.pxPerSecond - expected) < 0.01 else {
+            throw TimelineOpsFail(description: "didn't fit on first layout (layout-then-model): pxPerSecond \(view.geometry.pxPerSecond), expected ~\(expected)")
+        }
+    }
+
+    // A manual zoom before the first real layout suppresses the auto-fit entirely.
+    do {
+        let (model, cleanup) = try shortProject()
+        defer { cleanup() }
+        let view = TimelineView(frame: .zero)
+        view.model = model
+        view.setZoom(sliderValue: 1.0)
+        let zoomed = view.geometry.pxPerSecond
+        view.setFrameSize(NSSize(width: 900, height: 160))
+        guard view.geometry.pxPerSecond == zoomed else {
+            throw TimelineOpsFail(description: "auto-fit ran even though the user had already zoomed")
+        }
+    }
 }
 
 /// T-407 "Split": `C` at the playhead (works, and is refused within 2 frames of an edge), sticky

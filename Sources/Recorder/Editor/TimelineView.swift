@@ -30,7 +30,10 @@ enum TimelineHit: Equatable {
 /// Navigation (T-405) and hit-testing/selection (T-406) are added on top of this file.
 final class TimelineView: NSView {
     weak var model: EditorModel? {
-        didSet { observeModel() }
+        didSet {
+            observeModel()
+            maybeFitOnFirstLayout()
+        }
     }
 
     var geometry = TimelineGeometry(pxPerSecond: 60, scrollX: 0, width: 0)
@@ -48,6 +51,9 @@ final class TimelineView: NSView {
 
     private var autoScrollEnabled = true
     private var wasPlaying = false
+    /// SPEC §7.2 "Navigation": the timeline opens fitted — see `maybeFitOnFirstLayout`.
+    private var didFitOnFirstLayout = false
+    private var userDidZoom = false
     private var dragKind: DragKind?
     private enum DragKind { case scrub }
     private var hoverX: CGFloat?
@@ -93,6 +99,7 @@ final class TimelineView: NSView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         geometry.width = max(0, newSize.width - Self.gutter)
+        maybeFitOnFirstLayout()
         needsDisplay = true
     }
 
@@ -137,6 +144,7 @@ final class TimelineView: NSView {
                 if model.isPlaying, !self.wasPlaying { self.autoScrollEnabled = true }
                 self.wasPlaying = model.isPlaying
                 self.autoScrollIfNeeded()
+                self.maybeFitOnFirstLayout() // the project's duration may only just have become known
                 self.needsDisplay = true
                 self.observeModel()
             }
@@ -775,9 +783,20 @@ final class TimelineView: NSView {
     }
 
     private func zoom(by factor: Double, anchorX: Double) {
+        userDidZoom = true // don't auto-fit again once the user has manually zoomed (T-405 fix)
         geometry.zoom(by: factor, anchorX: anchorX, minPxPerSecond: minPxPerSecond(), maxPxPerSecond: Self.maxPxPerSecond)
         geometry.scrollX = clampScrollX(geometry.scrollX)
         needsDisplay = true
+    }
+
+    /// SPEC §7.2 "Navigation": the timeline opens fitted. `setFrameSize`/`model`'s `didSet`/an
+    /// observed project change all call this; it only ever fires once (on whichever of those
+    /// happens last — first non-zero width *and* a known duration), and never once the user has
+    /// manually zoomed.
+    private func maybeFitOnFirstLayout() {
+        guard !didFitOnFirstLayout, !userDidZoom, geometry.width > 0, let model, model.timeMap.outputDuration > 0 else { return }
+        fit()
+        didFitOnFirstLayout = true
     }
 
     /// 0...1 position for a "slider in the timeline toolbar" (linear over the zoom range).
