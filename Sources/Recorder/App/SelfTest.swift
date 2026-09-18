@@ -115,7 +115,10 @@ enum SelfTest {
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }
             let peaks = try Waveform.peaks(for: URL(fileURLWithPath: path))
-            print("peaks=\(peaks.count) max=\(peaks.max() ?? 0)")
+            let max = peaks.max() ?? 0
+            print("peaks=\(peaks.count) max=\(max)")
+            // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
+            guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
     ]
 
