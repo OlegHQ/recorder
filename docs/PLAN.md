@@ -415,7 +415,8 @@ Update the "Done" column whenever you tick a task.
     Wallpapers: generate 12 abstract gradient JPEGs with a throwaway selftest `make-wallpapers` (Core Image `CILinearGradient`/`CIRadialGradient` blends) and commit them. Update the Makefile `app` target: `cp -R Resources/Wallpapers $(APP)/Contents/Resources/`.
   - HUMAN: AC-INS-1 for every Background control.
 
-- [ ] **T-309 Output aspect** — `Compositor.outputSize` honours `project.output.aspect`; popup in the top bar edits it. Test in Core: `layoutAspects` (9:16 output with 16:10 source keeps source aspect inside padding). HUMAN: switching aspect re-letterboxes instantly.
+- [~] **T-309 Output aspect** — `Compositor.outputSize` honours `project.output.aspect`; popup in the top bar edits it. Test in Core: `layoutAspects` (9:16 output with 16:10 source keeps source aspect inside padding). HUMAN: switching aspect re-letterboxes instantly.
+  - PARTIAL: Core `outputSize(aspect:croppedSource:longEdge:)` + `layoutAspects` test merged; `Compositor.outputSize` + top-bar popup remain (after T-307).
 
 - [ ] **T-310 Crop sheet** · SPEC §6.7 mockup — File `Editor/CropSheet.swift`. Sheet window hosting the current source frame (`AVAssetImageGenerator` at playhead's source time) under a `SelectionRectView` (reuse T-105; pass `aspect` for presets). Fields in source pixels. Confirm = one `model.edit("Crop")`; Discard/Esc = nothing.
   - HUMAN: AC-CROP-1 vs `reference/…13.05.18.png`.
@@ -596,7 +597,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 - [ ] **T-602 Keyboard-shortcut overlay** — render `.key` events as rounded chips (`⌘ ⇧ K`) bottom-centre for 1.2 s; text rendered to a texture with Core Text, cached per string. Keys tab.
 - [~] **T-603 Speed up typing** — Edit ▸ Speed Up Typing: find runs of `.typing` events (gap < 1 s, length > 3 s), split clips around them, set 2×. Core fn `typingRanges(events:) -> [TimeRange]` + test.
   - PARTIAL: Core `typingRanges(events:)` + tests merged; Edit ▸ Speed Up Typing wiring remains (needs editor menus, M3/M4).
-- [ ] **T-604 Cursor advanced** — loop position, rotate, remove shakes, always-arrow, hide-cursor ranges via Edit ▸ Hide Cursor in Selected Clip (adds the clip's source range to `cursorHidden`). Tests per stage in `CursorPath`.
+- [~] **T-604 Cursor advanced** — loop position, rotate, remove shakes, always-arrow, hide-cursor ranges via Edit ▸ Hide Cursor in Selected Clip (adds the clip's source range to `cursorHidden`). Tests per stage in `CursorPath`.
+  - PARTIAL: Core pipeline stages (shake removal, loop, rotation, always-arrow) + 4 tests merged; Cursor-tab controls and Edit ▸ Hide Cursor in Selected Clip remain.
 - [ ] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
 - [ ] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
 - [ ] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
@@ -652,3 +654,4 @@ T-107/T-108 fix · 2026-09-18 · merged (b131bb7): flipped hover point + unorder
 T-111/T-112/T-113 · 2026-09-18 · verified on master: `make app`, 38 tests, `--selftest recover` OK, launch smoke · deviations: `CameraCapture.current` weak static for the camera hand-off; editor hand-off call site marked in RecordingController.finish; finish fills zooms via generateAutoZooms (T-410 wire, menu items still open) and writes thumbnail.jpg
 T-308 · 2026-09-18 · verified on master: `--selftest inspector` OK, PNG reviewed · deviations: `LabeledSlider` gained `onEditingChanged`; 12 generated wallpapers in Resources/Wallpapers (Makefile copies them); gradient angle has no control
 T-404/T-405/T-406 · 2026-09-18 · verified on master: TimelineGeometry tests (3) green, `timeline-png` with hit-test assertions OK, PNG reviewed · deviations: minimal TimelineToolbar (Fit + zoom slider); cut-bubble hit box sits in an 8 pt sliver above the clip lane
+T-604 (core) / T-309 (core) · 2026-09-18 · verified: core-lane merged, `make test` 40/40 on master · deviations: shake threshold assumes a 1920 px reference width (`// ponytail:`); rotation = clamp(vx·12°, ±12°); always-arrow = `imageID nil` (renderer draws the default arrow)
