@@ -111,6 +111,12 @@ enum SelfTest {
             let onDisk = try Project.load(from: projectURL)
             guard onDisk.title == "Persisted" else { throw Fail(description: "autosave didn't persist: \(onDisk.title)") }
         },
+        "waveform": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }
+            let peaks = try Waveform.peaks(for: URL(fileURLWithPath: path))
+            print("peaks=\(peaks.count) max=\(peaks.max() ?? 0)")
+        },
     ]
 
     static func runIfRequested() {
