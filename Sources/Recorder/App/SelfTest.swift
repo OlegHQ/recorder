@@ -81,6 +81,45 @@ enum SelfTest {
             try await waitUntil { store.items.count == 3 }
             guard !fm.fileExists(atPath: bravoURL.path) else { throw Fail(description: "trash didn't remove the package") }
         },
+        // AC-LIB-1: 200 packages list in < 300 ms (only project.json + thumbnail.jpg read, off main thread).
+        "library-perf": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-library-perf-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let thumbJPEG: Data = {
+                let thumb = NSImage(size: NSSize(width: 640, height: 400))
+                thumb.lockFocus()
+                NSColor(hex: "#5B3DF5").setFill()
+                NSRect(x: 0, y: 0, width: 640, height: 400).fill()
+                thumb.unlockFocus()
+                let tiff = thumb.tiffRepresentation!
+                return NSBitmapImageRep(data: tiff)!.representation(using: .jpeg, properties: [:])!
+            }()
+
+            for i in 0..<200 {
+                let url = tmp.appendingPathComponent("Recording \(i).recorder")
+                try fm.createDirectory(at: url, withIntermediateDirectories: true)
+                let project = Project(title: "Recording \(i)", clips: [Clip(sourceStart: 0, sourceEnd: 10, speed: 1)])
+                try project.save(to: url.appendingPathComponent("project.json"))
+                try thumbJPEG.write(to: url.appendingPathComponent("thumbnail.jpg"))
+            }
+
+            // `ProjectStore.init` calls `reload()` itself — time that call to completion rather than
+            // triggering a second one, so nothing but the scan (project.json + thumbnail.jpg, off main) is measured.
+            let start = DispatchTime.now()
+            let store = ProjectStore(folder: tmp)
+            let deadline = Date().addingTimeInterval(5)
+            while store.items.count < 200 && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+            }
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+            print("SELFTEST library-perf reload=\(elapsedMs) ms for \(store.items.count) items")
+            guard store.items.count == 200 else { throw Fail(description: "only \(store.items.count)/200 items scanned") }
+            guard elapsedMs < 300 else { throw Fail(description: "reload took \(elapsedMs) ms, want < 300 ms") }
+        },
         // T-302: renders `LibraryView` over a fixture folder to a PNG for eyeballing against the SPEC
         // §5.1 mockup (`Read` tool). Not a correctness test — kept as a standing look-check.
         "library-png": { args in
