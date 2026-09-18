@@ -10,6 +10,9 @@ enum SelfTest {
             let device = MTLCreateSystemDefaultDevice()!
             _ = try device.makeLibrary(source: "kernel void k(uint2 g [[thread_position_in_grid]]) {}", options: nil)
         },
+        "permissions": { _ in
+            print("screen=\(Permissions.screen) accessibility=\(Permissions.accessibility)")
+        },
     ]
 
     static func runIfRequested() {

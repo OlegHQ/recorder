@@ -42,7 +42,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | Milestone | Tasks | Done |
 |---|---|---|
 | M0 Foundations | T-001…T-006 | 6/6 |
-| M1 Record | T-101…T-114 | 0/14 |
+| M1 Record | T-101…T-114 | 1/14 |
 | M2 Record+ | T-201…T-208 | 0/8 |
 | M3 Editor shell | T-301…T-313 | 0/13 |
 | M4 Timeline | T-401…T-418 | 0/18 |
@@ -124,7 +124,7 @@ Update the "Done" column whenever you tick a task.
 
 ## M1 — Record  (SPEC §4.1–4.5, §4.8)
 
-- [ ] **T-101 Permissions** · SPEC §4.1
+- [x] **T-101 Permissions** · SPEC §4.1
   - File: `Sources/Recorder/App/Permissions.swift`
   ```swift
   enum Permissions {
@@ -584,3 +584,4 @@ T-005 · 2026-09-18 · verified: `make test FILTER=project` passes 3/3 (`project
 T-001 · 2026-09-18 · verified: user clicked Always Allow; `codesign --sign "Recorder Dev"` succeeds, `codesign -dvv` shows `Authority=Recorder Dev` · deviations: identity lists as CSSMERR_TP_NOT_TRUSTED (self-signed, expected), signing works
 T-003 · 2026-09-18 · HUMAN confirmed: user ran the app, menu bar is fine · deviations: none
 T-006 · 2026-09-18 · verified: `make test FILTER=eventLog` passes 1/1 (`eventLogRoundTrip`, exercises encode/decode round trip plus `moves()` incl. drag and `clicks()` filtered to left `.down`); `make test` passes 5/5; `make build` succeeds · deviations: none
+T-101 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `build/Recorder.app/Contents/MacOS/Recorder --selftest permissions` prints `screen=false accessibility=false` then `SELFTEST permissions OK`, exit 0; `make test` passes 5/5 · deviations: registered the `permissions` case directly in `SelfTest.swift`'s `cases` dictionary literal (same place `metal` was registered by T-004) rather than adding a second registration mechanism
