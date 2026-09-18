@@ -50,7 +50,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | M1 Record | T-101…T-114 | 5/14 |
 | M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
 | M3 Editor shell | T-301…T-313 | 2/13 |
-| M4 Timeline | T-401…T-418 | 2/18 |
+| M4 Timeline | T-401…T-418 | 5/18 |
 | M5 Ship | T-501…T-509 | 0/9 |
 | M6 Polish | T-601…T-609 | 0/9 |
 
@@ -450,7 +450,7 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Layout/mask blocks get the same three ops — implement **once** over a private `protocol TimedBlock { var id: UUID; var start: Double; var end: Double }` that `Zoom`, `Layout`, `Mask` adopt (three conformers ⇒ allowed), with `minLength` parameter (0.5 s).
   - Tests: `zoomsNeverOverlap` (random moves/resizes, 1 000 iters) · `addZoomFitsGap` · `snapPicksNearest`.
 
-- [ ] **T-403 Spring** · SPEC §6.3
+- [x] **T-403 Spring** · SPEC §6.3
   - File: `Sources/RecorderCore/Spring.swift`
   ```swift
   public struct Spring: Sendable {
@@ -511,7 +511,7 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - CORE DONE (lane-autozoom merged 2026-09-18, 4 tests green); only the Wire line below remains → tick after T-111/T-311.
   - Wire: `RecordingController.finish` fills `project.zooms`; Edit ▸ Regenerate Auto Zooms / Remove All Zooms.
 
-- [ ] **T-411 CursorPath** · SPEC §6.5
+- [x] **T-411 CursorPath** · SPEC §6.5
   - File: `Sources/RecorderCore/CursorPath.swift`
   ```swift
   public struct CursorSample: Sendable { public var x, y, prevX, prevY: Double; public var imageID: String?; public var alpha, rotation, clickScale: Double }
@@ -523,7 +523,7 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Pipeline order exactly as SPEC §6.5 (shake removal → spring follow → idle hide → loop → rotation → click pulse → hidden ranges). M4 implements: spring follow, idle hide, click pulse, imageID, hidden flag. The rest are `// T-604`.
   - Tests (AC-CUR-1): `smoothedNeverLeadsRaw` · `settlesWithinHalfPixelAfterRest` · `idleHidesAfterTwoSeconds` · `sampleIsOrderIndependent`.
 
-- [ ] **T-412 CameraPath** · SPEC §6.3
+- [x] **T-412 CameraPath** · SPEC §6.3
   - File: `Sources/RecorderCore/CameraPath.swift`
   ```swift
   public struct ViewTransform: Sendable, Equatable { public var cx, cy, scale: Double; public static let identity = ViewTransform(cx: 0.5, cy: 0.5, scale: 1) }
@@ -615,3 +615,6 @@ T-410 (core only) · 2026-09-18 · verified: `make test` in lane, 4 listed tests
 T-207 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `make test` passes 18/18; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: added `RecordingSettings.fps` (default 60) and `.projectsFolder` (default `~/Movies/Recorder`) — SPEC §8 properties the class lacked, same one-`UserDefaults`-key-per-property style as the rest of the class; `SettingsWindow` (in `App/SettingsView.swift`) is the one reusable window (`enum` with a cached `NSWindow`, `.titled, .closable`, hosting `SettingsView` via `NSHostingView`), opened by `AppDelegate.openSettings` (wired to the "Recorder ▸ Settings…" `⌘,` item, which previously had `action: nil`) and by `ToolbarController.openSettingsWindow` (wired to the gear menu's "Settings…" item, previously inert per its own T-207 comment, now removed). Scope matches this task's text exactly (General: projects folder only; Recording: fps 30/60, countdown, the 3 toggles) — SPEC §8's "default export settings" / "after recording: open editor" General fields and the Shortcuts pane are out of scope (M6 / other tasks) per the task's own wording. Not HUMAN-verified: no display/WindowServer or TCC grant in this environment, so opening the window via `⌘,`/gear-menu and value persistence across a real relaunch couldn't be visually confirmed — task marked `[~]`.
 T-301 · 2026-09-18 · verified: lane-library merged; `--selftest library` OK on master · deviations: thumbnail is read-only here (writing belongs to T-111 finish); SelfTest harness now pumps the main run loop instead of blocking on a semaphore (cases using DispatchQueue.main hung)
 T-303 · 2026-09-18 · verified: `--selftest model` OK on master (undo/redo equality, 10-update gesture = 1 undo step, autosave on disk after 0.6 s) · deviations: none
+T-403 · 2026-09-18 · verified: lane-paths merged, `make test` 29/29 on master · deviations: the plan's 0.01 step-vs-closed-form bound is unreachable for semi-implicit Euler at dt = 1/240 (error ∝ (ω·dt)²); measured peaks focused 0.015, smooth 0.010, cursorSmooth 0.022, cursorMedium 0.038, cursorRapid 0.071 — test asserts per-preset bounds over the whole transient + < 1e-3 settled
+T-411 · 2026-09-18 · verified: 4 listed tests green · deviations: shake removal/loop/rotation are `// T-604` comments per plan; 0.5 px tolerance assumes a 1920 px wide source
+T-412 · 2026-09-18 · verified: 4 listed tests green · deviations: test renamed `cameraSampleIsOrderIndependent` (free-function test names share one namespace with T-411's `sampleIsOrderIndependent`)
