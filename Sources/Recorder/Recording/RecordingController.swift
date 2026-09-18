@@ -82,6 +82,7 @@ import RecorderCore
             self.currentTarget = target
             state = .recording
             RecordingWidgetPanel.show()
+            applyDockIconPolicy(hiddenWhileRecording: true)
         } catch {
             NSLog("Recorder: capture failed to start: \(error)")
             hideHighlight()
@@ -199,6 +200,16 @@ import RecorderCore
         state = .idle
         CameraBubblePanel.hide()
         RecordingWidgetPanel.hide()
+        applyDockIconPolicy(hiddenWhileRecording: false)
+    }
+
+    /// SPEC §4.2/§4.7 "Hide Recorder dock icon while recording": `.accessory` for the duration of a
+    /// recording, `.regular` once it ends — only when the toggle (gear menu) is on.
+    // ponytail: `restart()` calls `reset()` then re-enters `start`, so the dock icon can flash back on
+    // for the instant in between; not worth extra state to special-case a chain that's already one Task.
+    private func applyDockIconPolicy(hiddenWhileRecording: Bool) {
+        guard RecordingSettings.shared.hideDockIcon else { return }
+        NSApp.setActivationPolicy(hiddenWhileRecording ? .accessory : .regular)
     }
 
     private static let folderFormatter: DateFormatter = {

@@ -458,6 +458,21 @@ enum SelfTest {
                 throw Fail(description: "clip doesn't span the recovered duration")
             }
         },
+        // T-205, SPEC §9 open question 3: no assertions (there's nothing to assert without a live TCC
+        // grant on the machine this runs on) — prints every Finder-owned window so a HUMAN can compare
+        // against the desktop-icons layer and confirm/adjust `CaptureTarget.filter`'s heuristic.
+        "finder-windows": { _ in
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let finderWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == "com.apple.finder" }
+            guard !finderWindows.isEmpty else {
+                print("SELFTEST finder-windows: no Finder windows found (Screen Recording permission likely not granted to this terminal)")
+                return
+            }
+            let desktopIconLevel = Int(CGWindowLevelForKey(.desktopIconWindow))
+            for w in finderWindows {
+                print("windowLayer=\(w.windowLayer) isDesktopIconLevel=\(w.windowLayer == desktopIconLevel) title=\(w.title ?? "") frame=\(w.frame)")
+            }
+        },
         "events": { args in
             let seconds = args.first.flatMap(Double.init) ?? 3
             guard let display = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false).displays.first else {
