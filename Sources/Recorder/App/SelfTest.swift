@@ -272,6 +272,9 @@ enum SelfTest {
             try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
             defer { try? fm.removeItem(at: tmp) }
 
+            // T-416: a short synthetic mic track so the clip lane actually has a waveform to draw.
+            try synthesizeSineM4A(at: tmp.appendingPathComponent("mic.m4a"), duration: 15)
+
             let model = await EditorModel(packageURL: tmp, project: project, events: EventLog())
             let outputDuration = await model.timeMap.outputDuration
             await MainActor.run { model.playhead = outputDuration / 2 }
@@ -279,12 +282,22 @@ enum SelfTest {
             let zoom0ID = UUID(uuidString: project.zooms[0].id)!
             let layout0ID = UUID(uuidString: project.layouts[0].id)!
 
-            let (png, hitErrors): (Data?, [String]) = await MainActor.run {
+            let view = await MainActor.run { () -> TimelineView in
                 let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 160))
                 view.model = model
                 view.geometry.pxPerSecond = (view.frame.width - TimelineView.gutter) / (outputDuration + 3)
                 view.needsDisplay = true
+                return view
+            }
 
+            // T-416's waveform load happens off the main thread; wait for it before rendering.
+            let waveformDeadline = Date().addingTimeInterval(3)
+            while await MainActor.run(body: { !view.hasWaveform }) {
+                guard Date() < waveformDeadline else { throw Fail(description: "waveform never loaded") }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+
+            let (png, hitErrors): (Data?, [String]) = await MainActor.run {
                 // T-406: hit-test a handful of known points against the fixture's geometry.
                 var errors: [String] = []
                 @MainActor func expect(_ p: CGPoint, _ wanted: TimelineHit, _ name: String) {
@@ -302,6 +315,7 @@ enum SelfTest {
                     errors.append("emptyLane: got \(view.hitTest(at: CGPoint(x: 700, y: 80)))")
                 }
 
+                view.needsDisplay = true
                 guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return (nil, errors) }
                 view.cacheDisplay(in: view.bounds, to: rep)
                 return (rep.representation(using: .png, properties: [:]), errors)
@@ -626,6 +640,28 @@ enum SelfTest {
 
 private extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
+// MARK: - T-416: a synthetic `mic.m4a` fixture (used by "timeline-png") so the waveform draws.
+
+private func synthesizeSineM4A(at url: URL, duration: Double, sampleRate: Double = 44_100) throws {
+    struct Fail: Error, CustomStringConvertible { let description: String }
+    let settings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000,
+    ]
+    let file = try AVAudioFile(forWriting: url, settings: settings)
+    guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(sampleRate * duration)) else {
+        throw Fail(description: "couldn't allocate a PCM buffer for the mic fixture")
+    }
+    buffer.frameLength = buffer.frameCapacity
+    let channel = buffer.floatChannelData![0]
+    for i in 0..<Int(buffer.frameLength) {
+        let t = Double(i) / sampleRate
+        let envelope = 0.15 + 0.45 * abs(sin(2 * .pi * 0.6 * t)) // varying peaks, like SPEC §7.1's mockup
+        channel[i] = Float(sin(2 * .pi * 220 * t) * envelope)
+    }
+    try file.write(from: buffer)
 }
 
 // MARK: - "timeline-ops" (T-407/408/409)

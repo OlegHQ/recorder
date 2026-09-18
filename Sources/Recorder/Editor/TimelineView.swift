@@ -35,6 +35,7 @@ final class TimelineView: NSView {
             lastClips = model?.project.clips ?? [] // no ripple from the very first assignment
             observeModel()
             maybeFitOnFirstLayout()
+            loadWaveformIfNeeded()
         }
     }
 
@@ -74,6 +75,15 @@ final class TimelineView: NSView {
     private var hoverX: CGFloat?
     private var hoverY: CGFloat?
     private var trackingArea: NSTrackingArea?
+
+    // MARK: - Waveform (T-416)
+
+    /// Loaded off the main thread once per open (`Waveform.peaks(for:)` itself also caches by
+    /// URL, but this avoids re-dispatching the load / racing a second `model` assignment).
+    private var waveformPeaks: [Float]?
+    private var waveformLoadedForPackage: URL?
+    /// For selftests: whether the async load (`loadWaveformIfNeeded`) has landed.
+    var hasWaveform: Bool { waveformPeaks != nil }
 
     // MARK: - Trim (T-408)
 
@@ -245,7 +255,7 @@ final class TimelineView: NSView {
 
         drawGutterIcons()
         drawRuler()
-        drawClipLane(project)
+        drawClipLane(project, timeMap)
         drawZoomLane(project, timeMap)
         drawClickTicks(project, timeMap)
         drawZoomGhost()
@@ -342,7 +352,7 @@ final class TimelineView: NSView {
 
     // MARK: - Clip lane
 
-    private func drawClipLane(_ project: Project) {
+    private func drawClipLane(_ project: Project, _ timeMap: TimeMap) {
         let row = laneRow(.clip)
         let clips = project.clips
         let targetRects = clipRects(clips, row: row)
@@ -351,12 +361,58 @@ final class TimelineView: NSView {
         let eased = dragKind == nil ? rippleEasedProgress() : nil
         let fromRects = eased != nil ? clipRects(rippleFromClips ?? clips, row: row) : nil
 
+        var outStart = 0.0
         for (i, clip) in clips.enumerated() {
+            let outEnd = outStart + clip.outputDuration
+            defer { outStart = outEnd }
             var rect = targetRects[i]
             if let eased, let fromRects, i < fromRects.count { rect = lerp(fromRects[i], targetRects[i], eased) }
             guard rect.width > 0.5 else { continue }
             let label = clip.speed != 1 ? "\(formatSpeed(clip.speed))\u{00D7} \u{23E9}" : nil
             drawBlock(rect, fill: Theme.clip, tornLeft: false, tornRight: false, label: label, selected: model?.selectedClip == i)
+            drawWaveform(in: rect, outStart: outStart, outEnd: outEnd, timeMap: timeMap)
+        }
+    }
+
+    /// SPEC §7.1 clip lane: "waveform" peaks drawn inside each clip block, mapped through
+    /// `TimeMap` — `px`'s fraction across `rect` maps to output time `[outStart, outEnd)`, so the
+    /// waveform tracks the block exactly, including mid-ripple.
+    private func drawWaveform(in rect: CGRect, outStart: Double, outEnd: Double, timeMap: TimeMap) {
+        guard let waveformPeaks, !waveformPeaks.isEmpty, outEnd > outStart else { return }
+        let inset = rect.insetBy(dx: 5, dy: 6)
+        guard inset.width > 1 else { return }
+        let midY = inset.midY
+        Theme.textPrimary.withAlphaComponent(0.45).setFill()
+        var px = inset.minX
+        while px < inset.maxX {
+            let fraction = (px - inset.minX) / inset.width
+            let outputT = outStart + fraction * (outEnd - outStart)
+            let sourceT = timeMap.sourceTime(atOutput: outputT)
+            let index = Int(sourceT * Double(Waveform.peaksPerSecond))
+            if waveformPeaks.indices.contains(index) {
+                let amplitude = max(1, CGFloat(min(1, waveformPeaks[index])) * inset.height / 2)
+                NSRect(x: px, y: midY - amplitude, width: 1, height: amplitude * 2).fill()
+            }
+            px += 1
+        }
+    }
+
+    // MARK: - Waveform loading (T-416)
+
+    /// `AVAssetReader`-backed, so off the main thread; `Waveform.peaks(for:)` also caches by URL
+    /// (`// ponytail: computed on open, not cached on disk`, per `Waveform.swift`).
+    private func loadWaveformIfNeeded() {
+        guard let model, waveformLoadedForPackage != model.packageURL else { return }
+        let packageURL = model.packageURL
+        waveformLoadedForPackage = packageURL
+        guard let audioURL = Waveform.audioURL(in: packageURL) else { return }
+        Task.detached { [weak self] in
+            let peaks = try? Waveform.peaks(for: audioURL)
+            await MainActor.run {
+                guard let self, self.waveformLoadedForPackage == packageURL else { return } // superseded by a later `model`
+                self.waveformPeaks = peaks
+                self.needsDisplay = true
+            }
         }
     }
 
