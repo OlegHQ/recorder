@@ -219,8 +219,9 @@ final class Exporter {
     }
 
     /// SPEC §6.8: base Mbps at 1080p30 H.264 per quality preset, scaled by pixel count and √fps;
-    /// HEVC gets the same target quality at 0.6× the bitrate.
-    private static func bitrate(quality: ExportSettings.Quality, codec: ExportSettings.Codec, width: Int, height: Int, fps: Int) -> Int {
+    /// HEVC gets the same target quality at 0.6× the bitrate. Not `private`: `ExportSheet`'s live
+    /// size estimate (T-506) shares this exact function rather than a second copy of the Mbps table.
+    static func bitrate(quality: ExportSettings.Quality, codec: ExportSettings.Codec, width: Int, height: Int, fps: Int) -> Int {
         let base: Double
         switch quality {
         case .web: base = 4; case .social: base = 8; case .high: base = 16; case .studio: base = 40
