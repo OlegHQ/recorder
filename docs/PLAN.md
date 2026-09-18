@@ -49,7 +49,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | M0 Foundations | T-001…T-006 | 6/6 |
 | M1 Record | T-101…T-114 | 5/14 |
 | M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
-| M3 Editor shell | T-301…T-313 | 0/13 |
+| M3 Editor shell | T-301…T-313 | 2/13 |
 | M4 Timeline | T-401…T-418 | 2/18 |
 | M5 Ship | T-501…T-509 | 0/9 |
 | M6 Polish | T-601…T-609 | 0/9 |
@@ -314,7 +314,7 @@ Update the "Done" column whenever you tick a task.
 
 ## M3 — Editor shell  (SPEC §5.1, §6.1, §6.2, §6.6 Background, §6.7)
 
-- [ ] **T-301 ProjectStore** · SPEC §5.1
+- [x] **T-301 ProjectStore** · SPEC §5.1
   - File: `Sources/Recorder/Library/ProjectStore.swift`
   ```swift
   @Observable final class ProjectStore {
@@ -331,7 +331,7 @@ Update the "Done" column whenever you tick a task.
 - [ ] **T-302 Library window** · SPEC §5.1 mockup — File `Library/LibraryView.swift`: `LazyVGrid(.adaptive(minimum: 220))`, search field, context menu, inline rename, empty state, `New Recording` button. Open on launch (when permissions OK) and `⇧⌘O`. Document open: `application(_:open:)` for `.recorder` packages; already-open project → focus its window.
   - HUMAN: AC-LIB-2, AC-LIB-3.
 
-- [ ] **T-303 EditorModel (state + undo + autosave)** · SPEC §2 "Undo", §5 "Autosave"
+- [x] **T-303 EditorModel (state + undo + autosave)** · SPEC §2 "Undo", §5 "Autosave"
   - File: `Sources/Recorder/Editor/EditorModel.swift`
   ```swift
   @MainActor @Observable final class EditorModel {
@@ -613,3 +613,5 @@ T-401 · 2026-09-18 · verified: core-lane merged, `make test` 14/14 on master (
 T-402 · 2026-09-18 · verified: `make test` 14/14 on master (3 listed tests) · deviations: ids stay `String` in JSON, public ops take `UUID` and convert at the boundary; addZoom starts at `s` and shrinks to the gap; layouts/masks share the zoom invariants
 T-410 (core only) · 2026-09-18 · verified: `make test` in lane, 4 listed tests · deviations: rule 5 clamps before dropping < 1 s so no short zoom survives at the ends; wiring pending
 T-207 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `make test` passes 18/18; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: added `RecordingSettings.fps` (default 60) and `.projectsFolder` (default `~/Movies/Recorder`) — SPEC §8 properties the class lacked, same one-`UserDefaults`-key-per-property style as the rest of the class; `SettingsWindow` (in `App/SettingsView.swift`) is the one reusable window (`enum` with a cached `NSWindow`, `.titled, .closable`, hosting `SettingsView` via `NSHostingView`), opened by `AppDelegate.openSettings` (wired to the "Recorder ▸ Settings…" `⌘,` item, which previously had `action: nil`) and by `ToolbarController.openSettingsWindow` (wired to the gear menu's "Settings…" item, previously inert per its own T-207 comment, now removed). Scope matches this task's text exactly (General: projects folder only; Recording: fps 30/60, countdown, the 3 toggles) — SPEC §8's "default export settings" / "after recording: open editor" General fields and the Shortcuts pane are out of scope (M6 / other tasks) per the task's own wording. Not HUMAN-verified: no display/WindowServer or TCC grant in this environment, so opening the window via `⌘,`/gear-menu and value persistence across a real relaunch couldn't be visually confirmed — task marked `[~]`.
+T-301 · 2026-09-18 · verified: lane-library merged; `--selftest library` OK on master · deviations: thumbnail is read-only here (writing belongs to T-111 finish); SelfTest harness now pumps the main run loop instead of blocking on a semaphore (cases using DispatchQueue.main hung)
+T-303 · 2026-09-18 · verified: `--selftest model` OK on master (undo/redo equality, 10-update gesture = 1 undo step, autosave on disk after 0.6 s) · deviations: none
