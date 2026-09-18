@@ -5,15 +5,18 @@ import ScreenCaptureKit
 /// Display picker (SPEC §4.3) and window picker (SPEC §4.4): one borderless full-screen overlay panel
 /// per `NSScreen`, shown/closed together. `ToolbarController.selectMode(_:)` is the one place that sets
 /// the mode and calls `show(mode:)` — reused by the toolbar buttons, the status menu (T-207b) and
-/// hotkeys (T-204). Area mode has its own overlay (`AreaSelectionOverlay`, T-108).
+/// hotkeys (T-204). Area mode has its own overlay (`AreaSelectionOverlay`); `show`/`close` route to it.
 enum SourcePickerOverlay {
     private static var windows: [SourcePickerWindow] = []
     private static var state: SourcePickerState?
 
-    /// Shows one overlay per screen for `.display`/`.window`. No-op for `.area` (T-108's overlay).
+    /// Shows one overlay per screen for `.display`/`.window`; routes to `AreaSelectionOverlay` for `.area`.
     static func show(mode: RecordingSettings.Mode) {
         close()
-        guard mode == .display || mode == .window else { return }
+        guard mode == .display || mode == .window else {
+            if mode == .area { AreaSelectionOverlay.show() }
+            return
+        }
 
         let state = SourcePickerState()
         state.activeScreen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
@@ -30,6 +33,7 @@ enum SourcePickerOverlay {
         windows.forEach { $0.orderOut(nil) }
         windows = []
         state = nil
+        AreaSelectionOverlay.close()
     }
 
     /// `Start recording` hook (button or `Return`). T-111 will point this at
@@ -258,8 +262,9 @@ private struct SourcePickerContentView: View {
 }
 
 /// Accent "Start recording" button with a `⌄` countdown submenu (SPEC §4.3/§4.4). Reuses
-/// `RecordingSettings.countdown`, the same setting the toolbar's gear menu edits.
-private struct StartRecordingButton: View {
+/// `RecordingSettings.countdown`, the same setting the toolbar's gear menu edits. Not private:
+/// reused by `AreaSelectionOverlay` (T-108).
+struct StartRecordingButton: View {
     var action: () -> Void
     private let options: [(String, Int)] = [("Off", 0), ("3 s", 3), ("5 s", 5), ("10 s", 10)]
 
@@ -295,7 +300,8 @@ private struct StartRecordingButton: View {
     }
 }
 
-private extension NSScreen {
+// Not private: reused by `AreaSelectionOverlay` (T-108).
+extension NSScreen {
     var displayID: CGDirectDisplayID? {
         (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
     }
