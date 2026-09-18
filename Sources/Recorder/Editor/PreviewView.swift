@@ -97,6 +97,21 @@ final class PreviewView: MTKView {
 
     // MARK: - Transport (SPEC §7.3; `TransportBar` below calls these)
 
+    /// AC-TL-7 (split-mode hover): OUTPUT seconds. Non-nil + paused ⇒ the preview shows that frame
+    /// (a coalesced, zero-tolerance seek — same mechanism `seek(toOutput:)` uses) WITHOUT moving
+    /// `model.playhead`; `nil` seeks back to the playhead frame. Ignored while playing (`draw`'s
+    /// `displayTime` falls back to `model.playhead` then) — a live playhead already drives the
+    /// player, and split mode only hovers a paused timeline. One-line coordinator hook:
+    /// `timeline.onHoverTime = { [weak preview] in preview?.hoverTime = $0 }`.
+    var hoverTime: Double? {
+        didSet {
+            guard hoverTime != oldValue else { return }
+            needsDisplay = true
+            guard !model.isPlaying else { return }
+            performSeek(to: hoverTime ?? model.playhead)
+        }
+    }
+
     func togglePlayPause() {
         model.isPlaying ? pause() : setRate(1)
     }
@@ -110,6 +125,11 @@ final class PreviewView: MTKView {
     func seek(toOutput t: Double) {
         let clamped = min(max(t, 0), max(model.timeMap.outputDuration, 0))
         model.playhead = clamped
+        performSeek(to: clamped)
+    }
+
+    private func performSeek(to t: Double) {
+        let clamped = min(max(t, 0), max(model.timeMap.outputDuration, 0))
         pendingSeekTime = clamped
         needsDisplay = true
         if !isSeeking { performPendingSeek() }
@@ -134,6 +154,10 @@ final class PreviewView: MTKView {
 
     private func setRate(_ rate: Float) {
         guard rate != 0, let player else { pause(); return }
+        // A lingering hover seek must not hijack where playback resumes from (AC-TL-7 is a paused-
+        // only feature; leaving the player wherever the last hover looked would desync it from
+        // `model.playhead`).
+        if hoverTime != nil { performSeek(to: model.playhead) }
         model.isPlaying = true
         player.rate = rate
         cameraPlayer?.rate = rate
@@ -338,7 +362,10 @@ final class PreviewView: MTKView {
         }
         let screenTexture = pixelBuffer.flatMap { textureCache.texture(from: $0) }
         let cameraTexture = currentCameraPixelBuffer().flatMap { textureCache.texture(from: $0) }
-        var state = makeFrameState(model: model, outputTime: model.playhead, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
+        // AC-TL-7: while paused, a non-nil `hoverTime` overrides what's DISPLAYED (`FrameState` is
+        // still a pure function of this one output time — `model.playhead` itself is untouched).
+        let displayTime = (!model.isPlaying ? hoverTime : nil) ?? model.playhead
+        var state = makeFrameState(model: model, outputTime: displayTime, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
 
         // T-415: a `.manual` zoom selected ⇒ show the UN-zoomed frame (SPEC §6.6) so the target
         // overlay (`zoomTargetView`) is drawn against the same un-zoomed content it's positioned
@@ -508,6 +535,55 @@ final class PreviewView: MTKView {
         if corner != model.project.camera.corner {
             model.edit("Camera position") { $0.camera.corner = corner }
         }
+    }
+}
+
+// MARK: - Selftest `hover-preview <package>` (AC-TL-7)
+
+extension PreviewView {
+    /// Drives the real `AVPlayer` seek path (not a mock) over a package with real media: `hoverTime`
+    /// shows a different frame than `model.playhead` without moving it, and `nil` seeks back.
+    @MainActor
+    static func runHoverPreviewSelfTest(_ args: [String]) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        guard let packagePath = args.first else { throw Fail(description: "usage: hover-preview <package>") }
+        let packageURL = URL(fileURLWithPath: packagePath)
+        let model = try loadEditorModel(package: packageURL)
+        let playheadTime = min(0.4, model.timeMap.outputDuration / 2)
+        model.playhead = playheadTime
+
+        let view = PreviewView(model: model)
+        view.setFrameSize(NSSize(width: 640, height: 360))
+
+        func waitUntil(_ timeout: Double = 5, _ predicate: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !predicate() {
+                guard Date() < deadline else { throw Fail(description: "timed out waiting") }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+        func playerSeconds() -> Double { view.player?.currentTime().seconds ?? -1 }
+
+        // Let the initial attach + seek-to-playhead settle.
+        try await waitUntil { view.player?.currentItem?.status == .readyToPlay }
+        try await waitUntil { !view.isSeeking && abs(playerSeconds() - playheadTime) < 0.05 }
+
+        let hoverTarget = min(1.0, model.timeMap.outputDuration - 0.1)
+        guard hoverTarget > playheadTime + 0.05 else { throw Fail(description: "fixture too short for a distinct hover target") }
+
+        view.hoverTime = hoverTarget
+        try await waitUntil { !view.isSeeking && abs(playerSeconds() - hoverTarget) < 0.05 }
+        guard model.playhead == playheadTime else {
+            throw Fail(description: "hoverTime moved model.playhead: \(model.playhead) != \(playheadTime)")
+        }
+        print("hover-preview: playhead=\(playheadTime) hoverTarget=\(hoverTarget) player=\(playerSeconds())")
+
+        view.hoverTime = nil
+        try await waitUntil { !view.isSeeking && abs(playerSeconds() - playheadTime) < 0.05 }
+        guard model.playhead == playheadTime else {
+            throw Fail(description: "nil hoverTime changed model.playhead: \(model.playhead) != \(playheadTime)")
+        }
+        print("hover-preview OK: hover moved the player without touching model.playhead; nil restored the playhead frame")
     }
 }
 

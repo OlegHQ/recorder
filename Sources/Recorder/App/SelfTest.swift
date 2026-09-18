@@ -1597,6 +1597,8 @@ enum SelfTest {
         // `Render/ZoomTargetMapping.swift`).
         "zoom-target": { args in try await ZoomTargetMapping.runSelfTest(args) },
         "zoom-target-png": { args in try await ZoomTargetMapping.runPNGSelfTest(args) },
+        // AC-TL-7: hover preview (see `PreviewView.hoverTime`).
+        "hover-preview": { args in try await PreviewView.runHoverPreviewSelfTest(args) },
     ]
 
     /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and
