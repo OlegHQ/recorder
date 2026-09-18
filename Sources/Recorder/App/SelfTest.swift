@@ -20,6 +20,7 @@ enum SelfTest {
         },
         "render": { args in try Compositor.runRenderSelfTest(args) },
         "composition": { args in try await runCompositionSelfTest(args) },
+        "preview-frame": { args in try await Compositor.runPreviewFrameSelfTest(args) },
         "library": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             func waitUntil(timeout: Double = 3, _ predicate: () -> Bool) async throws {
