@@ -839,6 +839,11 @@ enum SelfTest {
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
+        // Dev/QA tool (agent UI testing): screen/mouse/keyboard driver, see UIDriver.swift.
+        "screenshot": { args in try await UIDriver.screenshot(args) },
+        "click": { args in try await UIDriver.click(args) },
+        "key": { args in try await UIDriver.key(args) },
+        "drag": { args in try await UIDriver.drag(args) },
     ]
 
     static func runIfRequested() {
