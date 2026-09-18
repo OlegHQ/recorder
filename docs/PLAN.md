@@ -73,7 +73,8 @@ Update the "Done" column whenever you tick a task.
   ```
   - Verify: `make build`.
 
-- [ ] **T-003 App shell** · SPEC §8
+- [~] **T-003 App shell** · SPEC §8
+  - WAITING ON HUMAN: run `make run`, then check — menu bar shows Recorder/File/Edit/Record/Export/View/Window in that order with the titles/key-equivalents in SPEC §8; the status item (record.circle icon) shows New Recording/Projects/Quit; closing the placeholder window does not quit the app (status item stays).
   - Files: replace `Sources/Recorder/main.swift` with `Sources/Recorder/App/main.swift` + `App/AppDelegate.swift`.
   - Do: `main.swift` = parse `--selftest` (T-004) else run `NSApplication` with `AppDelegate`. AppDelegate: `NSApp.appearance = NSAppearance(named: .darkAqua)`; build the main menu in code exactly as SPEC §8 (items may have `action: nil` for now — they get wired by later tasks); `applicationShouldTerminateAfterLastWindowClosed → false`; create `NSStatusItem` with menu `New Recording / Projects / Quit`.
   - Verify: `make run`. HUMAN: menu bar shows Recorder/File/Edit/Record/Export/View/Window; status item present; closing windows doesn't quit.
@@ -579,4 +580,5 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 Append one line per completed task: `T-xxx · YYYY-MM-DD · verified: <what> · deviations: <none|…>`
 
 T-002 · 2026-09-18 · verified: `make build` succeeds with `Sources/Recorder/App/Theme.swift` added (enum `Theme`, `NSColor` tokens + `Color` accessors, `Radius`, body/caption/title fonts, `timecodeFont`, `NSColor(hex:)`) · deviations: none
+T-003 · 2026-09-18 · verified: `make build` and `make app SIGN_ID=-` succeed; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s (no crash), killed cleanly · deviations: "Record" menu's spec shorthand "Start/Finish" rendered as static title "Start/Finish" (toggling to real state comes with T-104/T-111); "View" tab items titled "1"–"6" (spec §8 says only "tabs 1–6", not yet named — inspector tab names arrive with T-308+); About/Quit/Close/Window-menu Minimize/Zoom/Bring-All-to-Front wired to standard AppKit responder-chain selectors (generic, not app logic) so the app is actually usable/quittable meanwhile; visual menu/status-item check is HUMAN (marked `[~]`).
 
