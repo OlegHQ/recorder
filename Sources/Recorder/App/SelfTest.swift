@@ -3,6 +3,7 @@ import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import CoreMedia
+import CoreVideo
 import Darwin
 import Dispatch
 import Foundation
@@ -398,6 +399,63 @@ enum SelfTest {
                 }
                 try data.write(to: URL(fileURLWithPath: outPath))
                 print("wrote \(outPath)")
+            }
+        },
+        "recover": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-recover-\(UUID().uuidString)")
+            let package = tmp.appendingPathComponent("Orphan.recorder")
+            try fm.createDirectory(at: package, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            // Synthesize a small, playable screen.mov with no capture/TCC involved, matching what
+            // fragmented writing (T-110) leaves behind after a crash mid-recording.
+            let width = 64, height = 48, fps: Int32 = 30, frameCount = 30
+            let movURL = package.appendingPathComponent("screen.mov")
+            let writer = try AVAssetWriter(outputURL: movURL, fileType: .mov)
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
+            ])
+            let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+                kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+            ])
+            writer.add(input)
+            writer.startWriting()
+            writer.startSession(atSourceTime: .zero)
+
+            var frame = 0
+            while frame < frameCount {
+                guard input.isReadyForMoreMediaData else {
+                    try await Task.sleep(nanoseconds: 5_000_000)
+                    continue
+                }
+                var pixelBuffer: CVPixelBuffer?
+                CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
+                guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
+                adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
+                frame += 1
+            }
+            input.markAsFinished()
+            await writer.finishWriting()
+            guard writer.status == .completed else { throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")") }
+
+            let projectURL = package.appendingPathComponent("project.json")
+            guard !fm.fileExists(atPath: projectURL.path) else { throw Fail(description: "test setup: project.json already exists") }
+
+            await RecordingRecovery.recoverOrphans(in: tmp)
+
+            guard fm.fileExists(atPath: projectURL.path) else { throw Fail(description: "recovery did not write project.json") }
+            let project = try Project.load(from: projectURL)
+            guard project.source.pixelWidth == width, project.source.pixelHeight == height else {
+                throw Fail(description: "size \(project.source.pixelWidth)x\(project.source.pixelHeight) != \(width)x\(height)")
+            }
+            guard (0.5...2.0).contains(project.source.duration) else {
+                throw Fail(description: "duration \(project.source.duration) out of range 0.5...2.0")
+            }
+            guard project.clips.first?.sourceEnd == project.source.duration else {
+                throw Fail(description: "clip doesn't span the recovered duration")
             }
         },
         "events": { args in
