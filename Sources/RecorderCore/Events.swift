@@ -30,3 +30,25 @@ public struct EventLog: Codable, Sendable {
     /// Left-button presses.
     public func clicks() -> [InputEvent] { events.filter { $0.k == .down && $0.b == 0 } }
 }
+
+/// SPEC "Edit ▸ Speed Up Typing": runs of `.typing` events with a gap < 1 s between consecutive
+/// events, kept only where the run spans > 3 s. `Edit ▸ Speed Up Typing` splits clips around these
+/// ranges and sets them to 2x (not here).
+public func typingRanges(events: [InputEvent]) -> [TimeRange] {
+    let typing = events.filter { $0.k == .typing }.sorted { $0.t < $1.t }
+
+    var ranges: [TimeRange] = []
+    var runStart: Double?
+    var runEnd: Double?
+    for event in typing {
+        if let end = runEnd, event.t - end < 1.0 {
+            runEnd = event.t
+        } else {
+            if let start = runStart, let end = runEnd, end - start > 3.0 { ranges.append(TimeRange(start: start, end: end)) }
+            runStart = event.t
+            runEnd = event.t
+        }
+    }
+    if let start = runStart, let end = runEnd, end - start > 3.0 { ranges.append(TimeRange(start: start, end: end)) }
+    return ranges
+}
