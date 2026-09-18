@@ -143,15 +143,37 @@ enum SelfTest {
             let outputDuration = await model.timeMap.outputDuration
             await MainActor.run { model.playhead = outputDuration / 2 }
 
-            let png: Data? = await MainActor.run {
+            let zoom0ID = UUID(uuidString: project.zooms[0].id)!
+            let layout0ID = UUID(uuidString: project.layouts[0].id)!
+
+            let (png, hitErrors): (Data?, [String]) = await MainActor.run {
                 let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 160))
                 view.model = model
                 view.geometry.pxPerSecond = (view.frame.width - TimelineView.gutter) / (outputDuration + 3)
                 view.needsDisplay = true
-                guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+
+                // T-406: hit-test a handful of known points against the fixture's geometry.
+                var errors: [String] = []
+                @MainActor func expect(_ p: CGPoint, _ wanted: TimelineHit, _ name: String) {
+                    let got = view.hitTest(at: p)
+                    if got != wanted { errors.append("\(name): expected \(wanted), got \(got)") }
+                }
+                expect(CGPoint(x: 430, y: 10), .playhead, "playhead")
+                expect(CGPoint(x: 150, y: 40), .clipBody(0), "clipBody")
+                expect(CGPoint(x: 290, y: 40), .clipEdge(0, .trailing), "clipEdge")
+                expect(CGPoint(x: 140, y: 80), .blockBody(zoom0ID), "zoomBody")
+                expect(CGPoint(x: 150, y: 110), .blockBody(layout0ID), "layoutBody")
+                expect(CGPoint(x: 200, y: 10), .ruler, "ruler")
+                expect(CGPoint(x: 476, y: 18), .cutBubble(afterClip: 1), "cutBubble")
+                if case .emptyLane(.zoom, _) = view.hitTest(at: CGPoint(x: 700, y: 80)) {} else {
+                    errors.append("emptyLane: got \(view.hitTest(at: CGPoint(x: 700, y: 80)))")
+                }
+
+                guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return (nil, errors) }
                 view.cacheDisplay(in: view.bounds, to: rep)
-                return rep.representation(using: .png, properties: [:])
+                return (rep.representation(using: .png, properties: [:]), errors)
             }
+            guard hitErrors.isEmpty else { throw Fail(description: "hitTest: \(hitErrors.joined(separator: "; "))") }
             guard let png else { throw Fail(description: "no PNG data") }
             try png.write(to: URL(fileURLWithPath: outPath))
         },

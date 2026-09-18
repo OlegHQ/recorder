@@ -9,6 +9,20 @@ enum Lane: CaseIterable, Sendable {
     case clip, zoom, layout, mask
 }
 
+/// What a point in `TimelineView` is over (SPEC §7.2 hit-testing table). `hitTest(at:)` checks in
+/// exactly the table's order: playhead cap, block edge, block body, ✂ bubble, empty lane, ruler.
+enum TimelineHit: Equatable {
+    case playhead
+    case clipEdge(Int, Edge)
+    case clipBody(Int)
+    case cutBubble(afterClip: Int)
+    case blockEdge(UUID, Edge)
+    case blockBody(UUID)
+    case emptyLane(Lane, source: Double)
+    case ruler
+    case none
+}
+
 /// The single custom-drawn timeline: ruler + clip/zoom/layout/mask lanes + playhead (SPEC §7.1).
 /// Renders from `EditorModel.project`; it never owns project data. A flipped, layer-backed
 /// `NSView` that manages its own virtual horizontal scroll/zoom via `geometry` (no `NSScrollView`).
@@ -206,7 +220,7 @@ final class TimelineView: NSView {
     private func drawClipLane(_ project: Project) {
         let row = laneRow(.clip)
         var outStart = 0.0
-        for clip in project.clips {
+        for (i, clip) in project.clips.enumerated() {
             let outEnd = outStart + clip.outputDuration
             defer { outStart = outEnd }
             // A 1.5 pt gap on each side keeps neighbouring clips visually separate (their seam is
@@ -215,7 +229,7 @@ final class TimelineView: NSView {
                                width: max(0, x(forOutput: outEnd) - x(forOutput: outStart) - 3), height: row.height - 4)
             guard rect.width > 0.5 else { continue }
             let label = clip.speed != 1 ? "\(formatSpeed(clip.speed))\u{00D7} \u{23E9}" : nil
-            drawBlock(rect, fill: Theme.clip, tornLeft: false, tornRight: false, label: label)
+            drawBlock(rect, fill: Theme.clip, tornLeft: false, tornRight: false, label: label, selected: model?.selectedClip == i)
         }
     }
 
@@ -223,27 +237,31 @@ final class TimelineView: NSView {
 
     private func drawZoomLane(_ project: Project, _ timeMap: TimeMap) {
         let row = laneRow(.zoom)
+        let selection = model?.selection ?? []
         for zoom in project.zooms {
             let label = "\u{1F50D} \(String(format: "%.1f", zoom.scale))\u{00D7} \(zoom.mode == .auto ? "A" : "M")"
+            let selected = UUID(uuidString: zoom.id).map(selection.contains) ?? false
             for segment in visibleSegments(start: zoom.start, end: zoom.end, project: project, timeMap: timeMap) {
                 let rect = CGRect(x: x(forOutput: segment.outStart), y: row.minY + 2,
                                    width: max(0, x(forOutput: segment.outEnd) - x(forOutput: segment.outStart)), height: row.height - 4)
                 guard rect.width > 0.5 else { continue }
-                drawBlock(rect, fill: Theme.accent, tornLeft: segment.tornLeft, tornRight: segment.tornRight, label: label)
+                drawBlock(rect, fill: Theme.accent, tornLeft: segment.tornLeft, tornRight: segment.tornRight, label: label, selected: selected)
             }
         }
     }
 
     private func drawLayoutLane(_ project: Project, _ timeMap: TimeMap) {
         let row = laneRow(.layout)
+        let selection = model?.selection ?? []
         for layout in project.layouts {
             guard layout.kind == .cameraFull else { continue }
             let label = "\u{25C9} Camera full"
+            let selected = UUID(uuidString: layout.id).map(selection.contains) ?? false
             for segment in visibleSegments(start: layout.start, end: layout.end, project: project, timeMap: timeMap) {
                 let rect = CGRect(x: x(forOutput: segment.outStart), y: row.minY + 2,
                                    width: max(0, x(forOutput: segment.outEnd) - x(forOutput: segment.outStart)), height: row.height - 4)
                 guard rect.width > 0.5 else { continue }
-                drawBlock(rect, fill: Theme.layout, tornLeft: segment.tornLeft, tornRight: segment.tornRight, label: label)
+                drawBlock(rect, fill: Theme.layout, tornLeft: segment.tornLeft, tornRight: segment.tornRight, label: label, selected: selected)
             }
         }
     }
@@ -265,7 +283,7 @@ final class TimelineView: NSView {
 
     // MARK: - Block drawing (rounded rect radius 10, 1 px inner highlight, centred label)
 
-    private func drawBlock(_ rect: CGRect, fill: NSColor, tornLeft: Bool, tornRight: Bool, label: String?) {
+    private func drawBlock(_ rect: CGRect, fill: NSColor, tornLeft: Bool, tornRight: Bool, label: String?, selected: Bool = false) {
         let radius = min(Self.blockRadius, rect.height / 2, rect.width / 2)
         let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
         fill.setFill()
@@ -275,6 +293,21 @@ final class TimelineView: NSView {
         highlight.lineWidth = 1
         Theme.textPrimary.withAlphaComponent(0.15).setStroke()
         highlight.stroke()
+
+        // Selection: 2 px white outline + glow (SPEC §7.2 "Selection").
+        if selected {
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = Theme.textPrimary.withAlphaComponent(0.9)
+            shadow.shadowBlurRadius = 6
+            shadow.shadowOffset = .zero
+            shadow.set()
+            let outline = NSBezierPath(roundedRect: rect.insetBy(dx: -1, dy: -1), xRadius: radius + 1, yRadius: radius + 1)
+            outline.lineWidth = 2
+            Theme.textPrimary.setStroke()
+            outline.stroke()
+            NSGraphicsContext.restoreGraphicsState()
+        }
 
         // Torn edge marker (SPEC §7.1: "torn edge ⌇ when partially hidden" — U+2307 WAVY LINE).
         let tornAttrs: [NSAttributedString.Key: Any] = [.font: Theme.bodyFont, .foregroundColor: Theme.textPrimary.withAlphaComponent(0.6)]
@@ -361,6 +394,159 @@ final class TimelineView: NSView {
         speed.truncatingRemainder(dividingBy: 1) == 0 ? String(format: "%.0f", speed) : String(format: "%.1f", speed)
     }
 
+    // MARK: - Hit-testing (SPEC §7.2 table; checked in exactly the table's order)
+
+    /// 6 pt edge zone, shrinking to 3 pt when the block is narrower than 24 pt (SPEC §7.2).
+    private func edgeZone(width: CGFloat) -> CGFloat { width < 24 ? 3 : 6 }
+
+    func hitTest(at p: CGPoint) -> TimelineHit {
+        guard let model else { return .none }
+
+        let playheadX = x(forOutput: model.playhead)
+        if p.y <= Self.rulerHeight, abs(p.x - playheadX) <= 6 { return .playhead }
+
+        if let hit = hitClipLane(p, model) { return hit }
+        if let hit = hitBlockLane(p, model, lane: .zoom, blocks: model.project.zooms.map { ($0.id, $0.start, $0.end) }) { return hit }
+        if hasLayoutLane, let hit = hitBlockLane(p, model, lane: .layout, blocks: model.project.layouts.map { ($0.id, $0.start, $0.end) }) {
+            return hit
+        }
+        if let hit = hitCutBubble(p, model) { return hit }
+        if let hit = hitEmptyLane(p, model) { return hit }
+        if p.y <= Self.rulerHeight { return .ruler }
+        return .none
+    }
+
+    private func hitClipLane(_ p: CGPoint, _ model: EditorModel) -> TimelineHit? {
+        let row = laneRow(.clip)
+        guard p.y >= row.minY, p.y <= row.maxY else { return nil }
+        var outStart = 0.0
+        for (i, clip) in model.project.clips.enumerated() {
+            let outEnd = outStart + clip.outputDuration
+            defer { outStart = outEnd }
+            let x0 = x(forOutput: outStart), x1 = x(forOutput: outEnd)
+            guard p.x >= x0, p.x <= x1 else { continue }
+            let zone = edgeZone(width: x1 - x0)
+            if p.x <= x0 + zone { return .clipEdge(i, .leading) }
+            if p.x >= x1 - zone { return .clipEdge(i, .trailing) }
+            return .clipBody(i)
+        }
+        return nil
+    }
+
+    /// Shared by the zoom/layout lanes: `blocks` visible span(s) come from the same
+    /// `visibleSegments` the drawing code uses, so you can only grab what's actually on screen.
+    private func hitBlockLane(_ p: CGPoint, _ model: EditorModel, lane: Lane, blocks: [(id: String, start: Double, end: Double)]) -> TimelineHit? {
+        let row = laneRow(lane)
+        guard p.y >= row.minY, p.y <= row.maxY else { return nil }
+        let timeMap = model.timeMap
+        for b in blocks {
+            for segment in visibleSegments(start: b.start, end: b.end, project: model.project, timeMap: timeMap) {
+                let x0 = x(forOutput: segment.outStart), x1 = x(forOutput: segment.outEnd)
+                guard p.x >= x0, p.x <= x1, let uuid = UUID(uuidString: b.id) else { continue }
+                let zone = edgeZone(width: x1 - x0)
+                if p.x <= x0 + zone { return .blockEdge(uuid, .leading) }
+                if p.x >= x1 - zone { return .blockEdge(uuid, .trailing) }
+                return .blockBody(uuid)
+            }
+        }
+        return nil
+    }
+
+    /// A small hit box at every seam with a cut/trim to restore (drawn as the ✂ bubble by T-408,
+    /// straddling the ruler/clip-lane divider so it never competes with a clip edge's hit zone):
+    /// between two clips whose source ranges don't meet, and at the head/tail when trimmed.
+    private func hitCutBubble(_ p: CGPoint, _ model: EditorModel) -> TimelineHit? {
+        let row = laneRow(.clip)
+        let bandTop = row.minY - 8
+        guard p.y >= bandTop, p.y <= row.minY else { return nil }
+        let clips = model.project.clips
+        guard !clips.isEmpty else { return nil }
+        let eps = 1e-6
+
+        func box(at seamX: CGFloat) -> CGRect { CGRect(x: seamX - 6, y: bandTop, width: 12, height: 8) }
+
+        if clips[0].sourceStart > eps, box(at: x(forOutput: 0)).contains(p) { return .cutBubble(afterClip: -1) }
+
+        var outEnd = 0.0
+        for i in clips.indices {
+            outEnd += clips[i].outputDuration
+            if i < clips.count - 1, clips[i + 1].sourceStart - clips[i].sourceEnd > eps, box(at: x(forOutput: outEnd)).contains(p) {
+                return .cutBubble(afterClip: i)
+            }
+        }
+        if model.project.source.duration - clips[clips.count - 1].sourceEnd > eps, box(at: x(forOutput: outEnd)).contains(p) {
+            return .cutBubble(afterClip: clips.count - 1)
+        }
+        return nil
+    }
+
+    private func hitEmptyLane(_ p: CGPoint, _ model: EditorModel) -> TimelineHit? {
+        for lane: Lane in [.zoom, .layout, .mask] {
+            guard laneHeight(lane) > 0 else { continue }
+            let row = laneRow(lane)
+            guard p.y >= row.minY, p.y <= row.maxY, p.x >= Self.gutter else { continue }
+            let t = geometry.output(forX: geometryX(p))
+            return .emptyLane(lane, source: model.timeMap.sourceTime(atOutput: t))
+        }
+        return nil
+    }
+
+    // MARK: - Cursors (SPEC §7.2 table)
+
+    private func cursor(for hit: TimelineHit) -> NSCursor {
+        switch hit {
+        case .playhead, .clipEdge, .blockEdge: return .resizeLeftRight
+        case .blockBody: return .openHand
+        case .cutBubble: return .pointingHand
+        case .emptyLane: return .crosshair
+        case .clipBody, .ruler, .none: return .arrow
+        }
+    }
+
+    // MARK: - Selection (SPEC §7.2 "Selection")
+
+    private func lane(ofBlock id: UUID) -> Lane? {
+        guard let model else { return nil }
+        let key = id.uuidString
+        if model.project.zooms.contains(where: { $0.id == key }) { return .zoom }
+        if model.project.layouts.contains(where: { $0.id == key }) { return .layout }
+        if model.project.masks.contains(where: { $0.id == key }) { return .mask }
+        return nil
+    }
+
+    private func selectClip(_ i: Int) {
+        model?.selectedClip = i
+        model?.selection = []
+    }
+
+    private func selectBlock(_ id: UUID, addToSelection: Bool) {
+        guard let model else { return }
+        model.selectedClip = nil
+        if addToSelection, let existing = model.selection.first, lane(ofBlock: existing) == lane(ofBlock: id) {
+            model.selection.insert(id)
+        } else {
+            model.selection = [id]
+        }
+    }
+
+    private func deselect() {
+        model?.selectedClip = nil
+        model?.selection = []
+    }
+
+    /// `⌫` removes the selection: the selected clip, or every selected zoom/layout/mask block.
+    private func removeSelection() {
+        guard let model else { return }
+        if let i = model.selectedClip {
+            model.edit("Remove Clip") { _ = $0.removeClip(i) }
+            model.selectedClip = nil
+        } else if !model.selection.isEmpty {
+            let ids = model.selection
+            model.edit("Remove") { project in for id in ids { project.removeBlock(id) } }
+            model.selection = []
+        }
+    }
+
     // MARK: - Zoom range + fit (SPEC §7.2 "Navigation")
 
     /// The px/s that fits the whole project's output duration in the current view width — the
@@ -436,6 +622,8 @@ final class TimelineView: NSView {
             zoom(by: 1 / 1.4, anchorX: geometry.x(forOutput: model.playhead))
         } else if shift, chars?.lowercased() == "z" {
             fit()
+        } else if event.keyCode == 51 || event.keyCode == 117 { // delete / forward-delete: ⌫ removes the selection
+            removeSelection()
         } else {
             super.keyDown(with: event)
         }
@@ -446,9 +634,24 @@ final class TimelineView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let p = convert(event.locationInWindow, from: nil)
-        guard p.y <= Self.rulerHeight else { return }
-        dragKind = .scrub
-        scrub(toViewX: p.x)
+        let hit = hitTest(at: p)
+        switch hit {
+        case .playhead, .ruler:
+            dragKind = .scrub
+            scrub(toViewX: p.x)
+        case .clipBody(let i), .clipEdge(let i, _):
+            // T-406 is hit-testing + selection only; the edge drag itself (trim) is T-408's job.
+            selectClip(i)
+        case .blockBody(let id), .blockEdge(let id, _):
+            // The body/edge drag itself (move/resize) is T-409's job.
+            selectBlock(id, addToSelection: event.modifierFlags.contains(.shift))
+        case .cutBubble, .emptyLane:
+            // Restoring a cut (T-408) and adding a block (T-409) aren't wired yet; a click here
+            // still counts as "empty space" for deselection purposes.
+            deselect()
+        case .none:
+            deselect()
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -457,6 +660,8 @@ final class TimelineView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) { dragKind = nil }
+
+    override func cancelOperation(_ sender: Any?) { deselect() }
 
     private func scrub(toViewX viewX: CGFloat) {
         guard let model else { return }
@@ -475,12 +680,15 @@ final class TimelineView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        hoverX = convert(event.locationInWindow, from: nil).x
+        let p = convert(event.locationInWindow, from: nil)
+        hoverX = p.x
+        cursor(for: hitTest(at: p)).set()
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
         hoverX = nil
+        NSCursor.arrow.set()
         needsDisplay = true
     }
 }
