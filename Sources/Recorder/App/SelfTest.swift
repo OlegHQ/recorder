@@ -13,6 +13,7 @@ enum SelfTest {
         "permissions": { _ in
             print("screen=\(Permissions.screen) accessibility=\(Permissions.accessibility)")
         },
+        "render": { args in try Compositor.runRenderSelfTest(args) },
     ]
 
     static func runIfRequested() {
