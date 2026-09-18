@@ -263,30 +263,106 @@ public extension Project {
     /// Minimum kept length of a zoom/layout/mask block, in source seconds. SPEC §7.4.
     private static let minBlockLength = 0.5
 
-    /// Adds a zoom of `length` seconds (`Zoom.Mode` `mode`) into the free gap in `zooms` that
-    /// contains source time `s`. Returns its id, or `nil` if that gap is shorter than 0.5 s.
+    // MARK: - Generic engine (shared by zoom/layout/mask — T-417/T-503/T-601: "parametrise by
+    // lane, no copies"). `T: TimedBlock` is a file-private protocol, so these stay `private` too
+    // (Swift access control lets a `private` member's signature mention a less-visible type); the
+    // public, per-lane API below is a thin one-line wrapper per op, keyed on a `WritableKeyPath`
+    // into `zooms`/`layouts`/`masks`.
+
+    /// Adds a block of `length` seconds into the free gap in the lane at `keyPath` containing
+    /// source time `s`. Returns its id, or `nil` if that gap is shorter than `minBlockLength`.
     @discardableResult
-    mutating func addZoom(atSource s: Double, length: Double = 3, mode: Zoom.Mode) -> UUID? {
+    private mutating func addBlock<T: TimedBlock>(atSource s: Double, length: Double, in keyPath: WritableKeyPath<Project, [T]>,
+                                                    make: (_ id: String, _ start: Double, _ end: Double) -> T) -> UUID? {
         let newID = UUID()
-        guard zooms.addBlock(atSource: s, length: length, duration: source.duration, minLength: Self.minBlockLength, make: { start, end in
-            Zoom(id: newID.uuidString, start: start, end: end, mode: mode)
-        }) != nil else { return nil }
+        guard self[keyPath: keyPath].addBlock(atSource: s, length: length, duration: source.duration, minLength: Self.minBlockLength,
+                                               make: { start, end in make(newID.uuidString, start, end) }) != nil else { return nil }
         assert(checkInvariants() == nil)
         return newID
     }
 
-    /// Moves zoom `id` so it starts at source time `s`, clamped against its neighbours and
-    /// `[0, source.duration]`.
-    mutating func moveZoom(_ id: UUID, toStart s: Double) {
-        zooms.moveBlock(id: id.uuidString, toStart: s, duration: source.duration)
+    /// Moves the block with `id` in the lane at `keyPath` so it starts at source time `s`,
+    /// clamped against its neighbours and `[0, source.duration]`.
+    private mutating func moveBlock<T: TimedBlock>(_ id: UUID, in keyPath: WritableKeyPath<Project, [T]>, toStart s: Double) {
+        self[keyPath: keyPath].moveBlock(id: id.uuidString, toStart: s, duration: source.duration)
         assert(checkInvariants() == nil)
     }
 
+    /// Drags the block with `id`'s `edge` (in the lane at `keyPath`) to source time `s`, clamped
+    /// so it stays >= `minBlockLength` and never overlaps its neighbour.
+    private mutating func resizeBlock<T: TimedBlock>(_ id: UUID, in keyPath: WritableKeyPath<Project, [T]>, edge: Edge, to s: Double) {
+        self[keyPath: keyPath].resizeBlock(id: id.uuidString, edge: edge, to: s, duration: source.duration, minLength: Self.minBlockLength)
+        assert(checkInvariants() == nil)
+    }
+
+    // MARK: - Zoom (SPEC §7.4 normative names)
+
+    /// Adds a zoom of `length` seconds (`Zoom.Mode` `mode`) into the free gap in `zooms` that
+    /// contains source time `s`. Returns its id, or `nil` if that gap is shorter than 0.5 s.
+    @discardableResult
+    mutating func addZoom(atSource s: Double, length: Double = 3, mode: Zoom.Mode) -> UUID? {
+        addBlock(atSource: s, length: length, in: \.zooms) { id, start, end in Zoom(id: id, start: start, end: end, mode: mode) }
+    }
+
+    /// Moves zoom `id` so it starts at source time `s`, clamped against its neighbours and
+    /// `[0, source.duration]`.
+    mutating func moveZoom(_ id: UUID, toStart s: Double) { moveBlock(id, in: \.zooms, toStart: s) }
+
     /// Drags zoom `id`'s `edge` to source time `s`, clamped so it stays >= 0.5 s and never
     /// overlaps its neighbour.
-    mutating func resizeZoom(_ id: UUID, edge: Edge, to s: Double) {
-        zooms.resizeBlock(id: id.uuidString, edge: edge, to: s, duration: source.duration, minLength: Self.minBlockLength)
-        assert(checkInvariants() == nil)
+    mutating func resizeZoom(_ id: UUID, edge: Edge, to s: Double) { resizeBlock(id, in: \.zooms, edge: edge, to: s) }
+
+    // MARK: - Layout (`moveLayout` landed with T-417 for the accessibility nudge)
+
+    /// Adds a layout of `length` seconds (`Layout.Kind` `kind`) into the free gap in `layouts`
+    /// that contains source time `s`. Returns its id, or `nil` if that gap is shorter than 0.5 s.
+    @discardableResult
+    mutating func addLayout(atSource s: Double, length: Double = 3, kind: Layout.Kind) -> UUID? {
+        addBlock(atSource: s, length: length, in: \.layouts) { id, start, end in Layout(id: id, start: start, end: end, kind: kind) }
+    }
+
+    /// Moves layout `id` so it starts at source time `s`, clamped against its neighbours and
+    /// `[0, source.duration]`.
+    mutating func moveLayout(_ id: UUID, toStart s: Double) { moveBlock(id, in: \.layouts, toStart: s) }
+
+    /// Drags layout `id`'s `edge` to source time `s`, clamped so it stays >= 0.5 s and never
+    /// overlaps its neighbour.
+    mutating func resizeLayout(_ id: UUID, edge: Edge, to s: Double) { resizeBlock(id, in: \.layouts, edge: edge, to: s) }
+
+    /// Non-mutating preview of where `addLayout(atSource:length:kind:)` would place a new block —
+    /// for the empty layout-lane "ghost" (SPEC §7.2). `nil` exactly when `addLayout` would also fail.
+    func previewLayoutPlacement(atSource s: Double, length: Double = 3) -> (start: Double, end: Double)? {
+        var trial = self
+        guard let id = trial.addLayout(atSource: s, length: length, kind: .cameraFull),
+              let layout = trial.layouts.first(where: { $0.id == id.uuidString }) else { return nil }
+        return (layout.start, layout.end)
+    }
+
+    // MARK: - Mask (`moveMask` landed with T-417 for the accessibility nudge)
+
+    /// Adds a mask of `length` seconds (`Mask.Kind` `kind`, default rect/opacity) into the free
+    /// gap in `masks` that contains source time `s`. Returns its id, or `nil` if that gap is
+    /// shorter than 0.5 s.
+    @discardableResult
+    mutating func addMask(atSource s: Double, length: Double = 3, kind: Mask.Kind, rect: NormRect = NormRect(), opacity: Double = 0.8) -> UUID? {
+        addBlock(atSource: s, length: length, in: \.masks) { id, start, end in Mask(id: id, start: start, end: end, kind: kind, rect: rect, opacity: opacity) }
+    }
+
+    /// Moves mask `id` so it starts at source time `s`, clamped against its neighbours and
+    /// `[0, source.duration]`.
+    mutating func moveMask(_ id: UUID, toStart s: Double) { moveBlock(id, in: \.masks, toStart: s) }
+
+    /// Drags mask `id`'s `edge` to source time `s`, clamped so it stays >= 0.5 s and never
+    /// overlaps its neighbour.
+    mutating func resizeMask(_ id: UUID, edge: Edge, to s: Double) { resizeBlock(id, in: \.masks, edge: edge, to: s) }
+
+    /// Non-mutating preview of where `addMask(atSource:length:kind:)` would place a new block —
+    /// for the empty mask-lane "ghost" (SPEC §7.2). `nil` exactly when `addMask` would also fail.
+    func previewMaskPlacement(atSource s: Double, length: Double = 3) -> (start: Double, end: Double)? {
+        var trial = self
+        guard let id = trial.addMask(atSource: s, length: length, kind: .mask),
+              let mask = trial.masks.first(where: { $0.id == id.uuidString }) else { return nil }
+        return (mask.start, mask.end)
     }
 
     /// Removes the zoom, layout or mask block with `id`, whichever track it's in.
