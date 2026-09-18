@@ -14,13 +14,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wireNewRecording()
         wireSettings()
 
-        if !Permissions.allGranted {
+        // Dev/HUMAN entry point (T-306/T-307): `Recorder --open <package>` opens the editor for
+        // that package directly, so it's reachable before the library (T-3xx, another lane) exists.
+        if let i = CommandLine.arguments.firstIndex(of: "--open"), CommandLine.arguments.indices.contains(i + 1) {
+            EditorWindowController.open(package: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+        } else if !Permissions.allGranted {
             showOnboarding()
         } else {
             ToolbarController.shared.show()
         }
 
         NSApp.activate()
+    }
+
+    /// SPEC §5 "Autosave": "also on window close and applicationWillTerminate" (T-303) — window
+    /// close is handled by `EditorWindowController.windowWillClose`; this covers quit.
+    func applicationWillTerminate(_ n: Notification) {
+        EditorWindowController.saveAllNow()
     }
 
     private func showOnboarding() {
