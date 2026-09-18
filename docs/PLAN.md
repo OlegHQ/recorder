@@ -171,14 +171,31 @@ Update the "Done" column whenever you tick a task.
   - Do: toolbar = `HStack` of close · 3 mode buttons (SF Symbols `display`, `macwindow`, `rectangle.dashed`) · 3 input buttons · gear. Input buttons and gear pop a **native `NSMenu`** built in `ToolbarController` (`NSMenu.popUp(positioning:at:in:)`) with the exact items of SPEC §4.2; checkmarks from settings. Devices: `AVCaptureDevice.DiscoverySession` (`.video` / `.audio`); observe `AVCaptureDevice.wasConnectedNotification`/`wasDisconnected`. No "Device" button. `Esc` handling per AC-TB-4 via `cancelOperation(_:)`.
     Wire: status item "New Recording", `⌘N`, dock click (`applicationShouldHandleReopen`) → `ToolbarController.shared.show()`.
   - HUMAN: compare to `reference/Screenshot…12.50.40.png`; AC-TB-2/3/4.
-  - WAITING ON HUMAN: run `make install`, grant Screen Recording + Accessibility (T-102), then launch the app and
-    compare the toolbar to `reference/Screenshot 2026-09-18 at 13.02.09.png` (closest real match to the SPEC §4.2
-    mockup; `12.50.40.png` turned out to be an unrelated onboarding-flow screenshot from the reference app, not the
-    toolbar) and the menus to `13.03.07.png`/`13.03.22.png`/`13.03.32.png`. Confirm: AC-TB-2 (plug/unplug a camera or
-    mic — the next time its menu opens the list is current, and if the *selected* device was unplugged its button
-    falls back to "No camera"/"No microphone"); AC-TB-3 (pick a camera/mic/mode/toggle, quit, relaunch — selection
-    persisted); AC-TB-4 (`Esc` closes the toolbar; toolbar never appears in a screen recording once T-106 wires
-    `FloatingPanel.allWindowIDs` into the content filter).
+  - WAITING ON HUMAN: first-pass HUMAN test (2026-09-18) found 4 bugs — white toolbar background instead of the dark
+    HUD look, mode-button clicks not visibly registering, camera/mic/system-audio/gear menus not popping, and `Esc`
+    not closing the toolbar (AC-TB-4). Root-caused and fixed in `Recording/FloatingPanel.swift` (shared by every
+    recording-flow window): (1) the panel's `level` was `CGShieldingWindowLevel()-1` — the system's screen-shield
+    level, ~2.1 billion, used for non-interactive lock/transition overlays — instead of the SPEC §4 window/panel
+    rule's `.screenSaver-1`; a window that high sits above the menu bar/Dock where WindowServer doesn't treat it as
+    an ordinary interactive surface, which plausibly explains the broken vibrancy (white instead of dark HUD
+    material) and the dead clicks/menus. (2) `initialFirstResponder` was never set (it only auto-populates from the
+    contentView passed to the designated initializer, and `contentView` is replaced after `super.init`), so first
+    responder stayed the panel itself and `cancelOperation(_:)` (Esc) on the hosted view never fired; fixed by
+    forcing `makeFirstResponder(content)` on every `makeKeyAndOrderFront`. Confirmed by headless in-process testing
+    (synthetic `NSEvent`s via `panel.sendEvent`, bypassing TCC): first responder now lands on the content view and
+    Esc closes the panel, reproducibly, across repeated runs; mode-button clicks were already reaching the SwiftUI
+    buttons via direct event injection even before the fix (so that specific mechanism wasn't disproven, but the
+    level fix is the best-evidenced, SPEC-mandated, single-point explanation for the human's real report). What
+    could **not** be verified in this (TCC-less, headless) environment: the on-screen vibrancy/white-background
+    appearance (a real WindowServer compositing effect an offscreen `cacheDisplay` render can't reproduce — that
+    render already looked correct even before the level fix) and the `NSMenu.popUp` menus (deliberately not
+    exercised headlessly; `popUp` blocks in a nested tracking run loop and a stuck run would hang the process).
+    Please re-run: `make install`, grant Screen Recording + Accessibility (T-102), launch, and recheck all four
+    against `reference/Screenshot 2026-09-18 at 13.02.09.png` and the menu screenshots
+    (`13.03.07.png`/`13.03.22.png`/`13.03.32.png`), plus AC-TB-2/3/4 as originally scoped. Note: PLAN.md's own T-103
+    code block says `level = .init(Int(CGShieldingWindowLevel()) - 1)`, which is what was implemented and is what's
+    being changed here — SPEC.md §4's window/panel rule (`.screenSaver`-1) was treated as the tie-breaker per
+    CLAUDE.md ("SPEC.md is the source of truth for what"); flagging the PLAN/SPEC mismatch for awareness.
 
 - [x] **T-105 SelectionRectView (shared)** · SPEC §4.5, §6.7
   - File: `Sources/Recorder/Recording/SelectionRectView.swift` — used by area selection **and** the crop sheet. Build it once.
@@ -599,3 +616,4 @@ T-104 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`
 T-105 · 2026-09-18 · verified: `make build` succeeds with `Sources/Recorder/Recording/SelectionRectView.swift` added (`SelectionRectView: NSView`, exact stored-property signatures from the task's code block: `rect`/`limit`/`minSize`/`aspect`/`onChange`); `make test` passes 5/5 · deviations: `rect`'s `didSet` clamps into `limit`/`minSize` itself (re-entrant, guarded on equality) so the invariant holds for every external and internal assignment, not just drag gestures; one private `Handle` enum (8 cases) plus one `resized(from:handle:mouse:option:aspect:)` routine drives every resize handle *and* rect creation (creation reuses the `.bottomRight` case dragged from a zero-size rect at the mouse-down point) — the "one hit-test/resize routine parametrised by handle" the task asks for; ⌥ mirrors the opposite edge around the drag-start centre, ⇧ locks to the rect's aspect at mouse-down (or the `aspect` property when set); handle cursors use `NSCursor.frameResize(position:directions:)` (macOS 15 API, matches the "macOS 15+, Apple Silicon" target in CLAUDE.md) instead of the coarser pre-15 resize cursors, giving correct per-corner/edge cursor shapes. Not HUMAN-visually verified yet (no host window exists until T-108 wires it up, per the task's own "exercised by T-108" Verify note).
 T-106 · 2026-09-18 · verified: `make build` succeeds with `Sources/Recorder/Recording/CaptureTarget.swift` added (`enum CaptureTarget { case display(SCDisplay), window(SCWindow), area(SCDisplay, CGRect) }` with `filter(content:settings:)`, `configuration(settings:)`, `pixelSize`, `scale`, `frameInScreenPoints` exactly per the task's signatures); `make test` passes 5/5 · deviations: none from the task's code block. `filter` excludes `FloatingPanel.allWindowIDs` plus, when `settings.hideDesktopIcons`, windows owned by `com.apple.finder` at `CGWindowLevelForKey(.desktopIconWindow)` — SPEC §9 open question 3 can't be verified without Screen Recording permission on this machine, so that heuristic is marked `// ponytail:` with the upgrade path (confirm against a live `SCShareableContent` listing once granted, record the answer in SPEC §9) instead of guessing a different design. `configuration` sets every field SPEC §4.8 lists (`showsCursor=false`, 1/60 s interval, `420v`, `queueDepth=6`, even-rounded `width/height`, `sourceRect` for `.area`, `capturesAudio`/`excludesCurrentProcessAudio`/`captureMicrophone`/`microphoneCaptureDeviceID`, 48 kHz/2 ch). `scale` for `.window` falls back to `NSScreen.main` (SCWindow doesn't expose its owning display) — also flagged `// ponytail:` since it's a corner-cut, not the open question.
 T-102 · 2026-09-18 · HUMAN confirmed: user granted both permissions via onboarding, "granted permissions all good" · deviations: none
+T-104 fix · 2026-09-18 · root cause(s): `Recording/FloatingPanel.swift` panel `level` was `CGShieldingWindowLevel()-1` (the system screen-shield level, ~2.1e9, non-interactive by design) instead of SPEC §4's `.screenSaver-1`, and `content` was never made first responder (`initialFirstResponder` only auto-populates from the designated initializer's contentView, which is replaced after `super.init`) so `cancelOperation(_:)`/Esc never fired · verified: `make app`/`make test` (5/5) pass; headless in-process repro via synthetic `NSEvent`s (`panel.sendEvent`, no TCC needed) confirmed first responder now lands on the content view and Esc closes the panel across repeated runs; alive-after-3s smoke check clean · not verified here (no GUI/TCC in this environment): on-screen HUD vibrancy vs. white background, and the camera/mic/system-audio/gear `NSMenu` popups (not exercised headlessly to avoid hanging in `NSMenu`'s nested tracking loop) — re-check needed, T-104 stays `[~]`.
