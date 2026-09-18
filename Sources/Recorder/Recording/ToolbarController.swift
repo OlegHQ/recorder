@@ -82,8 +82,16 @@ final class ToolbarController: NSObject {
 
     // MARK: - Menu building helpers
 
+    // Anchored to the toolbar, not the mouse (reference: menus open above the toolbar, never overlapping
+    // it). Horizontal position follows the clicked button (mouse x); vertical position puts the menu's
+    // bottom edge just above the panel's top edge.
     private func popUp(_ menu: NSMenu) {
-        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        guard let panel else {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+            return
+        }
+        let point = NSPoint(x: NSEvent.mouseLocation.x, y: panel.frame.maxY + menu.size.height)
+        menu.popUp(positioning: nil, at: point, in: nil)
     }
 
     private func menuItem(_ title: String, checked: Bool = false, key: String = "",

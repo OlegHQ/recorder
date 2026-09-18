@@ -25,21 +25,43 @@ final class FloatingPanel: NSPanel {
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
+        // `.hudWindow` blends with whatever is behind the window; over a bright desktop/app that reads as
+        // washed-out mid-grey instead of the near-black HUD the spec calls for. Force a dark appearance so
+        // the blur itself renders dark, and lay a `Theme.bgPanel` tint on top so the result is near-black
+        // regardless of what's behind the window.
+        effect.appearance = NSAppearance(named: .vibrantDark)
         effect.wantsLayer = true
+        // `layer.cornerRadius` + `masksToBounds` does not clip an NSVisualEffectView's behind-window blur
+        // (it leaks square corners past the rounded shape). Use a resizable rounded-rect mask image instead;
+        // keep `cornerRadius` (without `masksToBounds`) only so the CALayer border below follows the same
+        // rounded shape.
+        effect.maskImage = NSImage.roundedRectMask(radius: Theme.Radius.panel)
         effect.layer?.cornerRadius = Theme.Radius.panel
-        effect.layer?.masksToBounds = true
         effect.layer?.borderWidth = 1
         effect.layer?.borderColor = Theme.stroke.cgColor
 
+        let tint = NSView()
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = Theme.bgPanel.withAlphaComponent(0.7).cgColor
+        tint.translatesAutoresizingMaskIntoConstraints = false
+
         content.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(tint)
         effect.addSubview(content)
         NSLayoutConstraint.activate([
+            tint.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
+            tint.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+            tint.topAnchor.constraint(equalTo: effect.topAnchor),
+            tint.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
             content.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
             content.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
             content.topAnchor.constraint(equalTo: effect.topAnchor),
             content.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
         ])
         contentView = effect
+        // The window's shadow is computed from the content's alpha channel; force it to recompute now that
+        // the mask image has replaced the (unclipped) rectangular layer as the visible shape.
+        invalidateShadow()
 
         FloatingPanel.register(self)
     }
@@ -73,4 +95,20 @@ final class FloatingPanel: NSPanel {
 private struct Weak<T: AnyObject> {
     weak var value: T?
     init(_ value: T) { self.value = value }
+}
+
+private extension NSImage {
+    /// A resizable rounded-rect mask (opaque fill, transparent outside) for `NSVisualEffectView.maskImage`,
+    /// the only way to clip its behind-window blur to rounded corners.
+    static func roundedRectMask(radius: CGFloat) -> NSImage {
+        let side = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
+    }
 }
