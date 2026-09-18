@@ -74,6 +74,43 @@ enum SelfTest {
             try await waitUntil { store.items.count == 3 }
             guard !fm.fileExists(atPath: bravoURL.path) else { throw Fail(description: "trash didn't remove the package") }
         },
+        "model": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-model-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            let projectURL = tmp.appendingPathComponent("project.json")
+            let original = Project(title: "Original")
+            try original.save(to: projectURL)
+
+            let model = await EditorModel(packageURL: tmp, project: original, events: EventLog())
+
+            // edit -> undo -> redo equality
+            await model.edit("rename") { $0.title = "Changed" }
+            let afterEdit = await model.project
+            await model.undo()
+            guard await model.project == original else { throw Fail(description: "undo didn't restore original") }
+            await model.redo()
+            guard await model.project == afterEdit else { throw Fail(description: "redo didn't restore edited state") }
+
+            // a gesture with many updates is exactly one undo step
+            let beforeGesture = await model.project
+            await model.beginGesture()
+            for i in 0..<10 { await model.update { $0.crop.x = Double(i) / 10 } }
+            await model.commitGesture("crop")
+            await model.undo()
+            guard await model.project == beforeGesture else {
+                throw Fail(description: "gesture undo didn't collapse to one step")
+            }
+            await model.redo()
+
+            // autosave: file on disk updated ~0.5 s after the last change
+            await model.edit("title2") { $0.title = "Persisted" }
+            try await Task.sleep(nanoseconds: 700_000_000)
+            let onDisk = try Project.load(from: projectURL)
+            guard onDisk.title == "Persisted" else { throw Fail(description: "autosave didn't persist: \(onDisk.title)") }
+        },
     ]
 
     static func runIfRequested() {
