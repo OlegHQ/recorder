@@ -1,9 +1,13 @@
 import AppKit
+import AVFoundation
+import CoreMedia
 import Darwin
 import Dispatch
 import Foundation
 import Metal
 import RecorderCore
+import ScreenCaptureKit
+import SwiftUI
 
 /// Headless app checks, run instead of the GUI when launched with `--selftest <name> [args]`.
 /// Cases are registered by later tasks: `SelfTest.cases["name"] = { args in … throws }`.
@@ -16,6 +20,8 @@ enum SelfTest {
         "permissions": { _ in
             print("screen=\(Permissions.screen) accessibility=\(Permissions.accessibility)")
         },
+        "render": { args in try Compositor.runRenderSelfTest(args) },
+        "composition": { args in try await runCompositionSelfTest(args) },
         "library": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             func waitUntil(timeout: Double = 3, _ predicate: () -> Bool) async throws {
@@ -74,6 +80,71 @@ enum SelfTest {
             try store.trash(bravoURL)
             try await waitUntil { store.items.count == 3 }
             guard !fm.fileExists(atPath: bravoURL.path) else { throw Fail(description: "trash didn't remove the package") }
+        },
+        // T-302: renders `LibraryView` over a fixture folder to a PNG for eyeballing against the SPEC
+        // §5.1 mockup (`Read` tool). Not a correctness test — kept as a standing look-check.
+        "library-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard args.count >= 2 else { throw Fail(description: "usage: library-png <folder> <out.png>") }
+            let fm = FileManager.default
+            let folder = URL(fileURLWithPath: args[0])
+            let outURL = URL(fileURLWithPath: args[1])
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+
+            func makePackage(_ title: String, duration: Double, modified: Date) throws -> URL {
+                let url = folder.appendingPathComponent("\(title).recorder")
+                try fm.createDirectory(at: url, withIntermediateDirectories: true)
+                let project = Project(title: title, clips: [Clip(sourceStart: 0, sourceEnd: duration, speed: 1)])
+                try project.save(to: url.appendingPathComponent("project.json"))
+                try fm.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+                return url
+            }
+            let now = Date()
+            _ = try makePackage("Onboarding", duration: 93, modified: now)
+            _ = try makePackage("Bug repro", duration: 12, modified: now.addingTimeInterval(-86_400))
+            let demoURL = try makePackage("Demo v2", duration: 724, modified: now.addingTimeInterval(-6 * 86_400))
+
+            let thumb = NSImage(size: NSSize(width: 640, height: 400))
+            thumb.lockFocus()
+            NSColor(hex: "#5B3DF5").setFill()
+            NSRect(x: 0, y: 0, width: 640, height: 400).fill()
+            thumb.unlockFocus()
+            guard let tiff = thumb.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                  let thumbJPEG = rep.representation(using: .jpeg, properties: [:]) else {
+                throw Fail(description: "couldn't synthesize thumbnail")
+            }
+            try thumbJPEG.write(to: demoURL.appendingPathComponent("thumbnail.jpg"))
+            // Writing into the package bumps its directory mtime again — restore it (order is by mtime).
+            try fm.setAttributes([.modificationDate: now.addingTimeInterval(-6 * 86_400)], ofItemAtPath: demoURL.path)
+
+            let store = ProjectStore(folder: folder)
+            let deadline = Date().addingTimeInterval(3)
+            while store.items.count < 3 && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+            guard store.items.count == 3 else { throw Fail(description: "fixture scan incomplete: \(store.items.map(\.title))") }
+
+            try await MainActor.run {
+                // `ImageRenderer` leaves `LazyVGrid` content inside `ScrollView` empty (its lazy
+                // instantiation needs a real `NSScrollView` viewport). Host in an actual (offscreen,
+                // never ordered front) window instead so layout happens exactly as on screen.
+                let size = NSSize(width: 900, height: 600)
+                let hostingView = NSHostingView(rootView: LibraryView(store: store).frame(width: size.width, height: size.height))
+                hostingView.frame = NSRect(origin: .zero, size: size)
+                let window = NSWindow(contentRect: hostingView.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = hostingView
+                window.layoutIfNeeded()
+                hostingView.layoutSubtreeIfNeeded()
+                for _ in 0..<5 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+                hostingView.layoutSubtreeIfNeeded()
+
+                guard let rep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hostingView.cacheDisplay(in: hostingView.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try png.write(to: outURL)
+            }
         },
         "model": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
@@ -176,6 +247,141 @@ enum SelfTest {
             guard hitErrors.isEmpty else { throw Fail(description: "hitTest: \(hitErrors.joined(separator: "; "))") }
             guard let png else { throw Fail(description: "no PNG data") }
             try png.write(to: URL(fileURLWithPath: outPath))
+        },
+        "events": { args in
+            let seconds = args.first.flatMap(Double.init) ?? 3
+            guard let display = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false).displays.first else {
+                throw NSError(domain: "SelfTest.events", code: 1, userInfo: [NSLocalizedDescriptionKey: "no display found (Screen Recording permission likely not granted to this terminal)"])
+            }
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-selftest-events-\(UUID().uuidString)")
+            let cursorsDir = dir.appendingPathComponent("cursors")
+            let recorder = EventRecorder(target: .display(display), cursorsDir: cursorsDir)
+            recorder.start(t0HostTime: CMClockGetTime(CMClockGetHostTimeClock()))
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            let log = recorder.stop()
+            var counts: [String: Int] = [:]
+            for e in log.events { counts[e.k.rawValue, default: 0] += 1 }
+            print("SELFTEST events counts=\(counts)")
+            let cursorFiles = (try? FileManager.default.contentsOfDirectory(atPath: cursorsDir.path)) ?? []
+            guard cursorFiles.contains(where: { $0.hasSuffix(".png") }) else {
+                throw NSError(domain: "SelfTest.events", code: 2, userInfo: [NSLocalizedDescriptionKey: "no cursor image written (need at least one)"])
+            }
+            try? FileManager.default.removeItem(at: dir)
+        },
+        "record": { args in
+            let kind = args.first ?? "display"
+            let seconds = args.count > 1 ? (Double(args[1]) ?? 3) : 3
+            guard kind == "display" else {
+                throw NSError(domain: "SelfTest.record", code: 1, userInfo: [NSLocalizedDescriptionKey: "only 'display' is supported by this selftest"])
+            }
+            guard let display = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false).displays.first else {
+                throw NSError(domain: "SelfTest.record", code: 2, userInfo: [NSLocalizedDescriptionKey: "no display found (Screen Recording permission likely not granted to this terminal)"])
+            }
+            let target = CaptureTarget.display(display)
+            let packageURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("recorder-selftest-record-\(UUID().uuidString).recorder")
+            let session = try await CaptureSession(target: target, settings: RecordingSettings.shared, packageURL: packageURL)
+            try await session.start()
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            let source = try await session.finish()
+
+            guard (2.5...3.5).contains(source.duration) else {
+                throw NSError(domain: "SelfTest.record", code: 3, userInfo: [NSLocalizedDescriptionKey: "duration \(source.duration) out of range 2.5...3.5"])
+            }
+            let asset = AVURLAsset(url: packageURL.appendingPathComponent("screen.mov"))
+            guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+                throw NSError(domain: "SelfTest.record", code: 4, userInfo: [NSLocalizedDescriptionKey: "screen.mov has no video track"])
+            }
+            let naturalSize = try await track.load(.naturalSize)
+            let expected = target.pixelSize
+            guard Int(naturalSize.width) == Int(expected.width), Int(naturalSize.height) == Int(expected.height) else {
+                throw NSError(domain: "SelfTest.record", code: 5, userInfo: [NSLocalizedDescriptionKey: "size \(naturalSize) != expected \(expected)"])
+            }
+            guard FileManager.default.fileExists(atPath: packageURL.appendingPathComponent("events.json").path) else {
+                throw NSError(domain: "SelfTest.record", code: 6, userInfo: [NSLocalizedDescriptionKey: "events.json missing"])
+            }
+            print("SELFTEST record duration=\(source.duration) size=\(Int(naturalSize.width))x\(Int(naturalSize.height))")
+            try? FileManager.default.removeItem(at: packageURL)
+        },
+        "pickers": { _ in
+            // T-107/T-108 bug fix regression coverage: `SelectionRectView`'s create/resize drag math
+            // (AC-AREA-1/2) and `SourcePickerOverlay`'s window hit-test ordering (AC-WIN-1), both driven
+            // with synthetic data so they run without Screen Recording permission or a real window.
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            func drag(_ view: SelectionRectView, from a: CGPoint, to b: CGPoint) {
+                view.mouseDown(with: synthEvent(.leftMouseDown, a))
+                view.mouseDragged(with: synthEvent(.leftMouseDragged, b))
+                view.mouseUp(with: synthEvent(.leftMouseUp, b))
+            }
+            func freshView() -> SelectionRectView {
+                let v = SelectionRectView(frame: NSRect(x: 0, y: 0, width: 1000, height: 1000))
+                v.limit = v.bounds
+                return v
+            }
+
+            // Plain create drag, well above minSize: anchored at mouse-down, size tracks the mouse exactly.
+            do {
+                let view = freshView()
+                drag(view, from: CGPoint(x: 200, y: 200), to: CGPoint(x: 500, y: 400))
+                let expected = CGRect(x: 200, y: 200, width: 300, height: 200)
+                guard view.rect == expected else { throw Fail(description: "create drag: got \(view.rect), want \(expected)") }
+            }
+
+            // Create drag that stays under 100×100: the mouse-down corner (anchor) must stay exactly put,
+            // not slide with the naive post-hoc clamp that grew from (minX, minY) unconditionally.
+            do {
+                let view = freshView()
+                drag(view, from: CGPoint(x: 700, y: 700), to: CGPoint(x: 720, y: 715))
+                guard view.rect.minX == 700, view.rect.maxY == 700, view.rect.width == 100, view.rect.height == 100 else {
+                    throw Fail(description: "create under minSize: anchor moved, got \(view.rect)")
+                }
+            }
+
+            // Resizing the left handle of an existing rect past the min width must keep the right (anchor)
+            // edge fixed, not drag it along with the pointer — this was the "wonky" area-selection bug.
+            do {
+                let view = freshView()
+                view.rect = CGRect(x: 100, y: 100, width: 300, height: 300) // left handle at (100, 250)
+                drag(view, from: CGPoint(x: 100, y: 250), to: CGPoint(x: 380, y: 250))
+                guard view.rect.maxX == 400, view.rect.width == 100 else {
+                    throw Fail(description: "left-handle resize under minSize: right edge moved, got \(view.rect)")
+                }
+            }
+
+            // Window hit-test must follow front-to-back z-order, not `SCShareableContent.windows`'
+            // unordered list (the root cause of the window picker highlighting "random" windows).
+            do {
+                let frames: [CGWindowID: CGRect] = [1: CGRect(x: 0, y: 0, width: 200, height: 200),
+                                                      2: CGRect(x: 50, y: 50, width: 200, height: 200)]
+                let overlap = CGPoint(x: 100, y: 100) // inside both
+                guard SourcePickerOverlay.frontmostWindow(at: overlap, order: [2, 1], frames: frames) == 2 else {
+                    throw Fail(description: "hit-test didn't prefer the front window")
+                }
+                guard SourcePickerOverlay.frontmostWindow(at: overlap, order: [1, 2], frames: frames) == 1 else {
+                    throw Fail(description: "hit-test didn't respect order")
+                }
+                let onlyInWindow1 = CGPoint(x: 10, y: 10)
+                guard SourcePickerOverlay.frontmostWindow(at: onlyInWindow1, order: [2, 1], frames: frames) == 1 else {
+                    throw Fail(description: "hit-test picked a window that doesn't contain the point")
+                }
+                guard SourcePickerOverlay.frontmostWindow(at: CGPoint(x: -5, y: -5), order: [2, 1], frames: frames) == nil else {
+                    throw Fail(description: "hit-test should return nil outside every window")
+                }
+            }
+        },
+        "waveform": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }
+            let peaks = try Waveform.peaks(for: URL(fileURLWithPath: path))
+            let max = peaks.max() ?? 0
+            print("peaks=\(peaks.count) max=\(max)")
+            // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
+            guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
     ]
 

@@ -16,6 +16,10 @@ final class SelectionRectView: NSView {
     var minSize = CGSize(width: 100, height: 100)
     var aspect: CGFloat? // locked aspect (crop presets); ⇧ locks current
     var onChange: ((CGRect) -> Void)?
+    /// True between `mouseDown` and `mouseUp`. `AreaSelectionOverlay` checks this before applying a
+    /// Size/Position field edit, so a field commit mid-drag (e.g. live-formatted `TextField` value updates)
+    /// can't overwrite `rect` out from under the mouse.
+    private(set) var isDragging = false
 
     // 8 resize handles. xEdge/yEdge: which edge of that axis tracks the mouse (true = max, false = min,
     // nil = axis unaffected). One routine (`resized(from:mouse:...)`) drives every handle plus rect creation.
@@ -68,6 +72,21 @@ final class SelectionRectView: NSView {
         var minX = start.minX, maxX = start.maxX, minY = start.minY, maxY = start.maxY
         if let e = handle.xEdge { if e { maxX = p.x } else { minX = p.x } }
         if let e = handle.yEdge { if e { maxY = p.y } else { minY = p.y } }
+
+        // Enforce `minSize` here, per dragged edge, instead of leaving it to `clamp(_:to:limit:minSize:)`
+        // after the fact: `clamp` only sees the final rect, so it always grew a too-small rect by pinning
+        // (minX, minY) and pushing (maxX, maxY) out — correct for a `topRight`-anchored drag, but for every
+        // other handle (including `.bottomRight`, which rect *creation* uses) that silently dragged the
+        // fixed/anchor corner along with the mouse instead of the tracked corner, so create/resize felt
+        // "wonky" (jumped to 100×100 in the wrong place and didn't track the mouse until past the min).
+        // Growing the *edge the handle tracks* here keeps the true anchor (the corner under the mouse at
+        // `mouseDown`, `start`) fixed the whole time, matching drag-to-create/resize.
+        if let e = handle.xEdge, abs(maxX - minX) < minSize.width {
+            if e { maxX = minX + minSize.width } else { minX = maxX - minSize.width }
+        }
+        if let e = handle.yEdge, abs(maxY - minY) < minSize.height {
+            if e { maxY = minY + minSize.height } else { minY = maxY - minSize.height }
+        }
 
         if option {
             if let e = handle.xEdge { let d = e ? maxX - start.maxX : minX - start.minX
@@ -146,6 +165,7 @@ final class SelectionRectView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        isDragging = true
         let p = convert(event.locationInWindow, from: nil)
         if let h = hitHandle(p) {
             dragMode = .resize(h)
@@ -176,7 +196,7 @@ final class SelectionRectView: NSView {
         }
     }
 
-    override func mouseUp(with event: NSEvent) { dragMode = nil }
+    override func mouseUp(with event: NSEvent) { dragMode = nil; isDragging = false }
 
     // MARK: - Keyboard
 

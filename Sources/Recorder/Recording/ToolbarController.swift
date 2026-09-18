@@ -9,6 +9,9 @@ final class ToolbarController: NSObject {
 
     private var panel: FloatingPanel?
     private var deviceObservers: [NSObjectProtocol] = []
+    /// Live while a camera is selected (SPEC §4.6): feeds `CameraBubblePanel`'s preview and, once
+    /// recording actually starts, `camera.mov`. Retained here so its `AVCaptureSession` stays alive.
+    private var cameraCapture: CameraCapture?
 
     private override init() { super.init() }
 
@@ -29,7 +32,6 @@ final class ToolbarController: NSObject {
             onSystemAudio: { [weak self] in self?.showSystemAudioMenu() },
             onSettings: { [weak self] in self?.showSettingsMenu() }
         ))
-        view.onCancel = { [weak self] in self?.close() }
 
         let p = FloatingPanel(content: view, draggable: true)
         position(p)
@@ -37,6 +39,7 @@ final class ToolbarController: NSObject {
         panel = p
         observeDevices()
         SourcePickerOverlay.show(mode: RecordingSettings.shared.mode)
+        updateCameraBubble(deviceID: RecordingSettings.shared.cameraID) // reshow a previously-selected camera
     }
 
     /// `ⓧ` or `Esc`: close the toolbar and any overlay; the app keeps running (SPEC §4.2, AC-TB-4).
@@ -46,6 +49,7 @@ final class ToolbarController: NSObject {
         panel = nil
         deviceObservers.forEach(NotificationCenter.default.removeObserver)
         deviceObservers.removeAll()
+        updateCameraBubble(deviceID: nil)
     }
 
     /// Sets the recording mode and shows its picker overlay (SPEC §4.2: "selecting a source mode
@@ -54,6 +58,18 @@ final class ToolbarController: NSObject {
     func selectMode(_ mode: RecordingSettings.Mode) {
         RecordingSettings.shared.mode = mode
         SourcePickerOverlay.show(mode: mode)
+    }
+
+    /// `Esc`, from any of our windows — the toolbar panel or any overlay (`SourcePickerWindow`,
+    /// `AreaSelectionWindow`, `AreaFieldsHostingView`) — routes here: closes the frontmost overlay first
+    /// and re-keys the toolbar so a second `Esc` reaches it; with no overlay open, closes the toolbar
+    /// (SPEC AC-TB-4). One shared handler instead of each window redoing the "close overlay, reshow
+    /// toolbar" logic keeps the order correct no matter which window happened to be key. Re-keys the
+    /// panel directly (not `show()`, which would also re-open the overlay we just closed).
+    func handleEscape() {
+        guard SourcePickerOverlay.isOpen || AreaSelectionOverlay.isOpen else { close(); return }
+        SourcePickerOverlay.close()
+        panel?.makeKeyAndOrderFront(nil)
     }
 
     /// Bottom-centre of the display under the mouse, 40 pt above the Dock (`visibleFrame` already excludes it).
@@ -72,10 +88,13 @@ final class ToolbarController: NSObject {
         // Menus are rebuilt fresh from a live DiscoverySession every time they're opened, so a connect
         // needs no action here. A disconnect of the *selected* device must fall back to "Don't record…".
         deviceObservers.append(nc.addObserver(forName: AVCaptureDevice.wasConnectedNotification, object: nil, queue: .main) { _ in })
-        deviceObservers.append(nc.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: nil, queue: .main) { note in
+        deviceObservers.append(nc.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: nil, queue: .main) { [weak self] note in
             guard let device = note.object as? AVCaptureDevice else { return }
             let s = RecordingSettings.shared
-            if s.cameraID == device.uniqueID { s.cameraID = nil }
+            if s.cameraID == device.uniqueID {
+                s.cameraID = nil
+                self?.updateCameraBubble(deviceID: nil)
+            }
             if s.micID == device.uniqueID { s.micID = nil }
         })
     }
@@ -121,7 +140,30 @@ final class ToolbarController: NSObject {
     }
 
     @objc private func selectCamera(_ sender: NSMenuItem) {
-        RecordingSettings.shared.cameraID = sender.representedObject as? String
+        let id = sender.representedObject as? String
+        RecordingSettings.shared.cameraID = id
+        updateCameraBubble(deviceID: id)
+    }
+
+    /// Shows/hides `CameraBubblePanel` to match the current camera selection (SPEC §4.6): "When a camera
+    /// is selected, a live preview bubble appears." Resolves TCC (and any device open failure) async;
+    /// bails out gracefully, and drops a stale result if the selection changed again meanwhile.
+    private func updateCameraBubble(deviceID: String?) {
+        guard let deviceID else {
+            cameraCapture = nil
+            CameraBubblePanel.hide()
+            return
+        }
+        CameraCapture.request(deviceID: deviceID) { [weak self] capture in
+            guard let self, RecordingSettings.shared.cameraID == deviceID else { return } // superseded / controller gone
+            guard let capture else {
+                self.cameraCapture = nil
+                CameraBubblePanel.hide()
+                return
+            }
+            self.cameraCapture = capture
+            CameraBubblePanel.show(previewLayer: capture.previewLayer)
+        }
     }
 
     // MARK: - Microphone menu
@@ -215,9 +257,8 @@ final class ToolbarController: NSObject {
     @objc private func openSettingsWindow() { SettingsWindow.show() }
 }
 
-/// `Esc` closes the toolbar (AC-TB-4) via the standard `cancelOperation(_:)` responder action
-/// (`FloatingPanel` is `final`, so this lives on the content view instead of a panel subclass).
+/// `Esc` routes to `ToolbarController.handleEscape()` (AC-TB-4) via the standard `cancelOperation(_:)`
+/// responder action (`FloatingPanel` is `final`, so this lives on the content view instead of a panel subclass).
 private final class ToolbarHostingView: NSHostingView<ToolbarView> {
-    var onCancel: (() -> Void)?
-    override func cancelOperation(_ sender: Any?) { onCancel?() }
+    override func cancelOperation(_ sender: Any?) { ToolbarController.shared.handleEscape() }
 }

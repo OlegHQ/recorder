@@ -11,6 +11,9 @@ enum AreaSelectionOverlay {
     private static var window: AreaSelectionWindow?
     private static var fieldsPanel: FloatingPanel?
 
+    /// Whether the area overlay is currently up. Used by `ToolbarController.handleEscape()` (AC-TB-4).
+    static var isOpen: Bool { window != nil }
+
     static func show() {
         close()
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main,
@@ -123,7 +126,12 @@ private final class AreaSelectionWindow: NSPanel {
         contentView = container
 
         view.onChange = { [weak state] r in state?.rect = r }
-        state.apply = { [weak view] r in view?.rect = r }
+        // Guard against a field commit landing mid-drag (e.g. a live-formatted `TextField` value update)
+        // and overwriting `rect` out from under the mouse — `SelectionRectView.isDragging`.
+        state.apply = { [weak view] r in
+            guard let view, !view.isDragging else { return }
+            view.rect = r
+        }
 
         FloatingPanel.register(self)
     }
@@ -135,12 +143,9 @@ private final class AreaSelectionWindow: NSPanel {
         makeFirstResponder(selectionView)
     }
 
-    /// `Esc`: close the overlay and re-key the toolbar so a second `Esc` reaches it — same order as the
-    /// other pickers (`SourcePickerWindow.cancel`, AC-TB-4).
-    override func cancelOperation(_ sender: Any?) {
-        AreaSelectionOverlay.close()
-        ToolbarController.shared.show()
-    }
+    // Esc: one shared handler, regardless of which of our windows is key (AC-TB-4) — see
+    // `ToolbarController.handleEscape()`.
+    override func cancelOperation(_ sender: Any?) { ToolbarController.shared.handleEscape() }
 }
 
 /// SPEC §4.5 mockup: Size/Position numeric fields, two-way bound to the rect via `AreaSelectionState.topLeft`.
@@ -192,8 +197,5 @@ private struct AreaFieldsView: View {
 
 /// `Esc` while a field is focused closes the overlay too, same as the selection view (AC-TB-4).
 private final class AreaFieldsHostingView: NSHostingView<AreaFieldsView> {
-    override func cancelOperation(_ sender: Any?) {
-        AreaSelectionOverlay.close()
-        ToolbarController.shared.show()
-    }
+    override func cancelOperation(_ sender: Any?) { ToolbarController.shared.handleEscape() }
 }

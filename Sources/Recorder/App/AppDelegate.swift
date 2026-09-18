@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// App shell: dark appearance, main menu (SPEC §8), status item, background-app lifecycle.
 /// Menu items with no app logic yet keep `action: nil`; later tasks (see SPEC §8, T-104, T-207, T-311…) wire them.
@@ -13,14 +14,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = Self.buildStatusItem()
         wireNewRecording()
         wireSettings()
+        wireProjects()
+        wireOpen()
 
         if !Permissions.allGranted {
             showOnboarding()
         } else {
             ToolbarController.shared.show()
+            Library.show() // shown alongside the toolbar on launch, SPEC §5.1
         }
 
         NSApp.activate()
+    }
+
+    /// `application(_:open:)`: Finder double-click on a `.recorder` package (SPEC §5, AC-LIB-3).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        urls.forEach(Library.open)
     }
 
     private func showOnboarding() {
@@ -52,6 +61,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindow.show()
     }
 
+    @objc private func showProjects() {
+        Library.show()
+    }
+
+    /// "File ▸ Open…": picks a `.recorder` package and routes it through `Library.open`, same as a
+    /// Finder double-click (AC-LIB-3).
+    @objc private func openDocument() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(exportedAs: "sh.nexo.recorder.project")]
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK else { return }
+        panel.urls.forEach(Library.open)
+    }
+
     /// Wires the "New Recording" items built by `buildMainMenu`/`buildStatusItem` to `ToolbarController` (T-104).
     private func wireNewRecording() {
         for item in [NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Recording"),
@@ -66,6 +89,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSApp.mainMenu?.item(withTitle: "Recorder")?.submenu?.item(withTitle: "Settings…")
         item?.target = self
         item?.action = #selector(openSettings)
+    }
+
+    /// Wires "File ▸ Projects" (⇧⌘O) and the status item's "Projects" to the library window (T-302).
+    private func wireProjects() {
+        for item in [NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Projects"),
+                     statusItem.menu?.item(withTitle: "Projects")] {
+            item?.target = self
+            item?.action = #selector(showProjects)
+        }
+    }
+
+    /// Wires "File ▸ Open…" (T-302).
+    private func wireOpen() {
+        let item = NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Open…")
+        item?.target = self
+        item?.action = #selector(openDocument)
     }
 
     // MARK: - Main menu (SPEC §8, titles/order/key equivalents normative)
