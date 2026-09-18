@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import QuartzCore
 import RecorderCore
 
 /// Which timed-block track a point/x-coordinate belongs to. Top-to-bottom draw/hit-test order
@@ -52,6 +53,32 @@ final class TimelineView: NSView {
     private var hoverX: CGFloat?
     private var trackingArea: NSTrackingArea?
 
+    // MARK: - Split mode (T-407)
+
+    /// `S` / the ✂ toolbar button = sticky, until `Esc`. `⌥` held = momentary. Either makes
+    /// `isSplitMode` true (SPEC §7.2 "Split").
+    private var splitModeSticky = false
+    private var splitOptionHeld = false
+    private var isSplitMode: Bool { splitModeSticky || splitOptionHeld }
+
+    /// AC-TL-7: while in split mode, the preview shows the blade's (hover) frame instead of the
+    /// playhead. `PreviewView`/`EditorModel` aren't merged into this lane yet — a coordinator wires
+    /// this callback once they are, per the plan's integration note. `nil` = show the playhead again.
+    var onHoverTime: ((Double?) -> Void)?
+
+    /// Set by `snappedOutput` whenever the last computed value snapped, for the 1 px accent guide
+    /// line (SPEC §7.2 "Snapping"). Cleared by whoever isn't currently snapping.
+    private var snapGuideX: CGFloat?
+
+    // MARK: - Lightweight animations (split flash/shake now; T-408 adds ripple) — one shared
+    // `CADisplayLink`, started on demand and stopped once nothing is left animating.
+
+    private static let cutFlashDuration: CFTimeInterval = 0.25
+    private static let bladeShakeDuration: CFTimeInterval = 0.3
+    private var cutFlash: (x: CGFloat, start: CFTimeInterval)?
+    private var bladeShakeStart: CFTimeInterval?
+    private var animationLink: CADisplayLink?
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
@@ -67,6 +94,32 @@ final class TimelineView: NSView {
         super.setFrameSize(newSize)
         geometry.width = max(0, newSize.width - Self.gutter)
         needsDisplay = true
+    }
+
+    // MARK: - Animation driver
+
+    private func ensureAnimating() {
+        guard animationLink == nil else { return }
+        let link = displayLink(target: self, selector: #selector(animationTick(_:)))
+        link.add(to: .main, forMode: .common)
+        animationLink = link
+        needsDisplay = true
+    }
+
+    @objc private func animationTick(_ link: CADisplayLink) {
+        let now = CACurrentMediaTime()
+        var active = false
+        if let start = cutFlash?.start {
+            if now - start < Self.cutFlashDuration { active = true } else { cutFlash = nil }
+        }
+        if let start = bladeShakeStart {
+            if now - start < Self.bladeShakeDuration { active = true } else { bladeShakeStart = nil }
+        }
+        needsDisplay = true
+        if !active {
+            link.invalidate()
+            animationLink = nil
+        }
     }
 
     // MARK: - Observation (SPEC §7: "Observe model with withObservationTracking")
@@ -148,6 +201,8 @@ final class TimelineView: NSView {
         drawLaneDividers()
         drawPlayhead(model.playhead)
         drawHover()
+        if isSplitMode { drawSplitBlade() }
+        drawCutFlash()
     }
 
     private func drawLaneDividers() {
@@ -371,6 +426,156 @@ final class TimelineView: NSView {
         Theme.bgControl.withAlphaComponent(0.9).setFill()
         NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4).fill()
         label.draw(at: CGPoint(x: chip.minX + 4, y: chip.minY + 2), withAttributes: attrs)
+    }
+
+    // MARK: - Split mode (SPEC §7.2 "Split" — the headline interaction)
+
+    /// Full-height dashed accent blade at the snapped mouse x, with a timecode chip. `nil` when the
+    /// mouse hasn't hovered the view yet.
+    private func drawSplitBlade() {
+        guard let t = bladeOutputTime() else { return }
+        let px = x(forOutput: t) + bladeShakeOffset()
+
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: px, y: 0))
+        line.line(to: CGPoint(x: px, y: contentHeight))
+        line.lineWidth = 1.5
+        line.setLineDash([4, 3], count: 2, phase: 0)
+        Theme.accent.setStroke()
+        line.stroke()
+
+        let attrs: [NSAttributedString.Key: Any] = [.font: Theme.timecodeFont(11), .foregroundColor: Theme.textPrimary]
+        let label = playheadLabel(t) as NSString
+        let size = label.size(withAttributes: attrs)
+        let chip = CGRect(x: px + 6, y: Self.rulerHeight + 4, width: size.width + 8, height: size.height + 4)
+        Theme.accent.setFill()
+        NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4).fill()
+        label.draw(at: CGPoint(x: chip.minX + 4, y: chip.minY + 2), withAttributes: attrs)
+
+        if let snapGuideX { drawSnapGuide(at: snapGuideX) }
+    }
+
+    /// SPEC §7.2 "Snapping": "a 1 px accent guide line spans all tracks while snapped."
+    private func drawSnapGuide(at px: CGFloat) {
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: px, y: 0))
+        line.line(to: CGPoint(x: px, y: contentHeight))
+        line.lineWidth = 1
+        Theme.accent.withAlphaComponent(0.8).setStroke()
+        line.stroke()
+    }
+
+    /// A refused split (SPEC §7.2): "3-cycle 4 px horizontal shake of the blade, no alert."
+    private func bladeShakeOffset() -> CGFloat {
+        guard let bladeShakeStart else { return 0 }
+        let elapsed = CACurrentMediaTime() - bladeShakeStart
+        guard elapsed < Self.bladeShakeDuration else { return 0 }
+        let cycles = 3.0
+        return CGFloat(sin(elapsed / Self.bladeShakeDuration * cycles * 2 * .pi)) * 4
+    }
+
+    /// A successful split (SPEC §7.2): "a 0.25 s 'cut flash' (white line fading) confirms it."
+    private func drawCutFlash() {
+        guard let cutFlash else { return }
+        let elapsed = CACurrentMediaTime() - cutFlash.start
+        guard elapsed < Self.cutFlashDuration else { return }
+        let alpha = 1 - CGFloat(elapsed / Self.cutFlashDuration)
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: cutFlash.x, y: 0))
+        line.line(to: CGPoint(x: cutFlash.x, y: contentHeight))
+        line.lineWidth = 2
+        Theme.textPrimary.withAlphaComponent(alpha).setStroke()
+        line.stroke()
+    }
+
+    /// The blade's current (snapped) output time, from the last hover position. `nil` before the
+    /// mouse has ever entered the view.
+    private func bladeOutputTime() -> Double? {
+        guard let hoverX, hoverX > Self.gutter, let model else { return nil }
+        let raw = geometry.output(forX: geometryX(NSPoint(x: hoverX, y: 0)))
+        let (value, snapped) = snappedOutput(raw, disabled: NSEvent.modifierFlags.contains(.command))
+        snapGuideX = snapped ? x(forOutput: value) : nil
+        return min(max(0, value), model.timeMap.outputDuration)
+    }
+
+    /// `Esc` exits split mode; the ✂ toolbar button and `S` toggle the sticky half of it.
+    func toggleSplitModeSticky() {
+        if splitModeSticky { exitSplitMode() } else { splitModeSticky = true; needsDisplay = true; updateHoverCallback() }
+    }
+
+    private func exitSplitMode() {
+        guard isSplitMode else { return }
+        splitModeSticky = false
+        splitOptionHeld = false
+        snapGuideX = nil
+        onHoverTime?(nil)
+        needsDisplay = true
+    }
+
+    /// `C` (immediate, at the playhead) and a split-mode click (at the blade) both land here.
+    /// Refused (SPEC: within 2 frames of an edge, or a piece would be too short) → shake, no undo
+    /// step. Success → exactly one `model.edit` (one undo step) + the cut flash.
+    private func performSplit(atOutput t: Double) {
+        guard let model else { return }
+        var trial = model.project
+        guard trial.split(atOutput: t) else {
+            bladeShakeStart = CACurrentMediaTime()
+            ensureAnimating()
+            return
+        }
+        let px = x(forOutput: t)
+        model.edit("Split") { _ = $0.split(atOutput: t) }
+        cutFlash = (x: px, start: CACurrentMediaTime())
+        ensureAnimating()
+    }
+
+    private func updateHoverCallback() {
+        guard isSplitMode, let t = bladeOutputTime() else { onHoverTime?(nil); return }
+        onHoverTime?(t)
+    }
+
+    // MARK: - Snapping (SPEC §7.2 "Snapping" — shared by the split blade, trims (T-408) and
+
+    // block move/resize (T-409): one routine, not three.
+
+    /// Candidate output-time snap points: the playhead, every clip edge, every visible zoom/layout/
+    /// mask block edge (excluding one being dragged), and click events from the event log.
+    private func snapCandidates(excludingBlock: UUID? = nil) -> [Double] {
+        guard let model else { return [] }
+        var candidates: [Double] = [model.playhead]
+        var outStart = 0.0
+        for clip in model.project.clips {
+            candidates.append(outStart)
+            outStart += clip.outputDuration
+            candidates.append(outStart)
+        }
+        let timeMap = model.timeMap
+        let project = model.project
+        let laneBlocks: [[(id: String, start: Double, end: Double)]] = [
+            project.zooms.map { ($0.id, $0.start, $0.end) },
+            project.layouts.map { ($0.id, $0.start, $0.end) },
+            project.masks.map { ($0.id, $0.start, $0.end) },
+        ]
+        for blocks in laneBlocks {
+            for b in blocks where UUID(uuidString: b.id) != excludingBlock {
+                for segment in visibleSegments(start: b.start, end: b.end, project: project, timeMap: timeMap) {
+                    candidates.append(segment.outStart)
+                    candidates.append(segment.outEnd)
+                }
+            }
+        }
+        for click in model.events.clicks() {
+            if let out = timeMap.outputTime(atSource: click.t) { candidates.append(out) }
+        }
+        return candidates
+    }
+
+    /// `raw` (an output time under the mouse) snapped to the nearest candidate within 6 pt,
+    /// converted to seconds at the current zoom. `disabled` (⌘ held) skips snapping entirely.
+    private func snappedOutput(_ raw: Double, excludingBlock: UUID? = nil, disabled: Bool) -> (value: Double, snapped: Bool) {
+        guard !disabled else { return (raw, false) }
+        let threshold = 6 / max(geometry.pxPerSecond, 1)
+        return snap(raw, candidates: snapCandidates(excludingBlock: excludingBlock), threshold: threshold)
     }
 
     // MARK: - Timecode formatting
@@ -610,7 +815,7 @@ final class TimelineView: NSView {
         zoom(by: 1 + Double(event.magnification), anchorX: geometryX(p))
     }
 
-    // MARK: - Keyboard (⌘=/⌘- anchored at the playhead, ⇧Z = fit)
+    // MARK: - Keyboard (⌘=/⌘- anchored at the playhead, ⇧Z = fit, C/S = split — SPEC §7.3)
 
     override func keyDown(with event: NSEvent) {
         let cmd = event.modifierFlags.contains(.command)
@@ -624,9 +829,24 @@ final class TimelineView: NSView {
             fit()
         } else if event.keyCode == 51 || event.keyCode == 117 { // delete / forward-delete: ⌫ removes the selection
             removeSelection()
+        } else if !cmd, chars?.lowercased() == "c", let model { // `C` = split at the playhead, immediately
+            performSplit(atOutput: model.playhead)
+        } else if !cmd, chars?.lowercased() == "s" { // `S` = sticky split mode
+            toggleSplitModeSticky()
         } else {
             super.keyDown(with: event)
         }
+    }
+
+    /// `⌥` held = momentary split mode (SPEC §7.2 "Split").
+    override func flagsChanged(with event: NSEvent) {
+        let optionHeld = event.modifierFlags.contains(.option)
+        if optionHeld != splitOptionHeld {
+            splitOptionHeld = optionHeld
+            needsDisplay = true
+            updateHoverCallback()
+        }
+        super.flagsChanged(with: event)
     }
 
     // MARK: - Ruler scrub (click/drag on the ruler moves the playhead; SPEC §7.2 "Navigation")
@@ -634,6 +854,13 @@ final class TimelineView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let p = convert(event.locationInWindow, from: nil)
+        // SPEC §7.2 hit-test table: "Anything, in Split mode | blade ✂ line | click = split" — this
+        // overrides the normal per-lane hit-test dispatch below.
+        if isSplitMode {
+            hoverX = p.x
+            if let t = bladeOutputTime() { performSplit(atOutput: t) }
+            return
+        }
         let hit = hitTest(at: p)
         switch hit {
         case .playhead, .ruler:
@@ -661,7 +888,11 @@ final class TimelineView: NSView {
 
     override func mouseUp(with event: NSEvent) { dragKind = nil }
 
-    override func cancelOperation(_ sender: Any?) { deselect() }
+    /// SPEC §7.3: "Esc: cancel drag → exit split mode → deselect", checked in that order.
+    override func cancelOperation(_ sender: Any?) {
+        if isSplitMode { exitSplitMode(); return }
+        deselect()
+    }
 
     private func scrub(toViewX viewX: CGFloat) {
         guard let model else { return }
@@ -682,37 +913,43 @@ final class TimelineView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         hoverX = p.x
-        cursor(for: hitTest(at: p)).set()
+        (isSplitMode ? NSCursor.crosshair : cursor(for: hitTest(at: p))).set()
+        updateHoverCallback()
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
         hoverX = nil
         NSCursor.arrow.set()
+        onHoverTime?(nil)
         needsDisplay = true
     }
 }
 
-/// SPEC §7.1's 32 pt toolbar row above the ruler: just the Fit button and zoom slider that T-405
-/// drives (`TimelineView.fit()`/`setZoom(sliderValue:)`). The split/zoom/undo/redo buttons belong
-/// to whichever task implements those actions (T-407, T-409, already-wired undo/redo menu items).
+/// SPEC §7.1's 32 pt toolbar row above the ruler: the ✂ Split button (T-407), Fit button and zoom
+/// slider (T-405) that drive `TimelineView`. The zoom/undo/redo buttons belong to whichever task
+/// implements those actions (T-409, already-wired undo/redo menu items).
 final class TimelineToolbar: NSView {
     weak var timelineView: TimelineView? {
         didSet { syncSlider() }
     }
 
+    private let splitButton = NSButton(title: "\u{2702} Split", target: nil, action: nil)
     private let fitButton = NSButton(title: "Fit", target: nil, action: nil)
     private let slider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        splitButton.bezelStyle = .rounded
+        splitButton.target = self
+        splitButton.action = #selector(splitTapped)
         fitButton.bezelStyle = .rounded
         fitButton.target = self
         fitButton.action = #selector(fitTapped)
         slider.target = self
         slider.action = #selector(sliderChanged)
 
-        let stack = NSStackView(views: [fitButton, slider])
+        let stack = NSStackView(views: [splitButton, fitButton, slider])
         stack.orientation = .horizontal
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -729,6 +966,11 @@ final class TimelineToolbar: NSView {
     func syncSlider() {
         guard let timelineView else { return }
         slider.doubleValue = timelineView.zoomSliderValue
+    }
+
+    @objc private func splitTapped() {
+        timelineView?.toggleSplitModeSticky()
+        timelineView?.window?.makeFirstResponder(timelineView)
     }
 
     @objc private func fitTapped() {
