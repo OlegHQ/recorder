@@ -18,6 +18,7 @@ import RecorderCore
     private var session: CaptureSession?
     private var camera: CameraCapture?
     private var packageURL: URL?
+    private var highlightWindow: NSWindow?
 
     private init() {}
 
@@ -58,6 +59,10 @@ import RecorderCore
         let name = "Recording \(RecordingController.folderFormatter.string(from: Date()))"
         let packageURL = settings.projectsFolder.appendingPathComponent("\(name).recorder")
 
+        // Registered with `FloatingPanel` before `CaptureSession` reads the exclusion list below, so it
+        // never leaks into `screen.mov` (AC-TB-1 applies to this overlay too).
+        showHighlight(for: target, settings: settings)
+
         do {
             let session = try await CaptureSession(target: target, settings: settings, packageURL: packageURL)
             if let camera {
@@ -71,6 +76,7 @@ import RecorderCore
             state = .recording
         } catch {
             NSLog("Recorder: capture failed to start: \(error)")
+            hideHighlight()
             try? FileManager.default.removeItem(at: packageURL)
             state = .idle
         }
@@ -87,6 +93,7 @@ import RecorderCore
     private func finishCapture() async {
         defer { reset() }
         guard let session, let packageURL else { return }
+        hideHighlight()
 
         guard let source = try? await session.finish() else {
             await camera?.stop(cancelled: true)
@@ -122,6 +129,7 @@ import RecorderCore
     func cancel() {
         guard state == .recording || state == .paused else { return }
         state = .finishing
+        hideHighlight()
         let session = self.session
         let camera = self.camera
         Task {
@@ -158,5 +166,54 @@ import RecorderCore
         let rep = NSBitmapImageRep(cgImage: cgImage)
         guard let data = rep.representation(using: .jpeg, properties: [:]) else { return }
         try? data.write(to: packageURL.appendingPathComponent("thumbnail.jpg"))
+    }
+
+    // MARK: - Highlight overlay (T-112, SPEC §4.5 "Highlight recorded area during recording")
+
+    private func showHighlight(for target: CaptureTarget, settings: RecordingSettings) {
+        guard settings.highlightArea else { return }
+        switch target {
+        case .display: return // whole display is already fully recorded — nothing to outline
+        case .window, .area: break
+        }
+        let rect = SourcePickerOverlay.flip(target.frameInScreenPoints, in: NSScreen.screens[0])
+        let window = HighlightWindow(rect: rect)
+        window.orderFrontRegardless()
+        highlightWindow = window
+    }
+
+    private func hideHighlight() {
+        highlightWindow?.orderOut(nil)
+        highlightWindow = nil
+    }
+}
+
+/// Click-through 2 px accent outline, 2 px outside the recorded rect (SPEC §4.5). Not a `FloatingPanel`
+/// (those are draggable/key-able); this only needs to sit above the content and be excluded from
+/// capture, so it self-registers with `FloatingPanel.allWindowIDs` the same way `AreaSelectionOverlay`'s
+/// windows do.
+private final class HighlightWindow: NSWindow {
+    init(rect: NSRect) {
+        let outset = rect.insetBy(dx: -4, dy: -4) // room for a 2 px line sitting 2 px outside `rect`
+        super.init(contentRect: outset, styleMask: .borderless, backing: .buffered, defer: false)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        ignoresMouseEvents = true
+        level = NSWindow.Level(NSWindow.Level.screenSaver.rawValue - 1)
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        contentView = HighlightOutlineView(frame: NSRect(origin: .zero, size: outset.size))
+        FloatingPanel.register(self)
+    }
+
+    override var canBecomeKey: Bool { false }
+}
+
+private final class HighlightOutlineView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(rect: bounds.insetBy(dx: 2, dy: 2))
+        path.lineWidth = 2
+        Theme.accent.setStroke()
+        path.stroke()
     }
 }
