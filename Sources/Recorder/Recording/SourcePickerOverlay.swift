@@ -47,11 +47,9 @@ enum SourcePickerOverlay {
         AreaSelectionOverlay.close()
     }
 
-    /// `Start recording` hook (button or `Return`). T-111 will point this at
-    /// `RecordingController.shared.begin(target:)`; until then it just closes the pickers and logs.
+    /// `Start recording` hook (button or `Return`).
     static func startRecording(target: CaptureTarget) {
-        close()
-        NSLog("Recorder: start recording target=\(target)")
+        Task { @MainActor in RecordingController.shared.begin(target: target) }
     }
 
     // `fileprivate`, not `private`: also called by `SourcePickerWindow` after a resize (T-206) so the

@@ -64,4 +64,11 @@ extension NSColor {
         }
         self.init(srgbRed: r, green: g, blue: b, alpha: a)
     }
+
+    /// Inverse of `init(hex:)` — `#RRGGBB` (opaque; `Background`/`Frame` colour fields carry no alpha).
+    var hexString: String {
+        let c = usingColorSpace(.sRGB) ?? self
+        return String(format: "#%02X%02X%02X", Int((c.redComponent * 255).rounded()),
+                       Int((c.greenComponent * 255).rounded()), Int((c.blueComponent * 255).rounded()))
+    }
 }

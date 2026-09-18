@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Metal
 import MetalKit
 import MetalPerformanceShaders
@@ -78,23 +79,35 @@ final class Compositor {
         return CGSize(width: even(raw.width), height: even(raw.height))
     }
 
-    func render(_ s: FrameState, to target: MTLTexture, commandBuffer: MTLCommandBuffer) {
+    /// `viewport`, when given (pixel rect, top-left origin — matches `NSView`/`screenRect`
+    /// convention), restricts drawing to that sub-rect of `target` and letterboxes the rest with
+    /// `Theme.bgWindow` (SPEC §6.1 preview: "letterboxed"); `nil` draws over the whole target (the
+    /// `render` selftest, and the exporter, which has no letterbox — the target IS the output).
+    func render(_ s: FrameState, to target: MTLTexture, commandBuffer: MTLCommandBuffer, viewport: CGRect? = nil) {
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        let bg = Theme.bgWindow
+        pass.colorAttachments[0].clearColor = MTLClearColor(
+            red: Double(bg.redComponent), green: Double(bg.greenComponent), blue: Double(bg.blueComponent), alpha: 1)
         pass.colorAttachments[0].storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.setFragmentTexture(dummyTexture, index: 0)
+        encoder.setFragmentTexture(dummyTexture, index: 1)
+        if let viewport {
+            encoder.setViewport(MTLViewport(originX: Double(viewport.minX), originY: Double(viewport.minY),
+                                             width: Double(viewport.width), height: Double(viewport.height),
+                                             znear: 0, zfar: 1))
+        }
 
         // Pass 1: background.
         drawBackground(s.project.background, outputSize: s.outputSize, encoder: encoder)
 
         // Pass 2: screen (rounded rect + shadow + crop/zoom UV, SPEC §6.2 pass 2).
         // ponytail: motion blur (N=8 taps along prevView→view) and passes 3–4 (cursor, camera,
-        // masks) land with CursorPath/CameraPath — T-412/T-413 and M4/M5.
+        // masks) land with CursorPath/CameraPath — T-413 and M4/M5.
         if let screen = s.screen {
             drawScreen(screen, project: s.project, view: s.view, outputSize: s.outputSize, encoder: encoder)
         }
@@ -160,7 +173,7 @@ final class Compositor {
     /// shadow — computed by the fragment shader's SDF, offset to the content rect — can bleed
     /// outward into the padding (SPEC §6.2 pass 2: "quad is enlarged by blurPx"; a full-canvas
     /// quad is the simplest way to give it room on every side without a second uniform set).
-    private func drawScreen(_ texture: MTLTexture, project: Project, view: ViewTransform, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawScreen(_ texture: FrameState.Texture, project: Project, view: ViewTransform, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         let rectPx = screenRect(output: outputSize, cropAspect: cropAspect(project), padding: project.frame.padding)
         let contentUV = cropUV(project.crop, view: view)
 
@@ -173,10 +186,12 @@ final class Compositor {
         u.radius = Float(project.frame.cornerRadius * min(rectPx.width, rectPx.height))
         u.shadowAlpha = Float(project.frame.shadow)
         u.shadowBlur = Float(0.04 * min(outputSize.width, outputSize.height))
-        u.mode = 3
-        encoder.setFragmentTexture(texture, index: 0)
+        u.mode = texture.chroma != nil ? 4 : 3   // biplanar YCbCr (real capture) vs already-RGB (fixtures)
+        encoder.setFragmentTexture(texture.luma, index: 0)
+        encoder.setFragmentTexture(texture.chroma ?? dummyTexture, index: 1)
         draw(u, encoder: encoder)
         encoder.setFragmentTexture(dummyTexture, index: 0)
+        encoder.setFragmentTexture(dummyTexture, index: 1)
     }
 
     /// SPEC §6.2 pass 2: "crop + zoom applied as UV transform" — `center + (uv − 0.5) / scale`,
@@ -283,7 +298,7 @@ extension Compositor {
             throw SelfTestArgError.usage("failed to set up Metal resources")
         }
 
-        let state = FrameState(outputSize: outputSize, screen: screen, camera: nil, project: project)
+        let state = FrameState(outputSize: outputSize, screen: FrameState.Texture(luma: screen), camera: nil, project: project)
         compositor.render(state, to: target, commandBuffer: commandBuffer)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
@@ -336,3 +351,82 @@ extension Compositor {
 }
 
 enum SelfTestArgError: Error { case usage(String) }
+
+// MARK: - Selftest `preview-frame <package> <t> <out.png>` (SPEC §6.1, §6.2 "Preview", plan T-306)
+
+extension Compositor {
+    /// Renders the frame at output time `t` through the actual PREVIEW path — `makeComposition` →
+    /// `AVPlayerItemVideoOutput` (real 420v decode) → `TextureCache` → `makeFrameState` →
+    /// `Compositor.render` — instead of `render`'s synthetic BGRA texture, so it exercises the
+    /// YCbCr→RGB conversion (shader mode 4) `PreviewView.draw` uses.
+    @MainActor
+    static func runPreviewFrameSelfTest(_ args: [String]) async throws {
+        guard args.count >= 3, let t = Double(args[1]) else {
+            throw SelfTestArgError.usage("preview-frame <package> <t> <out.png>")
+        }
+        let packageURL = URL(fileURLWithPath: args[0])
+        let outURL = URL(fileURLWithPath: args[2])
+        let project = try Project.load(from: packageURL.appendingPathComponent("project.json"))
+        let model = EditorModel(packageURL: packageURL, project: project, events: EventLog())
+
+        let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
+        let item = AVPlayerItem(asset: composition)
+        item.audioMix = audioMix
+        item.audioTimePitchAlgorithm = .spectral
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+        ])
+        item.add(output)
+        let player = AVPlayer(playerItem: item)
+
+        while item.status == .unknown { try await Task.sleep(nanoseconds: 10_000_000) }
+        guard item.status == .readyToPlay else {
+            throw SelfTestArgError.usage("item failed to load: \(String(describing: item.error))")
+        }
+
+        let time = CMTime(seconds: t, preferredTimescale: 600)
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in cont.resume() }
+        }
+        guard let pixelBuffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) else {
+            throw SelfTestArgError.usage("no decoded pixel buffer at t=\(t)")
+        }
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw SelfTestArgError.usage("no Metal device") }
+        let compositor = try Compositor(device: device)
+        let textureCache = TextureCache(device: device)
+        guard let screenTexture = textureCache.texture(from: pixelBuffer) else {
+            throw SelfTestArgError.usage("CVPixelBuffer -> MTLTexture failed")
+        }
+
+        let outputSize = compositor.outputSize(for: project, longEdge: 1920)
+        let width = Int(outputSize.width), height = Int(outputSize.height)
+        let targetDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        targetDescriptor.usage = [.renderTarget, .shaderRead]
+        targetDescriptor.storageMode = .shared
+        guard let target = device.makeTexture(descriptor: targetDescriptor),
+              let queue = device.makeCommandQueue(),
+              let commandBuffer = queue.makeCommandBuffer() else {
+            throw SelfTestArgError.usage("failed to set up Metal resources")
+        }
+
+        let state = makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: nil, size: outputSize)
+        compositor.render(state, to: target, commandBuffer: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+
+        func pixel(_ x: Int, _ y: Int) -> ArraySlice<UInt8> {
+            let i = (y * width + x) * 4
+            return bytes[i..<i + 4]
+        }
+        guard pixel(width / 2, height / 2) != pixel(0, 0) else {
+            throw SelfTestArgError.usage("centre pixel equals corner pixel")
+        }
+
+        try Self.writePNG(bytes: bytes, width: width, height: height, to: outURL)
+    }
+}

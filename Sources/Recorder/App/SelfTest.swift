@@ -1,13 +1,18 @@
 import AppKit
 import AVFoundation
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreMedia
+import CoreVideo
 import Darwin
 import Dispatch
 import Foundation
+import ImageIO
 import Metal
 import RecorderCore
 import ScreenCaptureKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Headless app checks, run instead of the GUI when launched with `--selftest <name> [args]`.
 /// Cases are registered by later tasks: `SelfTest.cases["name"] = { args in … throws }`.
@@ -20,8 +25,66 @@ enum SelfTest {
         "permissions": { _ in
             print("screen=\(Permissions.screen) accessibility=\(Permissions.accessibility)")
         },
+        // Throwaway generator (T-308, SPEC §6.6): writes `Resources/Wallpapers/01.jpg`…`12.jpg` —
+        // abstract gradients we made ourselves (never Apple's or Screen Studio's images). Run once
+        // from the repo root (`--selftest make-wallpapers`) and commit the result; re-run only if
+        // the palette needs to change.
+        "make-wallpapers": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let dir = URL(fileURLWithPath: "Resources/Wallpapers")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let context = CIContext()
+            let size = CGSize(width: 640, height: 400)
+            let rect = CGRect(origin: .zero, size: size)
+
+            func color(hue: Double, saturation: Double, brightness: Double) -> CIColor {
+                let ns = NSColor(calibratedHue: hue.truncatingRemainder(dividingBy: 1),
+                                  saturation: saturation, brightness: brightness, alpha: 1)
+                let srgb = ns.usingColorSpace(.sRGB) ?? ns
+                return CIColor(red: srgb.redComponent, green: srgb.greenComponent, blue: srgb.blueComponent)
+            }
+
+            for i in 0..<12 {
+                let id = String(format: "%02d", i + 1)
+                let hue0 = Double(i) / 12
+                let c0 = color(hue: hue0, saturation: 0.62, brightness: 0.5)
+                let c1 = color(hue: hue0 + 0.18, saturation: 0.75, brightness: 0.88)
+
+                let output: CIImage
+                if i % 2 == 0 {
+                    let filter = CIFilter.linearGradient()
+                    filter.color0 = c0
+                    filter.color1 = c1
+                    filter.point0 = i % 4 == 0 ? CGPoint(x: 0, y: 0) : CGPoint(x: size.width, y: 0)
+                    filter.point1 = i % 4 == 0 ? CGPoint(x: size.width, y: size.height) : CGPoint(x: 0, y: size.height)
+                    guard let img = filter.outputImage else { throw Fail(description: "linearGradient failed for \(id)") }
+                    output = img
+                } else {
+                    let filter = CIFilter.radialGradient()
+                    filter.color0 = c1
+                    filter.color1 = c0
+                    filter.center = CGPoint(x: size.width * (i % 4 == 1 ? 0.35 : 0.65), y: size.height * 0.5)
+                    filter.radius0 = 0
+                    filter.radius1 = Float(max(size.width, size.height) * 0.75)
+                    guard let img = filter.outputImage else { throw Fail(description: "radialGradient failed for \(id)") }
+                    output = img
+                }
+
+                guard let cgImage = context.createCGImage(output.cropped(to: rect), from: rect) else {
+                    throw Fail(description: "createCGImage failed for \(id)")
+                }
+                let url = dir.appendingPathComponent("\(id).jpg")
+                guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+                    throw Fail(description: "no destination for \(id)")
+                }
+                CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+                guard CGImageDestinationFinalize(dest) else { throw Fail(description: "finalize failed for \(id)") }
+            }
+            print("wrote 12 wallpapers to \(dir.path)")
+        },
         "render": { args in try Compositor.runRenderSelfTest(args) },
         "composition": { args in try await runCompositionSelfTest(args) },
+        "preview-frame": { args in try await Compositor.runPreviewFrameSelfTest(args) },
         "library": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             func waitUntil(timeout: Double = 3, _ predicate: () -> Bool) async throws {
@@ -308,6 +371,337 @@ enum SelfTest {
                 contentView.cacheDisplay(in: contentView.bounds, to: rep)
                 guard let png = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
                 try png.write(to: outURL)
+            }
+        },
+        // T-404: offscreen render of a fixture Project (3 clips incl. one sped-up, 2 zooms, one
+        // torn by a cut, a camera layout, playhead mid-way) to PNG, so the static drawing can be
+        // eyeballed against SPEC §7.1 without a running editor window (T-307 isn't built yet).
+        "timeline-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: timeline-png <out.png>") }
+
+            var project = Project(
+                title: "Fixture",
+                source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 2, duration: 60, hasCamera: true)
+            )
+            project.clips = [
+                Clip(sourceStart: 0, sourceEnd: 15, speed: 1),
+                Clip(sourceStart: 15, sourceEnd: 35, speed: 2),   // sped up: 20 source s -> 10 output s
+                Clip(sourceStart: 40, sourceEnd: 60, speed: 1),   // 35...40 is a cut
+            ]
+            project.zooms = [
+                Zoom(start: 5, end: 9, scale: 2, mode: .auto),          // fully inside clip 0
+                Zoom(start: 30, end: 38, scale: 1.6, mode: .manual),    // torn: 35...38 falls in the cut
+            ]
+            project.layouts = [Layout(start: 0, end: 15, kind: .cameraFull)]
+
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-timeline-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let model = await EditorModel(packageURL: tmp, project: project, events: EventLog())
+            let outputDuration = await model.timeMap.outputDuration
+            await MainActor.run { model.playhead = outputDuration / 2 }
+
+            let zoom0ID = UUID(uuidString: project.zooms[0].id)!
+            let layout0ID = UUID(uuidString: project.layouts[0].id)!
+
+            let (png, hitErrors): (Data?, [String]) = await MainActor.run {
+                let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 160))
+                view.model = model
+                view.geometry.pxPerSecond = (view.frame.width - TimelineView.gutter) / (outputDuration + 3)
+                view.needsDisplay = true
+
+                // T-406: hit-test a handful of known points against the fixture's geometry.
+                var errors: [String] = []
+                @MainActor func expect(_ p: CGPoint, _ wanted: TimelineHit, _ name: String) {
+                    let got = view.hitTest(at: p)
+                    if got != wanted { errors.append("\(name): expected \(wanted), got \(got)") }
+                }
+                expect(CGPoint(x: 430, y: 10), .playhead, "playhead")
+                expect(CGPoint(x: 150, y: 40), .clipBody(0), "clipBody")
+                expect(CGPoint(x: 290, y: 40), .clipEdge(0, .trailing), "clipEdge")
+                expect(CGPoint(x: 140, y: 80), .blockBody(zoom0ID), "zoomBody")
+                expect(CGPoint(x: 150, y: 110), .blockBody(layout0ID), "layoutBody")
+                expect(CGPoint(x: 200, y: 10), .ruler, "ruler")
+                expect(CGPoint(x: 476, y: 18), .cutBubble(afterClip: 1), "cutBubble")
+                if case .emptyLane(.zoom, _) = view.hitTest(at: CGPoint(x: 700, y: 80)) {} else {
+                    errors.append("emptyLane: got \(view.hitTest(at: CGPoint(x: 700, y: 80)))")
+                }
+
+                guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return (nil, errors) }
+                view.cacheDisplay(in: view.bounds, to: rep)
+                return (rep.representation(using: .png, properties: [:]), errors)
+            }
+            guard hitErrors.isEmpty else { throw Fail(description: "hitTest: \(hitErrors.joined(separator: "; "))") }
+            guard let png else { throw Fail(description: "no PNG data") }
+            try png.write(to: URL(fileURLWithPath: outPath))
+        },
+        // T-308: exercises the exact closures `BackgroundTab`'s controls call — `fieldBinding`
+        // (drag: beginGesture → update × N → commitGesture) for the Padding slider, and
+        // `kindBinding` (a plain `model.edit`) for the kind picker — and checks they behave as
+        // the two undo steps AC-INS-2 requires, with autosave round-tripping both edits.
+        "inspector": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            let projectURL = tmp.appendingPathComponent("project.json")
+            let original = Project(title: "Inspector Test")
+            try original.save(to: projectURL)
+
+            let model = await EditorModel(packageURL: tmp, project: original, events: EventLog())
+
+            // Padding `LabeledSlider` drag: begin -> 10 updates -> commit == one undo step.
+            await model.beginGesture()
+            for i in 0..<10 {
+                let v = Double(i + 1) / 10 * 0.3
+                await model.update { $0.frame.padding = v }
+            }
+            await model.commitGesture("Padding")
+            let afterPadding = await model.project
+            guard afterPadding.frame.padding != original.frame.padding else {
+                throw Fail(description: "padding slider drag didn't change the project")
+            }
+
+            // Background kind picker == one plain `model.edit`, one more undo step.
+            await model.edit("Background kind") { $0.background.kind = .gradient }
+            let afterKind = await model.project
+            guard afterKind.background.kind == .gradient else { throw Fail(description: "kind change didn't apply") }
+
+            // Autosave reflects both edits.
+            try await Task.sleep(nanoseconds: 700_000_000)
+            let onDisk = try Project.load(from: projectURL)
+            guard onDisk.background.kind == .gradient, onDisk.frame.padding == afterPadding.frame.padding else {
+                throw Fail(description: "autosave didn't persist the inspector edits: \(onDisk)")
+            }
+
+            // Exactly 2 undo steps: first undo reverts only the kind change, second restores the
+            // original project, a third is a no-op (proves there weren't more than 2).
+            await model.undo()
+            guard await model.project == afterPadding else {
+                throw Fail(description: "first undo should revert only the kind change")
+            }
+            await model.undo()
+            guard await model.project == original else {
+                throw Fail(description: "second undo should restore the original project")
+            }
+            await model.undo()
+            guard await model.project == original else {
+                throw Fail(description: "a third undo changed the project — more than 2 undo steps were recorded")
+            }
+        },
+        // Renders `InspectorView` offscreen (300 pt wide, dark appearance) to a PNG for visual
+        // comparison against the SPEC §6.6 mockup. Not part of the automated pass/fail contract.
+        // `args[1]` picks the variant (T-414): a `Background.Kind` raw value (unchanged default
+        // behaviour), or "zoom"/"clip" (selects a fixture block so `ZoomPanel`/`ClipPanel` render
+        // in place of the tabs) or "cursor" (opens the Cursor tab).
+        "inspector-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|cursor]") }
+            try await MainActor.run {
+                let fm = FileManager.default
+                let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-png-\(UUID().uuidString)")
+                try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+                defer { try? fm.removeItem(at: tmp) }
+                var project = Project(title: "Inspector PNG")
+                project.clips = [
+                    Clip(sourceStart: 0, sourceEnd: 41.2, speed: 1),
+                    Clip(sourceStart: 41.2, sourceEnd: 61.8, speed: 2),
+                ]
+                let zoom = Zoom(start: 3, end: 7, scale: 2, mode: .manual)
+                project.zooms = [zoom]
+
+                let variant = args[safe: 1]
+                var initialTab: InspectorView.Tab = .background
+                switch variant {
+                case "zoom", "clip": break
+                case "cursor": initialTab = .cursor
+                default:
+                    if let kind = variant.flatMap(Background.Kind.init(rawValue:)) { project.background.kind = kind }
+                }
+
+                try project.save(to: tmp.appendingPathComponent("project.json"))
+                let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+                if variant == "zoom" { model.selection = [UUID(uuidString: zoom.id)!] }
+                if variant == "clip" { model.selectedClip = 1 }
+
+                let height: CGFloat = 760
+                let hosting = NSHostingView(rootView: InspectorView(model: model, initialTab: initialTab))
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 300, height: height)
+
+                let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .darkAqua)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else {
+                    throw Fail(description: "png encode failed")
+                }
+                try data.write(to: URL(fileURLWithPath: outPath))
+                print("wrote \(outPath)")
+            }
+        },
+        // T-414: exercises the exact closures `ZoomPanel`/`ClipPanel`/`CursorTab`'s controls call.
+        // Zoom: Level slider drag (begin -> 10 updates -> commit), Mode change, Remove — each one
+        // undo step, invariants hold throughout. Clip: a speed preset == `setSpeed` + one undo
+        // step. Cursor: size/style edits persist via autosave.
+        "inspector-panels": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-panels-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            let projectURL = tmp.appendingPathComponent("project.json")
+
+            var original = Project(
+                title: "Panels Test",
+                source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 2, duration: 20)
+            )
+            original.clips = [
+                Clip(sourceStart: 0, sourceEnd: 10, speed: 1),
+                Clip(sourceStart: 10, sourceEnd: 20, speed: 1),
+            ]
+            let zoom = Zoom(start: 2, end: 5, scale: 2, mode: .manual)
+            original.zooms = [zoom]
+            try original.save(to: projectURL)
+            let zoomID = UUID(uuidString: zoom.id)!
+
+            let model = await EditorModel(packageURL: tmp, project: original, events: EventLog())
+
+            // --- Zoom panel: Level `LabeledSlider` drag == one undo step. ---
+            let beforeLevel = await model.project
+            await model.beginGesture()
+            for i in 0..<10 {
+                let v = 1.2 + Double(i + 1) / 10 * (5 - 1.2)
+                await model.update { project in
+                    guard let idx = project.zooms.firstIndex(where: { $0.id == zoom.id }) else { return }
+                    project.zooms[idx].scale = v
+                }
+            }
+            await model.commitGesture("Zoom level")
+            let afterLevel = await model.project
+            guard afterLevel.zooms[0].scale != beforeLevel.zooms[0].scale else {
+                throw Fail(description: "level drag didn't change scale")
+            }
+            if let err = afterLevel.checkInvariants() { throw Fail(description: "invariants broke after level drag: \(err)") }
+
+            // --- Mode change: a plain `model.edit`, one more undo step. ---
+            await model.edit("Zoom") { project in
+                guard let idx = project.zooms.firstIndex(where: { $0.id == zoom.id }) else { return }
+                project.zooms[idx].mode = .auto
+            }
+            let afterMode = await model.project
+            guard afterMode.zooms[0].mode == .auto else { throw Fail(description: "mode change didn't apply") }
+
+            // --- Remove: `Project.removeBlock`, one more undo step. ---
+            await model.edit("Remove zoom") { $0.removeBlock(zoomID) }
+            let afterDelete = await model.project
+            guard afterDelete.zooms.isEmpty else { throw Fail(description: "remove didn't delete the zoom") }
+            if let err = afterDelete.checkInvariants() { throw Fail(description: "invariants broke after remove: \(err)") }
+
+            // Exactly 3 undo steps (level, mode, delete): unwind one at a time, a 4th is a no-op.
+            await model.undo()
+            guard await model.project == afterMode else { throw Fail(description: "undo 1 should revert only the delete") }
+            await model.undo()
+            guard await model.project == afterLevel else { throw Fail(description: "undo 2 should revert only the mode change") }
+            await model.undo()
+            guard await model.project == beforeLevel else { throw Fail(description: "undo 3 should restore the pre-drag project") }
+            await model.undo()
+            guard await model.project == beforeLevel else {
+                throw Fail(description: "a 4th undo changed the project — more than 3 undo steps were recorded")
+            }
+            await model.redo(); await model.redo(); await model.redo()
+            guard await model.project == afterDelete else { throw Fail(description: "redo didn't replay all 3 steps") }
+
+            // --- Clip panel: a speed preset == `Project.setSpeed`, one undo step. ---
+            let beforeSpeed = await model.project
+            await model.edit("Speed") { $0.setSpeed(0, 2) }
+            let afterSpeed = await model.project
+            guard afterSpeed.clips[0].speed == 2 else { throw Fail(description: "speed preset didn't apply: \(afterSpeed.clips[0].speed)") }
+            if let err = afterSpeed.checkInvariants() { throw Fail(description: "invariants broke after speed change: \(err)") }
+            await model.undo()
+            guard await model.project == beforeSpeed else { throw Fail(description: "speed preset should be exactly one undo step") }
+            await model.redo()
+
+            // Remove clip: `Project.removeClip`, one undo step.
+            await model.edit("Remove clip") { _ = $0.removeClip(1) }
+            let afterRemoveClip = await model.project
+            guard afterRemoveClip.clips.count == 1 else { throw Fail(description: "remove clip didn't remove") }
+            if let err = afterRemoveClip.checkInvariants() { throw Fail(description: "invariants broke after remove clip: \(err)") }
+            await model.undo()
+
+            // --- Cursor tab: size/style edits persist via autosave. ---
+            await model.edit("Cursor size") { $0.cursor.size = 3 }
+            await model.edit("Cursor movement") { $0.cursor.style = .rapid }
+            try await Task.sleep(nanoseconds: 700_000_000)
+            let onDisk = try Project.load(from: projectURL)
+            guard onDisk.cursor.size == 3, onDisk.cursor.style == .rapid else {
+                throw Fail(description: "autosave didn't persist cursor edits: \(onDisk.cursor)")
+            }
+        },
+        "recover": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-recover-\(UUID().uuidString)")
+            let package = tmp.appendingPathComponent("Orphan.recorder")
+            try fm.createDirectory(at: package, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            // Synthesize a small, playable screen.mov with no capture/TCC involved, matching what
+            // fragmented writing (T-110) leaves behind after a crash mid-recording.
+            let width = 64, height = 48, fps: Int32 = 30, frameCount = 30
+            let movURL = package.appendingPathComponent("screen.mov")
+            let writer = try AVAssetWriter(outputURL: movURL, fileType: .mov)
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
+            ])
+            let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+                kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+            ])
+            writer.add(input)
+            writer.startWriting()
+            writer.startSession(atSourceTime: .zero)
+
+            var frame = 0
+            while frame < frameCount {
+                guard input.isReadyForMoreMediaData else {
+                    try await Task.sleep(nanoseconds: 5_000_000)
+                    continue
+                }
+                var pixelBuffer: CVPixelBuffer?
+                CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
+                guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
+                adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
+                frame += 1
+            }
+            input.markAsFinished()
+            await writer.finishWriting()
+            guard writer.status == .completed else { throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")") }
+
+            let projectURL = package.appendingPathComponent("project.json")
+            guard !fm.fileExists(atPath: projectURL.path) else { throw Fail(description: "test setup: project.json already exists") }
+
+            await RecordingRecovery.recoverOrphans(in: tmp)
+
+            guard fm.fileExists(atPath: projectURL.path) else { throw Fail(description: "recovery did not write project.json") }
+            let project = try Project.load(from: projectURL)
+            guard project.source.pixelWidth == width, project.source.pixelHeight == height else {
+                throw Fail(description: "size \(project.source.pixelWidth)x\(project.source.pixelHeight) != \(width)x\(height)")
+            }
+            guard (0.5...2.0).contains(project.source.duration) else {
+                throw Fail(description: "duration \(project.source.duration) out of range 0.5...2.0")
+            }
+            guard project.clips.first?.sourceEnd == project.source.duration else {
+                throw Fail(description: "clip doesn't span the recovered duration")
             }
         },
         "events": { args in

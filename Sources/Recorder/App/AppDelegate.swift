@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var statusItem: NSStatusItem!
+    private var statusTimer: Timer?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -16,8 +17,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wireSettings()
         wireProjects()
         wireOpen()
+        wireFinishRecording()
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateStatusItem() }
+        }
 
-        if !Permissions.allGranted {
+        // AC-REC-3: recover any package left with a `screen.mov` but no `project.json` by a prior crash.
+        Task { await RecordingRecovery.recoverOrphans(in: RecordingSettings.shared.projectsFolder) }
+
+        // Dev/HUMAN entry point (T-306/T-307): `Recorder --open <package>` opens the editor for
+        // that package directly, so it's reachable before the library (T-3xx, another lane) exists.
+        if let i = CommandLine.arguments.firstIndex(of: "--open"), CommandLine.arguments.indices.contains(i + 1) {
+            EditorWindowController.open(package: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+        } else if !Permissions.allGranted {
             showOnboarding()
         } else {
             ToolbarController.shared.show()
@@ -30,6 +42,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `application(_:open:)`: Finder double-click on a `.recorder` package (SPEC §5, AC-LIB-3).
     func application(_ application: NSApplication, open urls: [URL]) {
         urls.forEach(Library.open)
+    }
+
+    /// SPEC §5 "Autosave": "also on window close and applicationWillTerminate" (T-303) — window
+    /// close is handled by `EditorWindowController.windowWillClose`; this covers quit.
+    func applicationWillTerminate(_ n: Notification) {
+        EditorWindowController.saveAllNow()
     }
 
     private func showOnboarding() {
@@ -75,6 +93,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.urls.forEach(Library.open)
     }
 
+    @MainActor @objc private func finishRecording() {
+        RecordingController.shared.finish()
+    }
+
+    /// M1 stop UI (SPEC §4.7 "Menu-bar item"): status item title/icon and the status menu's "Finish
+    /// Recording" item track `RecordingController.shared.state`, polled once a second — cheaper than
+    /// making `RecordingController` `@Observable` just for this.
+    @MainActor private func updateStatusItem() {
+        let rc = RecordingController.shared
+        let recording = rc.state == .recording || rc.state == .paused
+        if recording {
+            let s = Int(rc.elapsed)
+            statusItem.button?.title = String(format: " %02d:%02d", s / 60, s % 60)
+            statusItem.button?.contentTintColor = .systemRed
+        } else {
+            statusItem.button?.title = ""
+            statusItem.button?.contentTintColor = nil
+        }
+        statusItem.menu?.item(withTitle: "Finish Recording")?.isHidden = !recording
+    }
+
     /// Wires the "New Recording" items built by `buildMainMenu`/`buildStatusItem` to `ToolbarController` (T-104).
     private func wireNewRecording() {
         for item in [NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Recording"),
@@ -105,6 +144,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Open…")
         item?.target = self
         item?.action = #selector(openDocument)
+    }
+
+    /// Wires the status menu's "Finish Recording" item (SPEC §4.7 M1 stop UI), hidden except while
+    /// recording (`updateStatusItem`).
+    private func wireFinishRecording() {
+        let item = statusItem.menu?.item(withTitle: "Finish Recording")
+        item?.target = self
+        item?.action = #selector(finishRecording)
+        item?.isHidden = true
     }
 
     // MARK: - Main menu (SPEC §8, titles/order/key equivalents normative)
@@ -197,6 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(item("New Recording"))
         menu.addItem(item("Projects"))
+        menu.addItem(item("Finish Recording")) // hidden except while recording (SPEC §4.7); wired/shown in `wireFinishRecording`/`updateStatusItem`
         menu.addItem(.separator())
         menu.addItem(item("Quit", action: #selector(NSApplication.terminate(_:))))
         si.menu = menu

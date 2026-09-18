@@ -15,6 +15,12 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     let previewLayer: AVCaptureVideoPreviewLayer
 
+    /// The most recently constructed instance. `ToolbarController` retains it strongly for the preview
+    /// bubble; this is just a lookup so `RecordingController` (T-111) can attach the recording's clock
+    /// to the *same* live `AVCaptureSession` without opening a second one for the same device. `weak`:
+    /// deselecting the camera drops the only strong reference and this clears itself.
+    private(set) static weak var current: CameraCapture?
+
     private var clock: CaptureSession?
     private var packageURL: URL?
     private var writer: TrackWriter?
@@ -58,6 +64,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
 
         queue.async { [session] in session.startRunning() }
+        CameraCapture.current = self
     }
 
     /// Attaches the recording's shared clock: from here on, frames are retimed and written to
