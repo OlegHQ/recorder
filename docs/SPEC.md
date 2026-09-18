@@ -706,7 +706,7 @@ Invariants (assert in debug, test always): clips sorted by `sourceStart`, non-ov
 
 ## 8. App-level
 
-Menu bar: **Recorder** (About, Settings… ⌘,, Quit) · **File** (New Recording ⌘N, Open… ⌘O, Open Recent ▸, Projects ⇧⌘O, Save ⌘S, Save As… ⇧⌘S, Show Raw Files, Close ⌘W) · **Edit** (Undo, Redo, Split C, Remove ⌫, Add Zoom Z, Regenerate Auto Zooms, Remove All Zooms, Restore All Cuts) · **Record** (Start/Finish, Pause, Restart) · **Export** (Export… ⌘E, Copy Frame as Image ⇧⌘C) · **View** (tabs 1–6, Zoom In/Out/Fit, Crop…) · **Window**.
+Menu bar: **Recorder** (About, Settings… ⌘,, Quit) · **File** (New Recording ⌘N, Open… ⌘O, Open Recent ▸, Projects ⇧⌘O, Save ⌘S, Save As… ⇧⌘S, Show Raw Files, Close ⌘W) · **Edit** (Undo, Redo, Split C, Remove ⌫, Add Zoom Z, Regenerate Auto Zooms, Remove All Zooms, Restore All Cuts) · **Record** (Start/Finish, Pause, Restart) · **Export** (Export… ⌘E, Copy Frame as Image ⇧⌘C) · **View** (tabs 1–6, Zoom In/Out/Fit, Crop…, Command Menu… ⌘K, Keyboard Shortcuts ⌘/ — no Help menu exists, so T-311 put both in View's last group) · **Window**.
 
 Settings window (SwiftUI `Form`): General — projects folder, default export settings, "after recording: open editor"; Recording — fps 30/60, countdown, the three toggles from §4.2; Shortcuts (M6) — rebind the global hotkeys (§4.7).
 

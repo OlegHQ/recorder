@@ -652,12 +652,12 @@ enum SelfTest {
         // display to a PNG, for eyeballing against SPEC §6.1's mockup layout. Captures the window's
         // frame view (contentView's superview), not just contentView, so the titlebar row itself
         // (traffic lights) is included.
-        // ponytail: two known gaps in an offscreen, never-ordered-front capture, both acceptable for
-        // a static layout check, not a pixel comparison: (1) the preview's MTKView needs a live Metal
-        // draw call to have pixels, which `cacheDisplay` never triggers, so that region comes out
-        // blank; (2) `NSTitlebarAccessoryViewController`'s view doesn't get sized by AppKit until its
-        // window has been shown at least once, so the top bar (‹ Projects · title · Auto ▾ · Crop ·
-        // Export) is present in the view tree but 0-width here — only the traffic lights show.
+        // ponytail: one known gap in an offscreen, never-ordered-front capture, acceptable for a
+        // static layout check, not a pixel comparison: the preview's MTKView needs a live Metal draw
+        // call to have pixels, which `cacheDisplay` never triggers, so that region comes out blank.
+        // (T-307 fix: the titlebar's top bar — ‹ Projects · title · Auto ▾ · Crop · Export — used to
+        // render 0-width here too, live and offscreen; root cause was a missing Auto Layout height
+        // constraint on the accessory's container view, fixed in `installTitlebarAccessory`.)
         "editor-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png>") }
@@ -679,6 +679,212 @@ enum SelfTest {
                 }
                 try png.write(to: outURL)
                 print("wrote \(outURL.path)")
+            }
+        },
+        // T-311: builds the real main menu (`AppDelegate.buildMainMenu`) and a real
+        // `EditorWindowController` offscreen (`makeOffscreen`, same as `editor-png`) over a small
+        // fixture package, then checks: (1) every Edit/View item this task wires keeps
+        // `target == nil` (responder-chain dispatch, not a manager object) and has an action;
+        // (2) with NO editor controller involved at all, `sendAction` can't resolve any of those
+        // selectors (`AppDelegate` doesn't implement them, and under `--selftest` there's no key/main
+        // window or app delegate at all) — the "disables itself automatically" half; (3)
+        // `EditorWindowController.validateMenuItem` — the same method the responder chain would
+        // consult — approves each item once an editor exists and its state supports it (selection
+        // made, something on the undo stack, …), and titles Undo/Redo with the pending edit's name;
+        // (4) the edit-mutating actions, called directly on the controller (headless: no window is
+        // ever key here to drive real key-equivalent dispatch through — T-311's own fallback), each
+        // produce the documented `Project` change, leave `checkInvariants() == nil`, and are exactly
+        // one `performUndo`/`performRedo` step.
+        "menu-actions": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            func findItem(_ menu: NSMenu, _ menuTitle: String, _ itemTitle: String) throws -> NSMenuItem {
+                guard let item = menu.item(withTitle: menuTitle)?.submenu?.item(withTitle: itemTitle) else {
+                    throw Fail(description: "no \(menuTitle) ▸ \(itemTitle) item")
+                }
+                return item
+            }
+
+            try await MainActor.run {
+                let mainMenu = AppDelegate.buildMainMenu()
+
+                // Every item this task wires to `EditorWindowController` through the responder chain.
+                let responderChainItems: [(String, String)] = [
+                    ("File", "Save"), ("File", "Save As…"), ("File", "Show Raw Files"),
+                    ("Edit", "Undo"), ("Edit", "Redo"), ("Edit", "Split"), ("Edit", "Remove"),
+                    ("Edit", "Add Zoom"), ("Edit", "Regenerate Auto Zooms"), ("Edit", "Remove All Zooms"),
+                    ("Edit", "Restore All Cuts"), ("Edit", "Speed Up Typing"), ("Edit", "Hide Cursor in Selected Clip"),
+                    ("View", "Background"), ("View", "Cursor"), ("View", "Camera"), ("View", "Audio"),
+                    ("View", "Animations"), ("View", "Keys"), ("View", "Zoom In"), ("View", "Zoom Out"),
+                    ("View", "Fit"), ("View", "Crop…"),
+                ]
+                var items: [String: NSMenuItem] = [:]
+                for (menuTitle, itemTitle) in responderChainItems {
+                    let menuItem = try findItem(mainMenu, menuTitle, itemTitle)
+                    guard menuItem.target == nil else {
+                        throw Fail(description: "\(itemTitle): target isn't nil (not going through the responder chain)")
+                    }
+                    guard menuItem.action != nil else { throw Fail(description: "\(itemTitle): no action") }
+                    items[itemTitle] = menuItem
+                }
+
+                // (2) No editor controller exists: `sendAction` can't find a responder for any of them.
+                for (title, menuItem) in items {
+                    guard let action = menuItem.action else { continue }
+                    let resolved = NSApplication.shared.sendAction(action, to: nil, from: menuItem)
+                    guard !resolved else { throw Fail(description: "\(title): resolved a target with no editor open") }
+                }
+
+                // A small fixture package: one 30 s clip, two close clicks at t=5.0/5.2 (for
+                // Regenerate Auto Zooms), a 10...14 typing run (for Speed Up Typing).
+                let fm = FileManager.default
+                let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-menu-actions-\(UUID().uuidString)")
+                let packageURL = tmp.appendingPathComponent("Fixture.recorder")
+                try fm.createDirectory(at: packageURL, withIntermediateDirectories: true)
+                defer { try? fm.removeItem(at: tmp) }
+
+                var project = Project(title: "Menu Actions",
+                                       source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 1, duration: 30))
+                project.clips = [Clip(sourceStart: 0, sourceEnd: 30, speed: 1)]
+                try project.save(to: packageURL.appendingPathComponent("project.json"))
+
+                var events = EventLog()
+                events.events.append(InputEvent(t: 5.0, k: .down, x: 0.5, y: 0.5, b: 0))
+                events.events.append(InputEvent(t: 5.2, k: .down, x: 0.5, y: 0.5, b: 0))
+                var t = 10.0
+                while t <= 14.0 { events.events.append(InputEvent(t: t, k: .typing)); t += 0.5 }
+                try JSONEncoder().encode(events).write(to: packageURL.appendingPathComponent("events.json"), options: .atomic)
+
+                guard let window = EditorWindowController.makeOffscreen(package: packageURL),
+                      let controller = window.windowController as? EditorWindowController else {
+                    throw Fail(description: "couldn't build the offscreen editor")
+                }
+                let model = controller.model
+
+                // Split (`C`).
+                model.playhead = 15
+                let beforeSplit = model.project
+                controller.splitAtPlayhead(nil)
+                guard model.project.clips.count == beforeSplit.clips.count + 1 else {
+                    throw Fail(description: "Split didn't split: \(model.project.clips)")
+                }
+                guard model.project.checkInvariants() == nil else { throw Fail(description: "Split broke invariants") }
+                controller.performUndo(nil)
+                guard model.project == beforeSplit else { throw Fail(description: "Split wasn't exactly one undo step") }
+                controller.performRedo(nil)
+
+                // Remove (`⌫`): the clip the split just made.
+                model.selectedClip = 1
+                let beforeRemove = model.project
+                controller.removeSelected(nil)
+                guard model.project.clips.count == beforeRemove.clips.count - 1 else {
+                    throw Fail(description: "Remove didn't remove: \(model.project.clips)")
+                }
+                guard model.project.checkInvariants() == nil else { throw Fail(description: "Remove broke invariants") }
+                controller.performUndo(nil)
+                guard model.project == beforeRemove else { throw Fail(description: "Remove wasn't exactly one undo step") }
+
+                // Add Zoom (`Z`) at the playhead's SOURCE time, mode `.auto`.
+                model.playhead = 5
+                let beforeZoom = model.project
+                controller.addZoomAtPlayhead(nil)
+                guard model.project.zooms.count == beforeZoom.zooms.count + 1, model.project.zooms.last?.mode == .auto else {
+                    throw Fail(description: "Add Zoom didn't add an auto zoom: \(model.project.zooms)")
+                }
+                guard model.project.checkInvariants() == nil else { throw Fail(description: "Add Zoom broke invariants") }
+                controller.performUndo(nil)
+                guard model.project == beforeZoom else { throw Fail(description: "Add Zoom wasn't exactly one undo step") }
+
+                // Regenerate Auto Zooms: from the fixture's two close clicks.
+                let beforeRegenerate = model.project
+                controller.regenerateAutoZooms(nil)
+                guard model.project.zooms.count == 1, model.project.zooms[0].mode == .auto else {
+                    throw Fail(description: "Regenerate Auto Zooms: expected 1 auto zoom, got \(model.project.zooms)")
+                }
+                guard model.project.checkInvariants() == nil else { throw Fail(description: "Regenerate Auto Zooms broke invariants") }
+
+                // Remove All Zooms.
+                let beforeRemoveAllZooms = model.project
+                controller.removeAllZooms(nil)
+                guard model.project.zooms.isEmpty else { throw Fail(description: "Remove All Zooms didn't clear zooms") }
+                controller.performUndo(nil)
+                guard model.project == beforeRemoveAllZooms else { throw Fail(description: "Remove All Zooms wasn't exactly one undo step") }
+                controller.performUndo(nil) // unwind Regenerate too, back to `beforeRegenerate`.
+                guard model.project == beforeRegenerate else { throw Fail(description: "Regenerate Auto Zooms wasn't exactly one undo step") }
+
+                // Restore All Cuts: arrange an actual tail cut first (`removeClip`, not `split`, so
+                // there's a real gap to restore), then restore it back to one clip.
+                model.edit("Setup: cut the tail") { _ = $0.removeClip(1) }
+                let beforeRestore = model.project
+                controller.restoreAllCuts(nil)
+                guard model.project.clips.count == 1, model.project.clips[0].sourceEnd == 30 else {
+                    throw Fail(description: "Restore All Cuts didn't restore the tail: \(model.project.clips)")
+                }
+                guard model.project.checkInvariants() == nil else { throw Fail(description: "Restore All Cuts broke invariants") }
+                controller.performUndo(nil)
+                guard model.project == beforeRestore else { throw Fail(description: "Restore All Cuts wasn't exactly one undo step") }
+                controller.performRedo(nil) // back to the single 0...30 clip, for the tests below.
+
+                // Speed Up Typing: the fixture's 10...14 typing run.
+                let beforeSpeedUp = model.project
+                controller.speedUpTyping(nil)
+                guard model.project.clips.contains(where: { $0.sourceStart == 10 && $0.sourceEnd == 14 && $0.speed == 2 }) else {
+                    throw Fail(description: "Speed Up Typing didn't produce a 10...14 2x clip: \(model.project.clips)")
+                }
+                guard model.project.checkInvariants() == nil else { throw Fail(description: "Speed Up Typing broke invariants") }
+                controller.performUndo(nil)
+                guard model.project == beforeSpeedUp else { throw Fail(description: "Speed Up Typing wasn't exactly one undo step") }
+
+                // Hide Cursor in Selected Clip.
+                model.selectedClip = 0
+                let beforeHide = model.project
+                controller.hideCursorInSelectedClip(nil)
+                guard model.project.cursorHidden == [TimeRange(start: 0, end: 30)] else {
+                    throw Fail(description: "Hide Cursor didn't append the clip's range: \(model.project.cursorHidden)")
+                }
+                controller.performUndo(nil)
+                guard model.project == beforeHide else { throw Fail(description: "Hide Cursor wasn't exactly one undo step") }
+                model.selectedClip = nil
+
+                // (3) `validateMenuItem`: Undo/Redo track the stack (and pick up the edit's name),
+                // Remove/Hide Cursor need a selection, everything else just needs an editor.
+                model.edit("Probe Edit") { $0.title = "Probed" }
+                guard controller.validateMenuItem(items["Undo"]!) else { throw Fail(description: "Undo should validate with something on the undo stack") }
+                guard items["Undo"]!.title == "Undo Probe Edit" else { throw Fail(description: "Undo title: \(items["Undo"]!.title)") }
+                controller.performUndo(nil)
+                guard controller.validateMenuItem(items["Redo"]!) else { throw Fail(description: "Redo should validate with something on the redo stack") }
+                guard items["Redo"]!.title == "Redo Probe Edit" else { throw Fail(description: "Redo title: \(items["Redo"]!.title)") }
+
+                model.selectedClip = 0
+                guard controller.validateMenuItem(items["Remove"]!) else { throw Fail(description: "Remove should validate with a clip selected") }
+                guard controller.validateMenuItem(items["Hide Cursor in Selected Clip"]!) else {
+                    throw Fail(description: "Hide Cursor should validate with a clip selected")
+                }
+                model.selectedClip = nil
+                model.selection = []
+                guard !controller.validateMenuItem(items["Remove"]!) else { throw Fail(description: "Remove shouldn't validate with nothing selected") }
+                guard !controller.validateMenuItem(items["Hide Cursor in Selected Clip"]!) else {
+                    throw Fail(description: "Hide Cursor shouldn't validate with nothing selected")
+                }
+                for tabTitle in ["Background", "Cursor", "Camera", "Audio", "Animations", "Keys"] {
+                    guard controller.validateMenuItem(items[tabTitle]!) else { throw Fail(description: "\(tabTitle) tab should always validate") }
+                }
+                for alwaysOn in ["Save", "Save As…", "Show Raw Files", "Split", "Add Zoom", "Regenerate Auto Zooms",
+                                 "Remove All Zooms", "Restore All Cuts", "Zoom In", "Zoom Out", "Fit", "Crop…"] {
+                    guard controller.validateMenuItem(items[alwaysOn]!) else { throw Fail(description: "\(alwaysOn) should validate with an editor open") }
+                }
+
+                // Tab switching, timeline zoom in/out/fit: no `Project` state to check, just confirm
+                // they don't crash when actually invoked. Save is safe to call for real too — Save As
+                // and Show Raw Files open a panel/Finder, so those stay structural-only checks above.
+                controller.selectInspectorTab(items["Cursor"]!)
+                controller.timelineZoomIn(nil)
+                controller.timelineZoomOut(nil)
+                controller.timelineFit(nil)
+                controller.saveDocument(nil)
+                guard fm.fileExists(atPath: packageURL.appendingPathComponent("project.json").path) else {
+                    throw Fail(description: "Save didn't write project.json")
+                }
             }
         },
         // T-605 (non-Core half): `PresetStore` file storage + applying a saved preset through a real

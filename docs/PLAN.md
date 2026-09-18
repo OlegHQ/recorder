@@ -49,10 +49,10 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | M0 Foundations | T-001…T-006 | 6/6 |
 | M1 Record | T-101…T-114 | 7/14 |
 | M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
-| M3 Editor shell | T-301…T-313 | 5/13 |
-| M4 Timeline | T-401…T-418 | 5/18 |
+| M3 Editor shell | T-301…T-313 | 6/13 |
+| M4 Timeline | T-401…T-418 | 6/18 |
 | M5 Ship | T-501…T-509 | 0/9 |
-| M6 Polish | T-601…T-609 | 2/9 |
+| M6 Polish | T-601…T-609 | 3/9 |
 
 Update the "Done" column whenever you tick a task.
 
@@ -411,7 +411,8 @@ Update the "Done" column whenever you tick a task.
 
 - [~] **T-307 Editor window** · SPEC §6.1 mockup — File `Editor/EditorWindowController.swift`: `NSSplitView`-free manual layout (preview | 300 pt inspector) over a timeline placeholder (`NSView`, 220 pt, height draggable 160–420). Top bar in the titlebar (`NSTitlebarAccessoryViewController`): `‹ Projects`, title (click = rename), aspect `NSPopUpButton`, Crop, Export (disabled until M5). `RecordingController.finish` and the library now open this window instead of Finder.
   - WAITING ON HUMAN: merged; layout vs §6.1 mockup, AC-REC-4. Inspector/timeline/library/finish hand-offs wired by the integration pass.
-  - HUMAN: layout matches the mockup; AC-REC-4 (editor visible < 2 s after Finish).
+  - FIX (T-311, 2026-09-18): the top bar rendered completely empty (coordinator caught it with a real on-screen screenshot) — `NSTitlebarAccessoryViewController` never reliably sized the wide bar in this environment; replaced with `.fullSizeContentView` + the bar as a manually-positioned `EditorRootView` subview. Root-cause story and the (now-not-`NSTitlebarAccessoryViewController`) top-bar code live in `EditorWindowController.swift`. Still not HUMAN-confirmed on a real screen (see T-311's Log entry) — re-check needed alongside this task's existing HUMAN items.
+  - HUMAN: layout matches the mockup; AC-REC-4 (editor visible < 2 s after Finish); the top-bar fix above.
 
 - [~] **T-308 Inspector shell + Background tab** · SPEC §6.6 — Files `Editor/Inspector/InspectorView.swift`, `Inspector/BackgroundTab.swift`, `Inspector/LabeledSlider.swift`.
   - WAITING ON HUMAN: `--selftest inspector` OK (1 drag = 1 undo step, autosave); coordinator reviewed `inspector-png` vs §6.6. Human: AC-INS-1 once hosted in the editor window (T-307). Known gap: system `.heic` wallpapers fall back to flat colour until Compositor loads absolute paths.
@@ -426,7 +427,8 @@ Update the "Done" column whenever you tick a task.
   - WAITING ON HUMAN: merged + wired to the top-bar Crop button; `--selftest crop` OK (mapping round-trip, Confirm = 1 undo step, Discard = no change); `crop-png` reviewed. Human: AC-CROP look vs `reference/…13.05.18.png` in the dark app.
   - HUMAN: AC-CROP-1 vs `reference/…13.05.18.png`.
 
-- [ ] **T-311 Menu wiring** — connect File/Edit/View items that now have targets (Open, Projects, Save, Save As = copy package, Show Raw Files = reveal in Finder, Undo/Redo, Crop, tabs). Items without a target stay disabled automatically (`validateMenuItem`).
+- [x] **T-311 Menu wiring** — connect File/Edit/View items that now have targets (Open, Projects, Save, Save As = copy package, Show Raw Files = reveal in Finder, Undo/Redo, Crop, tabs). Items without a target stay disabled automatically (`validateMenuItem`).
+  - DONE: File ▸ Save/Save As…/Show Raw Files, Edit ▸ Undo/Redo/Split/Remove/Add Zoom/Regenerate Auto Zooms/Remove All Zooms/Restore All Cuts/Speed Up Typing/Hide Cursor in Selected Clip, View ▸ tabs 1–6 (real names)/Zoom In/Zoom Out/Fit/Crop… all wired on `EditorWindowController` with `target = nil` (responder chain) + `validateMenuItem` (`NSMenuItemValidation`); View ▸ Command Menu… ⌘K / Keyboard Shortcuts ⌘/ wired on `AppDelegate` (SPEC §8 has no Help menu to put them in, so both went in View's last group, per the coordinator's instruction — SPEC §8 updated to match). Also fixed, root cause, a live bug the coordinator found while reviewing this task (T-307): the titlebar top bar rendered completely empty — `NSTitlebarAccessoryViewController` with `.layoutAttribute = .right` never reliably sized the wide multi-control bar in this environment; replaced with `window.styleMask.contains(.fullSizeContentView)` + the bar as one more manually-positioned subview of `EditorRootView` (see `EditorWindowController.swift`'s top-bar section for the full story, including a second bug the same diagnostic-tint technique caught: a same-class `didSet` relay silently never fires when assigned from inside that class's own initializer).
 
 - [x] **T-312 Library perf** · AC-LIB-1 — selftest `library-perf`: 200 fake packages, `reload()` < 300 ms. If slower: make sure only `project.json` + `thumbnail.jpg` are read.
 
@@ -527,11 +529,10 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Do: candidates = playhead, all clip edges, all block edges (except the dragged one), left-click times from `events` (draw them as 1×4 pt ticks in the zoom lane); threshold `6 / pxPerSecond`; `⌘` held disables; while snapped draw a 1 px accent guide across all lanes. Applies to: split blade, trims, block move/resize. Empty zoom lane: ghost block under pointer; click → `addZoom` (mode `.auto` if a click event lies within ±1 s, else `.manual`). Body drag = `moveZoom`, edges = `resizeZoom`. `Z` adds at playhead. Double-click = select + playhead to start. `⌘D` duplicates after itself. Context menu Disable/Enable · Instant · Remove.
   - HUMAN: AC-TL-3 feel check with a long project; AC-TL-6.
 
-- [ ] **T-410 AutoZoom** · SPEC §6.4
+- [x] **T-410 AutoZoom** · SPEC §6.4
   - File: `Sources/RecorderCore/AutoZoom.swift` — `public func generateAutoZooms(clicks: [InputEvent], duration: Double) -> [Zoom]` implementing the 5 numbered rules literally.
   - Tests (AC-AZ-1): `clusterByTimeAndDistance` · `mergeCloseZooms` · `dropShortAndClamp` · `outputSortedNonOverlappingDeterministic`.
-  - CORE DONE (lane-autozoom merged 2026-09-18, 4 tests green); only the Wire line below remains → tick after T-111/T-311.
-  - Wire: `RecordingController.finish` fills `project.zooms`; Edit ▸ Regenerate Auto Zooms / Remove All Zooms.
+  - DONE: core (lane-autozoom, 4 tests green) + wiring complete — `RecordingController.finish` already filled `project.zooms` (T-111); T-311 added `Edit ▸ Regenerate Auto Zooms` (`EditorWindowController.regenerateAutoZooms`) and `Edit ▸ Remove All Zooms` (`.removeAllZooms`), both verified headlessly in the `menu-actions` selftest (produces the expected zoom, one undo step).
 
 - [x] **T-411 CursorPath** · SPEC §6.5
   - File: `Sources/RecorderCore/CursorPath.swift`
@@ -603,16 +604,16 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 - [ ] **T-601 Masks & highlights** · SPEC §7.1 lane, §6.6 Mask panel — lane on; rect edited in preview with `SelectionRectView`; mask = solid fill at `opacity`, highlight = dim everything outside the rect by `opacity`. Keys: only those in SPEC §7.3.
 - [~] **T-602 Keyboard-shortcut overlay** — render `.key` events as rounded chips (`⌘ ⇧ K`) bottom-centre for 1.2 s; text rendered to a texture with Core Text, cached per string. Keys tab.
   - PARTIAL: Core `keyChipLabel` / `activeKeyChip` + tests merged (modifier order ⌃⌥⇧⌘); texture rendering + Keys tab remain.
-- [~] **T-603 Speed up typing** — Edit ▸ Speed Up Typing: find runs of `.typing` events (gap < 1 s, length > 3 s), split clips around them, set 2×. Core fn `typingRanges(events:) -> [TimeRange]` + test.
-  - PARTIAL: Core `typingRanges(events:)` + tests merged; Edit ▸ Speed Up Typing wiring remains (needs editor menus, M3/M4).
+- [x] **T-603 Speed up typing** — Edit ▸ Speed Up Typing: find runs of `.typing` events (gap < 1 s, length > 3 s), split clips around them, set 2×. Core fn `typingRanges(events:) -> [TimeRange]` + test.
+  - DONE: Core `typingRanges(events:)` (pre-existing) + new `Project.speedUpTyping(_:factor:)` (`RecorderCore/TimelineOps.swift`, splits clips at each range's source-time edges and sets the enclosed clip(s) to `factor`×) with test `speedUpTypingKeepsInvariants`; `Edit ▸ Speed Up Typing` wired on `EditorWindowController`, verified headlessly (produces the expected 2× clip, `checkInvariants() == nil`, one undo step).
 - [~] **T-604 Cursor advanced** — loop position, rotate, remove shakes, always-arrow, hide-cursor ranges via Edit ▸ Hide Cursor in Selected Clip (adds the clip's source range to `cursorHidden`). Tests per stage in `CursorPath`.
-  - PARTIAL: Core pipeline stages (shake removal, loop, rotation, always-arrow) + 4 tests merged; Cursor-tab controls and Edit ▸ Hide Cursor in Selected Clip remain.
+  - PARTIAL: Core pipeline stages (shake removal, loop, rotation, always-arrow) + 4 tests merged; `Edit ▸ Hide Cursor in Selected Clip` now wired (`EditorWindowController.hideCursorInSelectedClip`, appends the selected clip's source range to `cursorHidden`, merged/sorted; verified headlessly, one undo step) — Cursor-tab controls (loop/rotate/always-arrow/remove-shakes UI) still remain, that's inspector work outside T-311's file set.
 - [x] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
 - [x] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
 - [~] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
-  - WAITING: `--selftest command-menu` OK + PNG reviewed by lane agent; `CommandMenu.show()` still needs its ⌘K menu binding (T-311).
+  - WAITING ON HUMAN (taste only): `--selftest command-menu` OK + PNG reviewed by lane agent; `CommandMenu.show()` now bound to View ▸ Command Menu… ⌘K (`AppDelegate.wireViewHelpItems`, T-311).
 - [~] **T-608 Cheat sheet (⌘/)** — static SwiftUI grid of SPEC §7.3.
-  - WAITING: all 19 rows of SPEC §7.3 rendered (`cheatsheet-png`); `CheatSheet.show()` still needs its ⌘/ menu binding (T-311).
+  - WAITING ON HUMAN (taste only): all 19 rows of SPEC §7.3 rendered (`cheatsheet-png`); `CheatSheet.show()` now bound to View ▸ Keyboard Shortcuts ⌘/ (`AppDelegate.wireViewHelpItems`, T-311).
 - [ ] **T-609 Shortcut settings + Copy frame (⇧⌘C)** — rebind the global hotkeys (the T-204 table); copy current composed frame to the pasteboard as PNG.
 
 ---
@@ -676,3 +677,4 @@ T-606 · 2026-09-18 · verified on master: `--selftest import` OK (package conte
 T-605 · 2026-09-18 · verified on master: Core `presetRoundTripAndApply` + `--selftest presets` OK (save/list/apply through EditorModel = 1 undo step, export/import round-trip, delete) · deviations: "Presets ▾" menu sits above the inspector tab bar (SPEC gives no location)
 T-203/T-204/T-205/T-207b · 2026-09-18 · verified on master: `make app`, 47 tests, `--selftest menus` OK, real-TCC `record display 3` still OK after the `elapsed` refactor (3.0 s, 2880×1800), `finder-windows` answered SPEC §9 Q3 · deviations: `CaptureSession.elapsed` now host-clock based; widget shown before the exclusion snapshot (follow-up fix); Delete alert default = Keep Recording
 T-607/T-608 · 2026-09-18 · merged: `command-menu` selftest OK; root fix `NSApp` → `NSApplication.shared` (nil under --selftest); menu bindings pending T-311
+T-311 (+ T-410/T-603/T-604/T-607/T-608 menu halves) · 2026-09-18 · verified: `make app`; `make test` 48/48 (adds `speedUpTypingKeepsInvariants`); selftests `metal model library pickers recover inspector inspector-panels crop menus command-menu import presets menu-actions editor-png` all OK; new `--selftest menu-actions` builds the real `AppDelegate.buildMainMenu()` + a real offscreen `EditorWindowController` over a fixture package and checks target==nil (responder chain, not a manager object), `sendAction` resolves nothing with no editor open, `validateMenuItem` approves/titles items correctly once an editor exists, and Split/Remove/Add Zoom/Regenerate Auto Zooms/Remove All Zooms/Restore All Cuts/Speed Up Typing/Hide Cursor each produce the documented `Project` change with `checkInvariants() == nil` and exactly one `performUndo`/`performRedo` step; launch smoke (alive 3 s, killed own PID) · deviations: (1) Undo/Redo wired to custom `performUndo`/`performRedo` selectors (not the standard `undo:`/`redo:` pair, to avoid any collision with `NSTextView`'s own undo manager on text fields) — titles rewritten with the edit name in `validateMenuItem` since `EditorModel` gained parallel `undoNames`/`redoNames` stacks (cheap, per the task's own "if cheap" wording); (2) Remove's/TimelineView's own `⌫` handling couldn't be reused (private, different file, per T-311's boundary) — the same few lines are duplicated in `EditorWindowController.removeSelected`; (3) `AppDelegate.buildMainMenu`/`buildIdleStatusMenu`-style status menus stay `private`→un-`private` only where a selftest needs to call them directly (matches the existing pattern). Root-cause fix (coordinator report, filed against this same task): the editor window's titlebar top bar (‹ Projects · title · Auto ▾ · Crop · Export) rendered completely empty, live and offscreen alike. Two stacked bugs, both found with a temporary diagnostic background tint that never appeared on screen: (a) `NSTitlebarAccessoryViewController` with `.layoutAttribute = .right` never reliably sized the wide, multi-control bar in this environment regardless of its own Auto Layout constraints — dropped entirely in favor of `window.styleMask.contains(.fullSizeContentView)` + the bar as one more manually-positioned subview of `EditorRootView` (same plain frame-layout style already used for preview/inspector/timeline); (b) the first fix attempt used a same-class `didSet`-relay property to swap the real (button-wired) bar in after `super.init()` — Swift never fires property observers for assignments made from inside the declaring type's own initializer, no matter how many times or how late, so the "real" bar was silently never installed; fixed by assigning `rootView.topBar` directly (a different object's property, not `self`'s own) instead of through a same-class relay. `EditorWindowController.swift`'s top-bar section documents both. Not verified: a real on-screen screenshot of the live app — this machine's screen is shared with other concurrent agents/the user's own apps, and `open -n --args --open <pkg>` + `osascript activate` couldn't reliably keep the Recorder window frontmost long enough to capture it (another window kept stealing focus); the offscreen `editor-png` selftest exercises the identical `EditorWindowController` construction path (`makeOffscreen` calls the same private `init`) and shows the top bar rendering correctly, which is the strongest verification available headlessly — HUMAN should confirm the on-screen look matches SPEC §6.1 next time the app is run interactively.

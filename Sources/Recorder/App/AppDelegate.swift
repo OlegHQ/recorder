@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wireSettings()
         wireProjects()
         wireOpen()
+        wireViewHelpItems()
         Hotkeys.install()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateStatusItem() }
@@ -193,6 +194,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item?.action = #selector(openDocument)
     }
 
+    /// Wires "View ▸ Command Menu…"/"Keyboard Shortcuts" (T-607/T-608's menu bindings, T-311):
+    /// always available (no editor needed), so — unlike the editor-scoped Edit/View items above,
+    /// which stay `target = nil` for the responder chain — these are plain `AppDelegate` actions.
+    private func wireViewHelpItems() {
+        let view = NSApp.mainMenu?.item(withTitle: "View")?.submenu
+        let commandMenu = view?.item(withTitle: "Command Menu…")
+        commandMenu?.target = self
+        commandMenu?.action = #selector(showCommandMenu)
+        let cheatSheet = view?.item(withTitle: "Keyboard Shortcuts")
+        cheatSheet?.target = self
+        cheatSheet?.action = #selector(showCheatSheet)
+    }
+
+    @MainActor @objc private func showCommandMenu() { CommandMenu.show() }
+    @MainActor @objc private func showCheatSheet() { CheatSheet.show() }
+
     // MARK: - "Show Recorder in Dock" (SPEC §8) and "Open Last Project" (SPEC §4.7/§8)
 
     private static let showInDockKey = "app.showInDock"
@@ -250,7 +267,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return i
     }
 
-    private static func buildMainMenu() -> NSMenu {
+    // Not `private`: the `menu-actions` selftest builds the real main menu directly (same reason
+    // `buildIdleStatusMenu`/`buildRecordingStatusMenu` below aren't private either).
+    static func buildMainMenu() -> NSMenu {
         let main = NSMenu()
 
         let app = NSMenu(title: "Recorder")
@@ -268,21 +287,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openRecent.submenu = NSMenu(title: "Open Recent")
         file.addItem(openRecent)
         file.addItem(item("Projects", "o", [.command, .shift]))
-        file.addItem(item("Save", "s"))
-        file.addItem(item("Save As…", "s", [.command, .shift]))
-        file.addItem(item("Show Raw Files"))
+        file.addItem(item("Save", "s", action: #selector(EditorWindowController.saveDocument(_:))))
+        file.addItem(item("Save As…", "s", [.command, .shift], action: #selector(EditorWindowController.saveDocumentAs(_:))))
+        file.addItem(item("Show Raw Files", action: #selector(EditorWindowController.showRawFiles(_:))))
         file.addItem(item("Close", "w", action: #selector(NSWindow.performClose(_:))))
         main.addItem(item("File", submenu: file))
 
+        // T-311: Edit/View items below target `nil` — AppKit resolves them through the key window's
+        // responder chain to `EditorWindowController` (its actions + `validateMenuItem`), which
+        // disables them automatically while no editor window is key. `Undo`/`Redo`'s titles are
+        // rewritten with the edit name by that same `validateMenuItem`.
         let edit = NSMenu(title: "Edit")
-        edit.addItem(item("Undo", "z"))
-        edit.addItem(item("Redo", "z", [.command, .shift]))
-        edit.addItem(item("Split", "c", []))
-        edit.addItem(item("Remove", "\u{8}", []))
-        edit.addItem(item("Add Zoom", "z", []))
-        edit.addItem(item("Regenerate Auto Zooms"))
-        edit.addItem(item("Remove All Zooms"))
-        edit.addItem(item("Restore All Cuts"))
+        edit.addItem(item("Undo", "z", action: #selector(EditorWindowController.performUndo(_:))))
+        edit.addItem(item("Redo", "z", [.command, .shift], action: #selector(EditorWindowController.performRedo(_:))))
+        edit.addItem(item("Split", "c", [], action: #selector(EditorWindowController.splitAtPlayhead(_:))))
+        edit.addItem(item("Remove", "\u{8}", [], action: #selector(EditorWindowController.removeSelected(_:))))
+        edit.addItem(item("Add Zoom", "z", [], action: #selector(EditorWindowController.addZoomAtPlayhead(_:))))
+        edit.addItem(item("Regenerate Auto Zooms", action: #selector(EditorWindowController.regenerateAutoZooms(_:))))
+        edit.addItem(item("Remove All Zooms", action: #selector(EditorWindowController.removeAllZooms(_:))))
+        edit.addItem(item("Restore All Cuts", action: #selector(EditorWindowController.restoreAllCuts(_:))))
+        edit.addItem(item("Speed Up Typing", action: #selector(EditorWindowController.speedUpTyping(_:))))
+        edit.addItem(item("Hide Cursor in Selected Clip", action: #selector(EditorWindowController.hideCursorInSelectedClip(_:))))
         main.addItem(item("Edit", submenu: edit))
 
         let record = NSMenu(title: "Record")
@@ -297,13 +322,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(item("Export", submenu: export))
 
         let view = NSMenu(title: "View")
-        for n in 1...6 { view.addItem(item("\(n)", "\(n)", [])) }
+        for n in 1...6 {
+            let tabItem = item(InspectorView.Tab(rawValue: n - 1)!.title, "\(n)", [],
+                                action: #selector(EditorWindowController.selectInspectorTab(_:)))
+            tabItem.tag = n - 1
+            view.addItem(tabItem)
+        }
         view.addItem(.separator())
-        view.addItem(item("Zoom In", "="))
-        view.addItem(item("Zoom Out", "-"))
-        view.addItem(item("Fit", "z", [.shift]))
+        view.addItem(item("Zoom In", "=", action: #selector(EditorWindowController.timelineZoomIn(_:))))
+        view.addItem(item("Zoom Out", "-", action: #selector(EditorWindowController.timelineZoomOut(_:))))
+        view.addItem(item("Fit", "z", [.shift], action: #selector(EditorWindowController.timelineFit(_:))))
         view.addItem(.separator())
-        view.addItem(item("Crop…"))
+        view.addItem(item("Crop…", action: #selector(EditorWindowController.cropTapped)))
+        view.addItem(.separator())
+        // SPEC §8's menu-bar list doesn't place these (there's no Help menu); T-311's Log records
+        // that they were added here, in the View menu's last group, per the coordinator's instruction.
+        view.addItem(item("Command Menu…", "k"))
+        view.addItem(item("Keyboard Shortcuts", "/"))
         main.addItem(item("View", submenu: view))
 
         let windowMenu = NSMenu(title: "Window")
@@ -312,7 +347,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(.separator())
         windowMenu.addItem(item("Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:))))
         main.addItem(item("Window", submenu: windowMenu))
-        NSApp.windowsMenu = windowMenu
+        // `NSApplication.shared`, not the bare `NSApp` global (same reason as the status menu's Quit
+        // item below): `NSApp` is only set as a side effect of `.shared` having been touched, so it's
+        // nil the first time anything calls `buildMainMenu()` headlessly (e.g. the `menu-actions`
+        // selftest, which — unlike `applicationDidFinishLaunching` — never otherwise touches `.shared`
+        // first).
+        NSApplication.shared.windowsMenu = windowMenu
 
         return main
     }
