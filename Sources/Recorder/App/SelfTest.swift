@@ -500,7 +500,9 @@ enum SelfTest {
         // in place of the tabs) or "cursor" (opens the Cursor tab).
         "inspector-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard let outPath = args.first else { throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|cursor]") }
+            guard let outPath = args.first else {
+                throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|cursor|camera|audio|animations|keys]")
+            }
             try await MainActor.run {
                 let fm = FileManager.default
                 let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-png-\(UUID().uuidString)")
@@ -519,6 +521,12 @@ enum SelfTest {
                 switch variant {
                 case "zoom", "clip": break
                 case "cursor": initialTab = .cursor
+                case "camera": initialTab = .camera; project.source.hasCamera = true
+                case "camera-empty": initialTab = .camera
+                case "audio": initialTab = .audio; project.source.hasMic = true; project.source.hasSystemAudio = true
+                case "audio-empty": initialTab = .audio
+                case "animations": initialTab = .animations
+                case "keys": initialTab = .keys
                 default:
                     if let kind = variant.flatMap(Background.Kind.init(rawValue:)) { project.background.kind = kind }
                 }
@@ -645,6 +653,88 @@ enum SelfTest {
             let onDisk = try Project.load(from: projectURL)
             guard onDisk.cursor.size == 3, onDisk.cursor.style == .rapid else {
                 throw Fail(description: "autosave didn't persist cursor edits: \(onDisk.cursor)")
+            }
+
+            // --- Cursor tab (T-604 advanced): Loop toggle == one undo step, autosaved. ---
+            let beforeLoop = await model.project
+            await model.edit("Loop cursor position") { $0.cursor.loop = true }
+            let afterLoop = await model.project
+            guard afterLoop.cursor.loop, !beforeLoop.cursor.loop else {
+                throw Fail(description: "loop toggle didn't change cursor.loop")
+            }
+            await model.undo()
+            guard await model.project == beforeLoop else { throw Fail(description: "loop toggle should be one undo step") }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).cursor.loop else {
+                throw Fail(description: "autosave didn't persist the loop toggle")
+            }
+
+            // --- Camera tab (T-502): Position (corner) picker == one undo step, autosaved. ---
+            let beforeCorner = await model.project
+            await model.edit("Camera position") { $0.camera.corner = .topLeft }
+            let afterCorner = await model.project
+            guard afterCorner.camera.corner == .topLeft, beforeCorner.camera.corner != .topLeft else {
+                throw Fail(description: "camera position edit didn't change camera.corner")
+            }
+            await model.undo()
+            guard await model.project == beforeCorner else { throw Fail(description: "camera position should be one undo step") }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).camera.corner == .topLeft else {
+                throw Fail(description: "autosave didn't persist the camera position edit")
+            }
+
+            // --- Audio tab (T-504): Microphone volume drag == one undo step, autosaved. ---
+            let beforeMicVolume = await model.project
+            await model.beginGesture()
+            for i in 0..<10 {
+                let v = 0.9 - Double(i) / 10
+                await model.update { $0.audio.micVolume = v }
+            }
+            await model.commitGesture("Microphone volume")
+            let afterMicVolume = await model.project
+            guard afterMicVolume.audio.micVolume != beforeMicVolume.audio.micVolume else {
+                throw Fail(description: "microphone volume drag didn't change audio.micVolume")
+            }
+            await model.undo()
+            guard await model.project == beforeMicVolume else {
+                throw Fail(description: "microphone volume drag should be one undo step")
+            }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).audio.micVolume == afterMicVolume.audio.micVolume else {
+                throw Fail(description: "autosave didn't persist the microphone volume edit")
+            }
+
+            // --- Animations tab: Screen (zoom spring preset) == one undo step, autosaved. ---
+            let beforeScreen = await model.project
+            await model.edit("Zoom spring") { $0.animation.screen = .smooth }
+            let afterScreen = await model.project
+            guard afterScreen.animation.screen == .smooth, beforeScreen.animation.screen != .smooth else {
+                throw Fail(description: "screen preset edit didn't change animation.screen")
+            }
+            await model.undo()
+            guard await model.project == beforeScreen else { throw Fail(description: "screen preset should be one undo step") }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).animation.screen == .smooth else {
+                throw Fail(description: "autosave didn't persist the screen preset edit")
+            }
+
+            // --- Keys tab (T-602): "Show keyboard shortcuts" == one undo step, autosaved. ---
+            let beforeShow = await model.project
+            await model.edit("Show keyboard shortcuts") { $0.keys.show = true }
+            let afterShow = await model.project
+            guard afterShow.keys.show, !beforeShow.keys.show else {
+                throw Fail(description: "show-keys toggle didn't change keys.show")
+            }
+            await model.undo()
+            guard await model.project == beforeShow else { throw Fail(description: "show-keys toggle should be one undo step") }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).keys.show else {
+                throw Fail(description: "autosave didn't persist the show-keys toggle")
             }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
