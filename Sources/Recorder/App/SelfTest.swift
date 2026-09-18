@@ -402,8 +402,9 @@ enum SelfTest {
             guard await model.project == beforeDiscard else { throw Fail(description: "discard mutated the project") }
         },
         // T-601: `MaskRectOverlay` — visibility follows selection, a drag on its `view` maps
-        // through `CropMapping` (the same pure pair "crop" above already round-trips) into the
-        // selected mask's `rect`, and the whole drag is exactly one undo step.
+        // through `ZoomTargetMapping.contentRect` + `CropMapping` (the same pure pair "crop" above
+        // already round-trips) into the selected mask's `rect`, and the whole drag is exactly one
+        // undo step. See "mask-overlay" below for the padding/letterbox-aware mapping itself.
         "mask-rect": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
@@ -415,11 +416,12 @@ enum SelfTest {
             let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-mask-rect-\(UUID().uuidString)")
             try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
             defer { try? fm.removeItem(at: tmp) }
-            // A square 1000×1000 source into a 1000×1000 mount: `CropMapping.imageRect` letterboxes
-            // to exactly the full area, so view points and normalised [0,1000] source points coincide
-            // — keeps the drag's expected numbers simple without weakening what's under test (the
-            // mapping itself is already covered by "crop" above).
+            // A square 1000×1000 source into a 1000×1000 mount, padding zeroed: `contentRect`
+            // letterboxes to exactly the full area, so view points and normalised [0,1000] source
+            // points coincide — keeps the drag's expected numbers simple without weakening what's
+            // under test (the padding/letterbox math itself is "mask-overlay" below).
             var project = Project(title: "Mask rect test", source: Source(pixelWidth: 1000, pixelHeight: 1000, duration: 20))
+            project.frame.padding = 0
             project.clips = [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)]
             let mask = Mask(start: 2, end: 6, kind: .mask, rect: NormRect(x: 0.1, y: 0.1, w: 0.3, h: 0.3), opacity: 0.8)
             project.masks = [mask]
@@ -467,6 +469,39 @@ enum SelfTest {
             await MainActor.run { model.selection = [] }
             try await Task.sleep(nanoseconds: 200_000_000)
             guard await overlay.view.isHidden else { throw Fail(description: "overlay should hide once deselected") }
+        },
+        // T-601 fix: `MaskRectOverlay.layout`'s content rect is `ZoomTargetMapping.contentRect` (the
+        // preview's own letterboxed viewport, THEN the frame's `padding` inset inside it — the same
+        // two insets T-415's manual-zoom-target overlay accounts for) — asserted directly for a
+        // letterboxed view with the project's default (non-zero) padding, since "mask-rect" above
+        // zeroes padding to keep its drag numbers simple: NormRect -> overlay rect -> NormRect
+        // round-trips within 1e-9, and the overlay rect never escapes `contentRect`.
+        "mask-overlay": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            // 16:9 source into a portrait mount (pillarboxed AND letterboxed by the aspect mismatch),
+            // default `Frame().padding == 0.08` — unlike "mask-rect", this project's padding is left
+            // untouched on purpose.
+            let project = Project(title: "Mask overlay padding", source: Source(pixelWidth: 1920, pixelHeight: 1080, duration: 10))
+            let mountSize = CGSize(width: 500, height: 1000)
+            let content = ZoomTargetMapping.contentRect(viewBounds: mountSize, project: project)
+            guard content.width > 0, content.height > 0, content.width <= mountSize.width, content.height <= mountSize.height else {
+                throw Fail(description: "unexpected contentRect \(content)")
+            }
+            guard content.width < mountSize.width || content.height < mountSize.height else {
+                throw Fail(description: "padding should have inset contentRect below the full mount, got \(content) in \(mountSize)")
+            }
+
+            let originalRect = NormRect(x: 0.2, y: 0.15, w: 0.35, h: 0.25)
+            let overlayRect = CropMapping.viewRect(from: originalRect, imageRect: content)
+            guard content.insetBy(dx: -1e-6, dy: -1e-6).contains(overlayRect) else {
+                throw Fail(description: "overlay rect \(overlayRect) escaped contentRect \(content)")
+            }
+            let roundTripped = CropMapping.normRect(fromView: overlayRect, imageRect: content)
+            guard abs(roundTripped.x - originalRect.x) < 1e-9, abs(roundTripped.y - originalRect.y) < 1e-9,
+                  abs(roundTripped.w - originalRect.w) < 1e-9, abs(roundTripped.h - originalRect.h) < 1e-9 else {
+                throw Fail(description: "round trip mismatch: \(roundTripped) vs \(originalRect)")
+            }
+            print("mask-overlay OK: contentRect \(content) in mount \(mountSize), NormRect round trip within 1e-9")
         },
         // T-310: renders `CropSheetWindow`'s content view offscreen with a synthetic frame image to PNG,
         // for eyeballing against the SPEC §6.7 mockup (`Read` tool). Not a correctness test.

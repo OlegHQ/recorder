@@ -36,6 +36,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     // instead of only the type-erased `NSView` the rest of the window plumbing needs.
     private let inspectorHostingView: NSHostingView<InspectorView>
     private let coreTimelineView: TimelineView
+    // T-601: kept alive here (its own `view` is only weakly referenced by `PreviewView`'s subview
+    // list) and re-laid-out on every preview resize (`preview.onResize` below).
+    private let maskOverlay: MaskRectOverlay
 
     private static var openWindows: [URL: EditorWindowController] = [:]
 
@@ -45,17 +48,28 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let transport = NSHostingView(rootView: TransportBar(model: model, preview: preview))
         let inspector = NSHostingView(rootView: InspectorView(model: model))
 
+        // T-601: the mask-rect overlay (SPEC §6.6), mounted per `MaskRectOverlay`'s own documented
+        // hook — a subview of `preview` covering its whole image area, forwarded mouse events
+        // through `preview`'s single dispatch point (same as the T-415 zoom-target overlay and the
+        // camera-bubble drag; selection is exclusive to one lane, so only one overlay is ever live).
+        let maskOverlay = MaskRectOverlay(model: model)
+        preview.maskOverlayView = maskOverlay.view
+        preview.onResize = { [weak maskOverlay] size in maskOverlay?.layout(in: size) }
+        maskOverlay.layout(in: preview.bounds.size)
+
         // SPEC §7.1: a 32 pt toolbar (Fit + zoom slider, T-405) sits above the timeline itself.
         let timelineView = TimelineView(frame: .zero)
         timelineView.model = model
-        // TimelineView.onHoverTime would connect here (to drive the preview's hover-scrub, SPEC §6.1)
-        // once it exists — it doesn't yet.
+        // AC-TL-7: split-mode hover shows that (paused) frame in the preview without moving the
+        // playhead — `hoverTime`'s own doc comment names this exact one-line hook.
+        timelineView.onHoverTime = { [weak preview] in preview?.hoverTime = $0 }
         let toolbar = TimelineToolbar(frame: .zero)
         toolbar.timelineView = timelineView
         let timeline = TimelineContainerView(toolbar: toolbar, timeline: timelineView)
 
         self.model = model
         self.previewView = preview
+        self.maskOverlay = maskOverlay
         self.inspectorView = inspector
         self.timelineView = timeline
         self.inspectorHostingView = inspector

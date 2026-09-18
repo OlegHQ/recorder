@@ -69,6 +69,26 @@ final class PreviewView: MTKView {
     private var zoomTargetContentRect: CGRect = .zero
     private var zoomTargetGestureActive = false
 
+    // T-601: the mask-rect overlay — owned/created by `EditorWindowController` (`MaskRectOverlay`'s
+    // own doc comment: "PreviewView belongs to another lane"), mounted here through this one settable
+    // subview so its mouse events go through the same single dispatch point as `zoomTargetView`/the
+    // camera-bubble drag below. Selection is exclusive to one lane (`TimelineView.selectBlock`), so
+    // at most one of `zoomTargetView`/`maskOverlayView` is ever visible — they never fight over a
+    // mouse event.
+    var maskOverlayView: NSView? {
+        didSet {
+            oldValue?.removeFromSuperview()
+            guard let maskOverlayView else { return }
+            maskOverlayView.frame = bounds
+            maskOverlayView.autoresizingMask = [.width, .height]
+            addSubview(maskOverlayView)
+        }
+    }
+    /// Fired from `setFrameSize` so the coordinator can keep `MaskRectOverlay`'s own geometry
+    /// (`imageRect`/`selectionView.limit`) in sync — mirrors what `updateZoomTargetOverlay` already
+    /// does for the zoom-target overlay, which this view owns outright.
+    var onResize: ((CGSize) -> Void)?
+
     init(model: EditorModel) {
         self.model = model
         self.lastClips = model.project.clips
@@ -107,6 +127,7 @@ final class PreviewView: MTKView {
         super.setFrameSize(newSize)
         needsDisplay = true
         updateZoomTargetOverlay()
+        onResize?(newSize)
     }
 
     // MARK: - Transport (SPEC §7.3; `TransportBar` below calls these)
@@ -419,10 +440,11 @@ final class PreviewView: MTKView {
         let displayTime = (!model.isPlaying ? hoverTime : nil) ?? model.playhead
         var state = makeFrameState(model: model, outputTime: displayTime, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
 
-        // T-415: a `.manual` zoom selected ⇒ show the UN-zoomed frame (SPEC §6.6) so the target
-        // overlay (`zoomTargetView`) is drawn against the same un-zoomed content it's positioned
-        // over. Preview-only override — `makeFrameState`/export are untouched.
-        if selectedManualZoom() != nil {
+        // T-415/T-601: a `.manual` zoom OR a mask selected ⇒ show the UN-zoomed frame (SPEC §6.6) so
+        // whichever overlay is live (`zoomTargetView`/`maskOverlayView`) is drawn against the same
+        // un-zoomed content its rect is positioned over (`ZoomTargetMapping.contentRect` assumes no
+        // zoom is applied). Preview-only override — `makeFrameState`/export are untouched.
+        if selectedManualZoom() != nil || isMaskSelected() {
             state.view = .identity
             state.prevView = .identity
         }
@@ -468,6 +490,14 @@ final class PreviewView: MTKView {
         guard model.selection.count == 1, let id = model.selection.first else { return nil }
         guard let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }) else { return nil }
         return zoom.mode == .manual ? zoom : nil
+    }
+
+    /// T-601: mirrors `selectedManualZoom()` above for the mask-rect overlay's own selection test
+    /// (`MaskRectOverlay.selectedMaskID`) — kept here too since `draw()`'s un-zoomed override needs
+    /// it and `MaskRectOverlay` doesn't touch `PreviewView`'s drawing at all.
+    private func isMaskSelected() -> Bool {
+        guard model.selection.count == 1, let id = model.selection.first else { return false }
+        return model.project.masks.contains(where: { $0.id == id.uuidString })
     }
 
     private func updateZoomTargetOverlay() {
@@ -549,6 +579,11 @@ final class PreviewView: MTKView {
             window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
             return
         }
+        if let maskOverlayView, !maskOverlayView.isHidden {
+            maskOverlayView.mouseDown(with: event)
+            window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
+            return
+        }
         let p = convert(event.locationInWindow, from: nil)
         if model.project.source.hasCamera, cameraBubbleRectInBounds().contains(p) {
             cameraDragActive = true
@@ -560,6 +595,7 @@ final class PreviewView: MTKView {
 
     override func mouseDragged(with event: NSEvent) {
         guard zoomTargetView.isHidden else { zoomTargetView.mouseDragged(with: event); return }
+        if let maskOverlayView, !maskOverlayView.isHidden { maskOverlayView.mouseDragged(with: event); return }
         guard cameraDragActive else { super.mouseDragged(with: event); return }
         // No live follow: `Camera.corner` is the only stored position (four discrete corners) — the
         // bubble snaps to whichever corner the mouse is released over, like the recording-time
@@ -571,6 +607,10 @@ final class PreviewView: MTKView {
             let wasDragging = zoomTargetView.isDragging
             zoomTargetView.mouseUp(with: event)
             if wasDragging { zoomTargetDragEnded() }
+            return
+        }
+        if let maskOverlayView, !maskOverlayView.isHidden {
+            maskOverlayView.mouseUp(with: event)
             return
         }
         guard cameraDragActive else { super.mouseUp(with: event); return }
