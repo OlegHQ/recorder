@@ -35,10 +35,14 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     /// correctly (SPEC §5 `Source.hasCamera`).
     var hasCamera = false
 
-    /// Output-clock seconds of the latest screen frame, for the recording widget.
-    // ponytail: only advances on screen frames, so it visibly freezes while SCK sends none (idle
-    // content) — fine for now; give the widget its own wall-clock timer if that reads as a hang.
-    private(set) var elapsed: Double = 0
+    /// Elapsed output-clock seconds, for the recording widget/status item (SPEC §4.7). Derived from the
+    /// host clock minus the paused duration (frozen at the pause point while paused) rather than the
+    /// latest screen frame's PTS, which would visibly freeze whenever SCK sends no frames (idle content).
+    var elapsed: Double {
+        guard let t0 else { return 0 }
+        let now = isPaused ? (pauseStart ?? CMClockGetTime(CMClockGetHostTimeClock())) : CMClockGetTime(CMClockGetHostTimeClock())
+        return max(0, (now - t0 - pausedSoFar).seconds)
+    }
 
     init(target: CaptureTarget, settings: RecordingSettings, packageURL: URL) async throws {
         self.target = target
@@ -170,7 +174,6 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let t0 else { return }
             let offset = pts - t0 - pausedSoFar
             screenWriter.append(sampleBuffer, offset: offset)
-            if offset >= .zero { elapsed = offset.seconds }
 
         case .audio:
             guard let t0 else { return } // drop audio that arrives before the first complete screen frame

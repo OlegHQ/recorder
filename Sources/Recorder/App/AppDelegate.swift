@@ -8,16 +8,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var statusItem: NSStatusItem!
     private var statusTimer: Timer?
+    /// Tracks which of the two status menus (SPEC §8 idle / §4.7 recording) is currently installed, so
+    /// `updateStatusItem` only rebuilds it on an actual state change instead of every tick.
+    private var isShowingRecordingMenu = false
 
-    func applicationDidFinishLaunching(_ n: Notification) {
+    @MainActor func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.mainMenu = Self.buildMainMenu()
-        statusItem = Self.buildStatusItem()
+        statusItem = buildStatusItem()
         wireNewRecording()
         wireSettings()
         wireProjects()
         wireOpen()
-        wireFinishRecording()
+        Hotkeys.install()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateStatusItem() }
         }
@@ -36,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Library.show() // shown alongside the toolbar on launch, SPEC §5.1
         }
 
+        AppDelegate.applyShowInDockPolicy()
         NSApp.activate()
     }
 
@@ -72,7 +76,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func newRecording() {
+        startRecordingFlow(mode: nil)
+    }
+
+    @objc private func recordDisplay() { startRecordingFlow(mode: .display) }
+    @objc private func recordWindow() { startRecordingFlow(mode: .window) }
+    @objc private func recordArea() { startRecordingFlow(mode: .area) }
+
+    /// SPEC §8 UX rule: "with permissions missing every recording item opens onboarding (§4.1) instead."
+    /// `mode: nil` matches "New Recording…" — the toolbar opens in the last-used mode, unchanged.
+    private func startRecordingFlow(mode: RecordingSettings.Mode?) {
+        guard Permissions.allGranted else { showOnboarding(); return }
         ToolbarController.shared.show()
+        if let mode { ToolbarController.shared.selectMode(mode) }
     }
 
     @objc private func openSettings() {
@@ -81,6 +97,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showProjects() {
         Library.show()
+    }
+
+    /// "Show Recorder in Dock" (SPEC §8): persisted, applied immediately.
+    @MainActor @objc private func toggleShowInDock() {
+        AppDelegate.showInDock.toggle()
+        AppDelegate.applyShowInDockPolicy()
+    }
+
+    @objc private func openLastProjectAction() {
+        AppDelegate.openLastProject()
     }
 
     /// "File ▸ Open…": picks a `.recorder` package and routes it through `Library.open`, same as a
@@ -97,12 +123,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RecordingController.shared.finish()
     }
 
-    /// M1 stop UI (SPEC §4.7 "Menu-bar item"): status item title/icon and the status menu's "Finish
-    /// Recording" item track `RecordingController.shared.state`, polled once a second — cheaper than
-    /// making `RecordingController` `@Observable` just for this.
+    @MainActor @objc private func togglePauseRecording() {
+        let rc = RecordingController.shared
+        rc.state == .paused ? rc.resume() : rc.pause()
+    }
+
+    @MainActor @objc private func restartRecording() {
+        RecordingController.shared.restart()
+    }
+
+    @MainActor @objc private func deleteRecording() {
+        RecordingController.shared.delete()
+    }
+
+    @MainActor @objc private func hideWidget() {
+        RecordingWidgetPanel.hide()
+    }
+
+    /// SPEC §4.7 "Menu-bar item": status item title/icon and which of the two menus (SPEC §8 idle /
+    /// §4.7 recording) is installed both track `RecordingController.shared.state`, polled once a
+    /// second — cheaper than making `RecordingController` `@Observable` just for this.
     @MainActor private func updateStatusItem() {
         let rc = RecordingController.shared
         let recording = rc.state == .recording || rc.state == .paused
+        if recording != isShowingRecordingMenu {
+            statusItem.menu = recording ? buildRecordingStatusMenu() : buildIdleStatusMenu()
+            isShowingRecordingMenu = recording
+        } else if recording {
+            // Pause/Resume is always index 1 in `buildRecordingStatusMenu` (Finish, Pause/Resume, …).
+            statusItem.menu?.item(at: 1)?.title = rc.state == .paused ? "Resume" : "Pause"
+        }
         if recording {
             let s = Int(rc.elapsed)
             statusItem.button?.title = String(format: " %02d:%02d", s / 60, s % 60)
@@ -111,16 +161,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.title = ""
             statusItem.button?.contentTintColor = nil
         }
-        statusItem.menu?.item(withTitle: "Finish Recording")?.isHidden = !recording
     }
 
-    /// Wires the "New Recording" items built by `buildMainMenu`/`buildStatusItem` to `ToolbarController` (T-104).
+    /// Wires the "File ▸ New Recording" item built by `buildMainMenu` to the same selector the status
+    /// item's "New Recording…" uses (T-104; status item items are wired directly in `buildIdleStatusMenu`).
     private func wireNewRecording() {
-        for item in [NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Recording"),
-                     statusItem.menu?.item(withTitle: "New Recording")] {
-            item?.target = self
-            item?.action = #selector(newRecording)
-        }
+        let item = NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Recording")
+        item?.target = self
+        item?.action = #selector(newRecording)
     }
 
     /// Wires the "Recorder ▸ Settings…" item built by `buildMainMenu` (T-207).
@@ -130,13 +178,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item?.action = #selector(openSettings)
     }
 
-    /// Wires "File ▸ Projects" (⇧⌘O) and the status item's "Projects" to the library window (T-302).
+    /// Wires "File ▸ Projects" (⇧⌘O) to the library window (T-302; the status item's own "Projects" is
+    /// wired directly in `buildIdleStatusMenu`).
     private func wireProjects() {
-        for item in [NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Projects"),
-                     statusItem.menu?.item(withTitle: "Projects")] {
-            item?.target = self
-            item?.action = #selector(showProjects)
-        }
+        let item = NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Projects")
+        item?.target = self
+        item?.action = #selector(showProjects)
     }
 
     /// Wires "File ▸ Open…" (T-302).
@@ -146,13 +193,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item?.action = #selector(openDocument)
     }
 
-    /// Wires the status menu's "Finish Recording" item (SPEC §4.7 M1 stop UI), hidden except while
-    /// recording (`updateStatusItem`).
-    private func wireFinishRecording() {
-        let item = statusItem.menu?.item(withTitle: "Finish Recording")
-        item?.target = self
-        item?.action = #selector(finishRecording)
-        item?.isHidden = true
+    // MARK: - "Show Recorder in Dock" (SPEC §8) and "Open Last Project" (SPEC §4.7/§8)
+
+    private static let showInDockKey = "app.showInDock"
+
+    static var showInDock: Bool {
+        get { UserDefaults.standard.object(forKey: showInDockKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: showInDockKey) }
+    }
+
+    /// SPEC §8: "off = `.accessory` activation policy... it only takes effect while no editor/library
+    /// window is open." No editor exists yet (M3); `Library`'s and onboarding's windows are both
+    /// `.titled`, so this check covers them (and any future editor window) without either owning a
+    /// public "is my window open" API. Never overrides T-205's recording-time hide (RecordingController
+    /// calls this only once a recording has actually ended).
+    // ponytail: applied only at launch, on toggle, and when a recording ends — not on every window
+    // open/close — so an editor window closing on its own won't retract the dock icon until one of
+    // those happens again. No observer layer for a case M2 doesn't need yet.
+    @MainActor static func applyShowInDockPolicy() {
+        let rc = RecordingController.shared
+        guard rc.state != .recording, rc.state != .paused else { return }
+        let hasDocumentWindow = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) }
+        NSApp.setActivationPolicy(showInDock || hasDocumentWindow ? .regular : .accessory)
+    }
+
+    /// Newest `*.recorder` package by modification date in the projects folder, or `nil` if there is none.
+    static func newestProjectURL() -> URL? {
+        let fm = FileManager.default
+        guard let packages = try? fm.contentsOfDirectory(at: RecordingSettings.shared.projectsFolder,
+                                                           includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+        return packages.filter { $0.pathExtension == "recorder" }.max { a, b in
+            let modified = { (u: URL) in (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? nil ?? Date.distantPast }
+            return modified(a) < modified(b)
+        }
+    }
+
+    /// "Open Last Project" (SPEC §4.7 ⌥⌘Z, §8): routes through `Library.open`, same as every other open
+    /// path. Static so `Hotkeys.swift`'s global ⌥⌘Z handler can call it without an `AppDelegate` instance.
+    static func openLastProject() {
+        guard let url = newestProjectURL() else { return }
+        Library.open(url)
     }
 
     // MARK: - Main menu (SPEC §8, titles/order/key equivalents normative)
@@ -237,18 +317,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return main
     }
 
-    // MARK: - Status item (always present; SPEC §8)
+    // MARK: - Status item (always present; SPEC §8 idle menu, SPEC §4.7 recording menu)
 
-    private static func buildStatusItem() -> NSStatusItem {
+    private func buildStatusItem() -> NSStatusItem {
         let si = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         si.button?.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Recorder")
-        let menu = NSMenu()
-        menu.addItem(item("New Recording"))
-        menu.addItem(item("Projects"))
-        menu.addItem(item("Finish Recording")) // hidden except while recording (SPEC §4.7); wired/shown in `wireFinishRecording`/`updateStatusItem`
-        menu.addItem(.separator())
-        menu.addItem(item("Quit", action: #selector(NSApplication.terminate(_:))))
-        si.menu = menu
+        si.menu = buildIdleStatusMenu()
         return si
+    }
+
+    /// SPEC §8 mockup, titles/order/key equivalents/SF Symbols normative (`reference/status-item-menu.png`).
+    /// Not `private`: the `menus` selftest builds both status menus directly to check them against SPEC.
+    func buildIdleStatusMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(statusMenuItem("New Recording…", symbol: "record.circle", key: "\r", mods: [.control, .command],
+                                     action: #selector(newRecording)))
+        menu.addItem(.separator())
+        menu.addItem(statusMenuItem("Record Display", symbol: "display", key: "3", mods: [.option, .command],
+                                     action: #selector(recordDisplay)))
+        menu.addItem(statusMenuItem("Record Window", symbol: "macwindow", key: "4", mods: [.option, .command],
+                                     action: #selector(recordWindow)))
+        menu.addItem(statusMenuItem("Record Area", symbol: "rectangle.dashed", key: "5", mods: [.option, .command],
+                                     action: #selector(recordArea)))
+        menu.addItem(.separator())
+        menu.addItem(statusMenuItem("Settings…", key: ",", action: #selector(openSettings)))
+        let showInDock = statusMenuItem("Show Recorder in Dock", key: "d", action: #selector(toggleShowInDock))
+        showInDock.state = AppDelegate.showInDock ? .on : .off
+        menu.addItem(showInDock)
+        menu.addItem(.separator())
+        menu.addItem(statusMenuItem("Projects", key: "o", mods: [.command, .shift], action: #selector(showProjects)))
+        menu.addItem(statusMenuItem("Open…", key: "o", action: #selector(openDocument)))
+        let openLast = statusMenuItem("Open Last Project", key: "z", mods: [.option, .command], action: #selector(openLastProjectAction))
+        openLast.isEnabled = AppDelegate.newestProjectURL() != nil
+        menu.addItem(openLast)
+        menu.addItem(.separator())
+        let quit = statusMenuItem("Quit Recorder", key: "q", action: #selector(NSApplication.terminate(_:)))
+        // Not `self`: `terminate(_:)` is `NSApplication`'s, not ours. `.shared` (not the `NSApp` global,
+        // which is only set as a side effect of `.shared` having been touched) so this is never nil even
+        // if nothing has referenced the shared application yet (e.g. the `menus` selftest).
+        quit.target = NSApplication.shared
+        menu.addItem(quit)
+        return menu
+    }
+
+    /// SPEC §4.7 "in-progress controls" menu, installed instead of the idle one while recording
+    /// (`updateStatusItem`): Finish · Pause/Resume · Restart · Delete · ─ · Hide widget. Same
+    /// `RecordingController` methods the widget's buttons call (T-203) — one implementation each.
+    @MainActor func buildRecordingStatusMenu() -> NSMenu {
+        let paused = RecordingController.shared.state == .paused
+        let menu = NSMenu()
+        menu.addItem(statusMenuItem("Finish", key: "r", mods: [.control, .option, .command], action: #selector(finishRecording)))
+        menu.addItem(statusMenuItem(paused ? "Resume" : "Pause", key: "p", mods: [.control, .option, .command],
+                                         action: #selector(togglePauseRecording)))
+        menu.addItem(statusMenuItem("Restart", action: #selector(restartRecording)))
+        menu.addItem(statusMenuItem("Delete", action: #selector(deleteRecording)))
+        menu.addItem(.separator())
+        menu.addItem(statusMenuItem("Hide widget", action: #selector(hideWidget)))
+        return menu
+    }
+
+    /// Status-menu item builder: unlike `item(_:_:_:action:)` (main menu, wired later by the `wire*`
+    /// methods), this sets `target = self` and the action immediately — the status menus are rebuilt
+    /// fresh by `updateStatusItem` rather than wired once at launch.
+    private func statusMenuItem(_ title: String, symbol: String? = nil, key: String = "",
+                             mods: NSEvent.ModifierFlags = [.command], action: Selector) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        i.keyEquivalentModifierMask = mods
+        i.target = self
+        if let symbol { i.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+        return i
     }
 }

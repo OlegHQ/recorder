@@ -758,3 +758,15 @@ Open questions to verify during M1 (do not guess — test and record the answer 
 1. Does `captureMicrophone` deliver mic samples as a separate `SCStreamOutputType.microphone` on this OS with the chosen device ID? (Expected yes on macOS 15+.) Fallback: `AVCaptureSession` audio.
 2. Is `NSCursor.currentSystem` still returning correct images on macOS 26? Fallback: map to bundled arrow/I-beam/hand only.
 3. Which Finder windows must be excluded to hide desktop icons on macOS 26?
+   **Partial answer (T-205):** `CaptureTarget.filter` (SPEC §4.8/§4.7) excludes every Finder-owned window
+   whose `windowLayer` equals `CGWindowLevelForKey(.desktopIconWindow)` when "Hide desktop icons" is on —
+   the documented desktop-icons layer, and the only Finder window expected to sit there. This could not be
+   verified empirically: `SCShareableContent`/`CGWindowListCopyWindowInfo` need Screen Recording TCC, which
+   this agent's shell doesn't have (`--selftest finder-windows` prints "no Finder windows found" here).
+   **HUMAN must confirm:** run `build/Recorder.app/Contents/MacOS/Recorder --selftest finder-windows` on a
+   machine where Recorder has Screen Recording access, with the desktop showing icons, and check its
+   printed Finder window list (`windowLayer`, `isDesktopIconLevel`, title, frame): (a) exactly one window
+   has `isDesktopIconLevel=true`, (b) hiding it (`hideDesktopIcons` toggle, already wired) removes the
+   icons from a test recording, (c) no other Finder window (e.g. an open Finder window, or the desktop
+   picture itself) needs excluding too. If any of that doesn't hold, adjust the heuristic in
+   `CaptureTarget.filter` and update this answer.
