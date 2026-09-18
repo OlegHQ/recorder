@@ -6,18 +6,20 @@ import RecorderCore
 
 /// Turns a chosen `CaptureTarget` into a recorded `.recorder` package (SPEC §4.7–§4.8, §5). The one
 /// caller is `SourcePickerOverlay.startRecording(target:)` (also used by `AreaSelectionOverlay.start`);
-/// the M1 stop UI (status item, `AppDelegate`) calls `finish`.
+/// `finish`/`pause`/`resume`/`restart`/`delete` are called by the recording widget
+/// (`RecordingWidgetPanel`) and the status-item menu (T-207b).
 @MainActor final class RecordingController {
     static let shared = RecordingController()
 
     enum State { case idle, picking, countdown, recording, paused, finishing }
-    // `.picking`/`.paused` aren't reached yet: pickers track their own visibility (T-107/T-108), and
-    // pause/resume UI arrives with the recording widget (T-203). Kept because the signature is normative.
+    // `.picking` isn't reached yet: pickers track their own visibility (T-107/T-108). Kept because the
+    // signature is normative.
     private(set) var state: State = .idle
 
     private var session: CaptureSession?
     private var camera: CameraCapture?
     private var packageURL: URL?
+    private var currentTarget: CaptureTarget?
     private var highlightWindow: NSWindow?
 
     private init() {}
@@ -38,11 +40,15 @@ import RecorderCore
         Task { await start(target: target) }
     }
 
-    private func start(target: CaptureTarget) async {
+    /// `isRestart`/`restartCamera`: T-203's `restart()` re-enters here with the countdown and
+    /// toolbar-close skipped (no re-prompt, no toolbar to close mid-recording) and its own still-live
+    /// `CameraCapture` instance passed through (grabbing `CameraCapture.current` again would miss it —
+    /// `ToolbarController` already dropped its reference the first time this ran).
+    private func start(target: CaptureTarget, isRestart: Bool = false, restartCamera: CameraCapture? = nil) async {
         let settings = RecordingSettings.shared
         state = .countdown
 
-        if settings.countdown > 0 {
+        if settings.countdown > 0 && !isRestart {
             let targetRect = SourcePickerOverlay.flip(target.frameInScreenPoints, in: NSScreen.screens[0])
             guard await CountdownOverlay.run(seconds: settings.countdown, over: targetRect) else {
                 state = .idle // Esc: back to the picker (still open, we haven't touched it yet).
@@ -52,8 +58,8 @@ import RecorderCore
 
         // Grab our own strong reference before `ToolbarController.close()` drops its own (which would
         // otherwise let the AVCaptureSession deallocate) and hides the bubble.
-        let camera = CameraCapture.current
-        ToolbarController.shared.close()
+        let camera = isRestart ? restartCamera : CameraCapture.current
+        if !isRestart { ToolbarController.shared.close() }
         if let camera { CameraBubblePanel.show(previewLayer: camera.previewLayer) }
 
         let name = "Recording \(RecordingController.folderFormatter.string(from: Date()))"
@@ -73,7 +79,9 @@ import RecorderCore
             self.session = session
             self.camera = camera
             self.packageURL = packageURL
+            self.currentTarget = target
             state = .recording
+            RecordingWidgetPanel.show()
         } catch {
             NSLog("Recorder: capture failed to start: \(error)")
             hideHighlight()
@@ -139,12 +147,58 @@ import RecorderCore
         }
     }
 
+    // MARK: - Widget/status-menu operations (SPEC §4.7) — the one implementation of each, shared by
+    // `RecordingWidgetPanel` and the status-item menu (T-207b).
+
+    func pause() {
+        guard state == .recording else { return }
+        session?.pause()
+        state = .paused
+    }
+
+    func resume() {
+        guard state == .paused else { return }
+        session?.resume()
+        state = .recording
+    }
+
+    /// Discard the current recording and start again with the same target/settings — no countdown
+    /// re-prompt (SPEC §4.7). Keeps the camera device open across the restart (see `start(target:)`).
+    func restart() {
+        guard state == .recording || state == .paused, let target = currentTarget else { return }
+        state = .finishing
+        hideHighlight()
+        let session = self.session
+        let camera = self.camera
+        Task {
+            await session?.cancel()
+            self.reset()
+            await self.start(target: target, isRestart: true, restartCamera: camera)
+        }
+    }
+
+    /// Confirms via `NSAlert`, then discards exactly like `cancel()` (SPEC §4.7 "Delete asks for
+    /// confirmation").
+    func delete() {
+        guard state == .recording || state == .paused else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete this recording?"
+        alert.informativeText = "This can't be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        cancel()
+    }
+
     private func reset() {
         session = nil
         camera = nil
         packageURL = nil
+        currentTarget = nil
         state = .idle
         CameraBubblePanel.hide()
+        RecordingWidgetPanel.hide()
     }
 
     private static let folderFormatter: DateFormatter = {
