@@ -178,12 +178,12 @@ final class Compositor {
             u.color2 = colorSIMD(bg.gradient.count > 1 ? bg.gradient[1] : "#E0567A")
             u.gradientAngle = Float(bg.gradientAngle * .pi / 180)
         case .wallpaper, .image:
-            if let texture = backgroundTexture(bg) {
+            if let texture = backgroundTexture(bg, outputSize: outputSize) {
                 u.mode = 2
                 encoder.setFragmentTexture(texture, index: 0)
             } else {
-                // ponytail: wallpaper JPEGs are bundled by T-308; `image` needs the project
-                // package URL, which `FrameState` doesn't carry yet. Fall back to a flat fill.
+                // ponytail: `image` needs the project package URL, which `FrameState` doesn't carry
+                // yet. Fall back to a flat fill.
                 u.mode = 0
                 u.color = colorSIMD(bg.color)
             }
@@ -192,15 +192,37 @@ final class Compositor {
         encoder.setFragmentTexture(dummyTexture, index: 0)
     }
 
-    private func backgroundTexture(_ bg: Background) -> MTLTexture? {
+    /// T-308 fix: `bg.wallpaper` is either a bundled id (the wallpaper grid's own JPEGs, `"01"`…
+    /// `"12"`) or an absolute path to a system wallpaper the Background tab's grid also offers
+    /// (`/System/Library/Desktop Pictures/*.heic`) — load both, instead of only bundled ids.
+    private func backgroundTexture(_ bg: Background, outputSize: CGSize) -> MTLTexture? {
         guard bg.kind == .wallpaper else { return nil }
-        let key = "wallpaper-\(bg.wallpaper)-blur\(bg.blur)"
+        let key = "wallpaper-\(bg.wallpaper)-blur\(bg.blur)-\(Int(outputSize.width))x\(Int(outputSize.height))"
         if let cached = backgroundCache[key] { return cached }
-        guard let url = Bundle.main.url(forResource: bg.wallpaper, withExtension: "jpg", subdirectory: "Wallpapers"),
-              var texture = try? textureLoader.newTexture(URL: url, options: [.SRGB: false]) else { return nil }
+        var texture: MTLTexture?
+        if bg.wallpaper.hasPrefix("/") {
+            texture = loadAbsoluteWallpaper(path: bg.wallpaper, downscaleTo: outputSize)
+        } else if let url = Bundle.main.url(forResource: bg.wallpaper, withExtension: "jpg", subdirectory: "Wallpapers") {
+            texture = try? textureLoader.newTexture(URL: url, options: [.SRGB: false])
+        }
+        guard var texture else { return nil }
         if bg.blur > 0, let blurred = blurred(texture, amount: bg.blur) { texture = blurred }
         backgroundCache[key] = texture
         return texture
+    }
+
+    /// System wallpapers can be many thousands of pixels square; `MTKTextureLoader.newTexture(URL:)`
+    /// doesn't reliably decode HEIC, so decode + downscale through `CGImageSource` (ImageIO handles
+    /// HEIC) first, then hand the loader the already-small `CGImage`.
+    private func loadAbsoluteWallpaper(path: String, downscaleTo outputSize: CGSize) -> MTLTexture? {
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(Int(max(outputSize.width, outputSize.height)), 1),
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return try? textureLoader.newTexture(cgImage: cgImage, options: [.SRGB: false])
     }
 
     private func blurred(_ texture: MTLTexture, amount: Double) -> MTLTexture? {
