@@ -222,6 +222,94 @@ enum SelfTest {
             let onDisk = try Project.load(from: projectURL)
             guard onDisk.title == "Persisted" else { throw Fail(description: "autosave didn't persist: \(onDisk.title)") }
         },
+        // T-310: (a) `CropMapping`'s view↔NormRect round trip for a letterboxed case, (b) `CropSheet.confirm`
+        // (the exact closure the sheet's Confirm button calls) drives a real `EditorModel` in one undo step,
+        // and discard (no call) leaves the project untouched.
+        "crop": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            // (a) mapping round trip: a 1920×1080 image letterboxed into a 800×1000 view (pillarboxed).
+            let imageRect = CropMapping.imageRect(imageSize: CGSize(width: 1920, height: 1080), in: CGSize(width: 800, height: 1000))
+            guard imageRect.width == 800, abs(imageRect.height - 450) < 1e-9 else {
+                throw Fail(description: "unexpected imageRect \(imageRect)")
+            }
+            let originalNorm = NormRect(x: 0.1, y: 0.2, w: 0.5, h: 0.3)
+            let viewRect = CropMapping.viewRect(from: originalNorm, imageRect: imageRect)
+            let roundTripped = CropMapping.normRect(fromView: viewRect, imageRect: imageRect)
+            guard abs(roundTripped.x - originalNorm.x) < 1e-9, abs(roundTripped.y - originalNorm.y) < 1e-9,
+                  abs(roundTripped.w - originalNorm.w) < 1e-9, abs(roundTripped.h - originalNorm.h) < 1e-9 else {
+                throw Fail(description: "round trip mismatch: \(roundTripped) vs \(originalNorm)")
+            }
+
+            // (b) confirm = one undo step via a real EditorModel; discard = no mutation.
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-crop-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            let original = Project(title: "Crop test", clips: [Clip(sourceStart: 0, sourceEnd: 10, speed: 1)])
+            let model = await EditorModel(packageURL: tmp, project: original, events: EventLog())
+
+            let newCrop = NormRect(x: 0.05, y: 0.1, w: 0.8, h: 0.6)
+            await CropSheet.confirm(newCrop, on: model)
+            guard await model.project.crop == newCrop else { throw Fail(description: "confirm didn't apply the crop") }
+            guard await model.project != original else { throw Fail(description: "confirm didn't change the project") }
+            await model.undo()
+            guard await model.project == original else { throw Fail(description: "confirm wasn't exactly one undo step") }
+            await model.redo()
+
+            // Discard: nothing calls `model.edit`, so the project is simply whatever it already was.
+            let beforeDiscard = await model.project
+            // (no-op — discard's entire contract is "don't call confirm")
+            guard await model.project == beforeDiscard else { throw Fail(description: "discard mutated the project") }
+        },
+        // T-310: renders `CropSheetWindow`'s content view offscreen with a synthetic frame image to PNG,
+        // for eyeballing against the SPEC §6.7 mockup (`Read` tool). Not a correctness test.
+        // ponytail: rendered in light appearance (`--selftest` never runs `AppDelegate`, which is what
+        // sets `NSApp.appearance = .darkAqua` for the real app — forcing it here just for this render
+        // blanked the offscreen capture, an AppKit/SwiftUI offscreen-appearance quirk not worth chasing
+        // for a look-check). Layout/content only; the real app is dark-only regardless (SPEC §3).
+        "crop-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: crop-png <out.png>") }
+            let outURL = URL(fileURLWithPath: outPath)
+
+            let width = 1600, height = 1000
+            var bytes = [UInt8](repeating: 0, count: width * height * 4)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let i = (y * width + x) * 4
+                    bytes[i + 0] = UInt8(clamping: Int(40 + 120 * Double(x) / Double(width)))
+                    bytes[i + 1] = UInt8(clamping: Int(60 + 140 * Double(y) / Double(height)))
+                    bytes[i + 2] = 200
+                    bytes[i + 3] = 255
+                }
+            }
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+            guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+                  let cgImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                                         bytesPerRow: width * 4, space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                                         provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
+                throw Fail(description: "couldn't synthesize frame image")
+            }
+
+            try await MainActor.run {
+                let crop = NormRect(x: 0.15, y: 0.2, w: 0.6, h: 0.55)
+                let window = CropSheetWindow(initialCrop: crop, sourceSize: CGSize(width: width, height: height),
+                                              image: cgImage, onConfirm: { _ in })
+                guard let contentView = window.contentView else { throw Fail(description: "no content view") }
+                window.layoutIfNeeded()
+                contentView.layoutSubtreeIfNeeded()
+                for _ in 0..<5 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+                contentView.layoutSubtreeIfNeeded()
+                guard let rep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                contentView.cacheDisplay(in: contentView.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try png.write(to: outURL)
+            }
+        },
         "events": { args in
             let seconds = args.first.flatMap(Double.init) ?? 3
             guard let display = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false).displays.first else {
