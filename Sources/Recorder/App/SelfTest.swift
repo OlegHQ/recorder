@@ -87,6 +87,9 @@ enum SelfTest {
         "preview-frame": { args in try await Compositor.runPreviewFrameSelfTest(args) },
         "export": { args in try await ExporterSelfTest.runExportSelfTest(args) },
         "parity": { args in try await ExporterSelfTest.runParitySelfTest(args) },
+        "export-gif": { args in try await ExporterSelfTest.runExportGIFSelfTest(args) },
+        "export-sheet": { args in try await ExportSheetSelfTest.run(args) },
+        "export-sheet-png": { args in try await ExportSheetSelfTest.runPNG(args) },
         "library": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             func waitUntil(timeout: Double = 3, _ predicate: () -> Bool) async throws {
