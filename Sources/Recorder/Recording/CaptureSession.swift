@@ -24,10 +24,16 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private let pixelWidth: Int
     private let pixelHeight: Int
 
-    private var t0: CMTime?
-    private var pausedSoFar: CMTime = .zero
-    private var isPaused = false
+    /// Shared clock (SPEC §4.8): `CameraCapture`'s fourth `TrackWriter` retimes onto the same `t0`/
+    /// `pausedSoFar`/`isPaused` so `camera.mov` stays in sync with `screen.mov` (AC-CAM-2).
+    private(set) var t0: CMTime?
+    private(set) var pausedSoFar: CMTime = .zero
+    private(set) var isPaused = false
     private var pauseStart: CMTime?
+
+    /// Set by whoever attaches a `CameraCapture` to this session, so `finish()` reports `hasCamera`
+    /// correctly (SPEC §5 `Source.hasCamera`).
+    var hasCamera = false
 
     /// Output-clock seconds of the latest screen frame, for the recording widget.
     // ponytail: only advances on screen frames, so it visibly freezes while SCK sends none (idle
@@ -115,7 +121,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         let duration = try await asset.load(.duration).seconds
 
         return Source(kind: sourceKind, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
-                               scale: Double(target.scale), duration: duration, hasCamera: false,
+                               scale: Double(target.scale), duration: duration, hasCamera: hasCamera,
                                hasMic: settings.micID != nil, hasSystemAudio: settings.systemAudio != .off)
     }
 
@@ -185,8 +191,9 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
 }
 
 /// `AVAssetWriter` + one real-time input, retiming every appended buffer to an explicit output-clock
-/// offset (SPEC §4.8). One instance per media file (`screen.mov`/`system.m4a`/`mic.m4a`).
-private final class TrackWriter {
+/// offset (SPEC §4.8). One instance per media file (`screen.mov`/`system.m4a`/`mic.m4a`/`camera.mov`).
+/// Internal (not `private`) so `CameraCapture` can reuse it for the fourth writer.
+final class TrackWriter {
     private let writer: AVAssetWriter
     private let input: AVAssetWriterInput
     private var sessionStarted = false
