@@ -13,6 +13,9 @@ import Foundation
 //       `1 - smoothstep(-1, 1, d)`; shadow alpha = `shadowAlpha * (1 - smoothstep(0, shadowBlur, d))`.
 //   4 = same rounded-rect + shadow as mode 3, but the source is biplanar 4:2:0 YCbCr (real capture
 //       output — `texture(0)` luma, `texture(1)` chroma) converted to RGB first (BT.709, video range).
+//   5 = the cursor quad (SPEC §6.2 pass 3, T-413): straight-alpha RGBA texture, rotated `rotation`
+//       radians about the quad centre (`contentOffset`/`contentSize`, same fields pass 3/4 use for
+//       their SDF) — sampled in the quad's own unrotated local space, alpha multiplied by `color.a`.
 // `Uniforms` below must stay byte-layout-identical to the `Uniforms` struct in Compositor.swift.
 let shaderSource = """
 #include <metal_stdlib>
@@ -31,7 +34,7 @@ struct Uniforms {
     float shadowBlur;      // pixels
     float gradientAngle;   // radians
     int mode;
-    float _pad;
+    float rotation;        // mode 5: radians, about the quad centre
 };
 
 struct VertexOut {
@@ -91,11 +94,25 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
         return tex.sample(smp, in.uv);
     } else if (u.mode == 3) {
         return roundedRectShadow(in.localPos, u, tex.sample(smp, in.uv));
-    } else {
+    } else if (u.mode == 4) {
         float y = tex.sample(smp, in.uv).r;
         float2 cbcr = texChroma.sample(smp, in.uv).rg;
         float3 rgb = ycbcr709VideoToRGB(y, cbcr);
         return roundedRectShadow(in.localPos, u, float4(rgb, 1.0));
+    } else {
+        // Mode 5: cursor quad — rotate back into the quad's own local space, discard outside it.
+        float2 p = in.localPos - u.contentOffset;
+        float cosR = cos(-u.rotation);
+        float sinR = sin(-u.rotation);
+        float2 pr = float2(p.x * cosR - p.y * sinR, p.x * sinR + p.y * cosR);
+        float2 halfSize = u.contentSize * 0.5;
+        if (abs(pr.x) > halfSize.x || abs(pr.y) > halfSize.y) {
+            return float4(0.0);
+        }
+        float2 uv = pr / u.contentSize + 0.5;
+        float4 c = tex.sample(smp, uv);
+        c.a *= u.color.a;
+        return c;
     }
 }
 """

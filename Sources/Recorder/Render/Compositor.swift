@@ -22,7 +22,7 @@ private struct Uniforms {
     var shadowBlur: Float = 1
     var gradientAngle: Float = 0
     var mode: Int32 = 0
-    var _pad: Float = 0
+    var rotation: Float = 0
 }
 
 /// `Compositor.render` draws `FrameState` → `target` with the single shader library in
@@ -31,15 +31,31 @@ private struct Uniforms {
 final class Compositor {
     enum CompositorError: Error { case missingFunction, pngWriteFailed }
 
+    /// One loaded cursor image (SPEC §6.5 hi-res stored representation, AC-CUR-2): `hotX`/`hotY`
+    /// are pixels in the *image's own* pixel grid (`cursors/<id>.json`, written by
+    /// `EventRecorder.writeCursorImage`), `scale` is that grid's pixels-per-point.
+    private struct CursorImage {
+        let texture: MTLTexture
+        let hotX: Double
+        let hotY: Double
+        let scale: Double
+    }
+    private struct CursorMeta: Decodable { let hotX: Double; let hotY: Double; let scale: Double }
+
     private let device: MTLDevice
+    private let package: URL?
     private let pipeline: MTLRenderPipelineState
     private let sampler: MTLSamplerState
     private let dummyTexture: MTLTexture
     private lazy var textureLoader = MTKTextureLoader(device: device)
     private var backgroundCache: [String: MTLTexture] = [:]
+    private var cursorImageCache: [String: CursorImage] = [:]
 
-    init(device: MTLDevice) throws {
+    /// `package` is the project's `.recorder` directory, for `cursors/<id>.png`/`.json` (T-413);
+    /// `nil` for the synthetic `render` selftest, which never sets `FrameState.cursor`.
+    init(device: MTLDevice, package: URL? = nil) throws {
         self.device = device
+        self.package = package
         let library = try device.makeLibrary(source: shaderSource, options: nil)
         guard let vertexFn = library.makeFunction(name: "vertexMain"),
               let fragmentFn = library.makeFunction(name: "fragmentMain") else {
@@ -102,11 +118,18 @@ final class Compositor {
         // Pass 1: background.
         drawBackground(s.project.background, outputSize: s.outputSize, encoder: encoder)
 
-        // Pass 2: screen (rounded rect + shadow + crop/zoom UV, SPEC §6.2 pass 2).
-        // ponytail: motion blur (N=8 taps along prevView→view) and passes 3–4 (cursor, camera,
-        // masks) land with CursorPath/CameraPath — T-413 and M4/M5.
+        // Pass 2: screen (rounded rect + shadow + crop/zoom UV, SPEC §6.2 pass 2). Pass 3 (cursor)
+        // shares the same content rect + crop/zoom UV mapping so it lands in "screen space" and
+        // zooms with the content (SPEC §6.2 pass 3, T-413).
+        // ponytail: motion blur (N=8 taps along prevView→view, gated by animation.blur*) and pass 4
+        // (camera/masks) land with T-501/T-502.
         if let screen = s.screen {
-            drawScreen(screen, project: s.project, view: s.view, outputSize: s.outputSize, encoder: encoder)
+            let rectPx = screenRect(output: s.outputSize, cropAspect: cropAspect(s.project), padding: s.project.frame.padding)
+            let contentUV = cropUV(s.project.crop, view: s.view)
+            drawScreen(screen, project: s.project, rectPx: rectPx, contentUV: contentUV, outputSize: s.outputSize, encoder: encoder)
+            if let cursor = s.cursor, cursor.alpha > 0 {
+                drawCursor(cursor, project: s.project, rectPx: rectPx, contentUV: contentUV, outputSize: s.outputSize, encoder: encoder)
+            }
         }
 
         encoder.endEncoding()
@@ -170,10 +193,7 @@ final class Compositor {
     /// shadow — computed by the fragment shader's SDF, offset to the content rect — can bleed
     /// outward into the padding (SPEC §6.2 pass 2: "quad is enlarged by blurPx"; a full-canvas
     /// quad is the simplest way to give it room on every side without a second uniform set).
-    private func drawScreen(_ texture: FrameState.Texture, project: Project, view: ViewTransform, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
-        let rectPx = screenRect(output: outputSize, cropAspect: cropAspect(project), padding: project.frame.padding)
-        let contentUV = cropUV(project.crop, view: view)
-
+    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         var u = Uniforms()
         u.rectNDC = SIMD4(-1, 1, 1, -1)
         u.uvRect = extrapolatedUV(contentUV, contentRect: rectPx, to: outputSize)
@@ -191,9 +211,86 @@ final class Compositor {
         encoder.setFragmentTexture(dummyTexture, index: 1)
     }
 
+    // MARK: - Pass 3: cursor (SPEC §6.2 pass 3, §6.5, T-413)
+
+    /// Positions the cursor quad in **screen space**: `cursor.x/y` (normalised source coords) are
+    /// mapped through the same crop/zoom UV rect `drawScreen` used, so the cursor lands in the
+    /// right place on the (possibly zoomed) content and moves/scales with it. Size = the cursor
+    /// image's own point size (`hotX/hotY/scale` from `cursors/<id>.json`) × `cursor.size` ×
+    /// output-pixels-per-source-pixel (crop + zoom combined) × `clickScale`; offset by the hotspot
+    /// so the recorded point lands under the hotspot, not the image's centre.
+    private func drawCursor(_ cursor: CursorSample, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        guard let image = cursorImage(id: cursor.imageID) else { return }
+        let u0 = Double(contentUV.x), v0 = Double(contentUV.y), u1 = Double(contentUV.z), v1 = Double(contentUV.w)
+        guard u1 > u0, v1 > v0 else { return }
+
+        let px = rectPx.minX + (cursor.x - u0) / (u1 - u0) * rectPx.width
+        let py = rectPx.minY + (cursor.y - v0) / (v1 - v0) * rectPx.height
+
+        let sourceW = Double(max(project.source.pixelWidth, 1)), sourceH = Double(max(project.source.pixelHeight, 1))
+        let outputPxPerSourcePxX = rectPx.width / ((u1 - u0) * sourceW)
+        let outputPxPerSourcePxY = rectPx.height / ((v1 - v0) * sourceH)
+        let pointToOutputPxX = outputPxPerSourcePxX * project.source.scale
+        let pointToOutputPxY = outputPxPerSourcePxY * project.source.scale
+
+        let imagePointW = Double(image.texture.width) / max(image.scale, 0.0001)
+        let imagePointH = Double(image.texture.height) / max(image.scale, 0.0001)
+        let drawW = imagePointW * project.cursor.size * pointToOutputPxX * cursor.clickScale
+        let drawH = imagePointH * project.cursor.size * pointToOutputPxY * cursor.clickScale
+        guard drawW > 0, drawH > 0 else { return }
+
+        // `hotX`/`hotY` are `NSCursor.hotSpot` scaled to pixels — AppKit's coordinate system is
+        // bottom-left/y-up, but the PNG (and our `localPos`/`uv` convention above) is top-left/
+        // y-down, so only Y needs flipping.
+        let hotFracX = image.hotX / Double(image.texture.width)
+        let hotFracY = 1 - image.hotY / Double(image.texture.height)
+        let centerX = px + (0.5 - hotFracX) * drawW
+        let centerY = py + (0.5 - hotFracY) * drawH
+
+        var u = Uniforms()
+        u.rectNDC = SIMD4(-1, 1, 1, -1)
+        u.pixelSize = SIMD2(Float(outputSize.width), Float(outputSize.height))
+        u.contentSize = SIMD2(Float(drawW), Float(drawH))
+        u.contentOffset = SIMD2(Float(centerX - outputSize.width / 2), Float(centerY - outputSize.height / 2))
+        u.color = SIMD4(0, 0, 0, Float(cursor.alpha))
+        u.rotation = Float(cursor.rotation * .pi / 180)
+        u.mode = 5
+        encoder.setFragmentTexture(image.texture, index: 0)
+        draw(u, encoder: encoder)
+        encoder.setFragmentTexture(dummyTexture, index: 0)
+    }
+
+    /// `id == nil` (or a load failure) falls back to the plain system arrow — AppKit already ships
+    /// it, so there's no need to bundle our own default cursor asset. Cached per package + id.
+    private func cursorImage(id: String?) -> CursorImage? {
+        let key = id ?? "__default__"
+        if let cached = cursorImageCache[key] { return cached }
+        var loaded: CursorImage?
+        if let id, let package { loaded = loadCursorImage(id: id, package: package) }
+        if loaded == nil { loaded = loadDefaultArrowCursorImage() }
+        if let loaded { cursorImageCache[key] = loaded }
+        return loaded
+    }
+
+    private func loadCursorImage(id: String, package: URL) -> CursorImage? {
+        let dir = package.appendingPathComponent("cursors")
+        guard let texture = try? textureLoader.newTexture(URL: dir.appendingPathComponent("\(id).png"), options: [.SRGB: false]),
+              let data = try? Data(contentsOf: dir.appendingPathComponent("\(id).json")),
+              let meta = try? JSONDecoder().decode(CursorMeta.self, from: data) else { return nil }
+        return CursorImage(texture: texture, hotX: meta.hotX, hotY: meta.hotY, scale: meta.scale)
+    }
+
+    private func loadDefaultArrowCursorImage() -> CursorImage? {
+        let cursor = NSCursor.arrow
+        guard let rep = cursor.image.representations.compactMap({ $0 as? NSBitmapImageRep }).max(by: { $0.pixelsWide < $1.pixelsWide }),
+              let cgImage = rep.cgImage,
+              let texture = try? textureLoader.newTexture(cgImage: cgImage, options: [.SRGB: false]) else { return nil }
+        let scale = cursor.image.size.width > 0 ? Double(rep.pixelsWide) / Double(cursor.image.size.width) : 1
+        return CursorImage(texture: texture, hotX: cursor.hotSpot.x * scale, hotY: cursor.hotSpot.y * scale, scale: scale)
+    }
+
     /// SPEC §6.2 pass 2: "crop + zoom applied as UV transform" — `center + (uv − 0.5) / scale`,
-    /// inside the crop rect. `view` is `.identity` until `CameraPath` is wired in (T-413), which
-    /// makes this a no-op reducing to the crop rect itself.
+    /// inside the crop rect.
     private func cropUV(_ crop: NormRect, view: ViewTransform) -> SIMD4<Float> {
         let halfW = crop.w / (2 * max(view.scale, 0.0001))
         let halfH = crop.h / (2 * max(view.scale, 0.0001))
@@ -363,8 +460,8 @@ extension Compositor {
         }
         let packageURL = URL(fileURLWithPath: args[0])
         let outURL = URL(fileURLWithPath: args[2])
-        let project = try Project.load(from: packageURL.appendingPathComponent("project.json"))
-        let model = EditorModel(packageURL: packageURL, project: project, events: EventLog())
+        let model = try loadEditorModel(package: packageURL)
+        let project = model.project
 
         let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
         let item = AVPlayerItem(asset: composition)
@@ -391,7 +488,7 @@ extension Compositor {
         }
 
         guard let device = MTLCreateSystemDefaultDevice() else { throw SelfTestArgError.usage("no Metal device") }
-        let compositor = try Compositor(device: device)
+        let compositor = try Compositor(device: device, package: packageURL)
         let textureCache = TextureCache(device: device)
         guard let screenTexture = textureCache.texture(from: pixelBuffer) else {
             throw SelfTestArgError.usage("CVPixelBuffer -> MTLTexture failed")
