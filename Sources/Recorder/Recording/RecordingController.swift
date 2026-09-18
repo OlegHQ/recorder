@@ -65,9 +65,13 @@ import RecorderCore
         let name = "Recording \(RecordingController.folderFormatter.string(from: Date()))"
         let packageURL = settings.projectsFolder.appendingPathComponent("\(name).recorder")
 
-        // Registered with `FloatingPanel` before `CaptureSession` reads the exclusion list below, so it
-        // never leaks into `screen.mov` (AC-TB-1 applies to this overlay too).
+        // Both registered with `FloatingPanel` *before* `CaptureSession` reads the exclusion list below
+        // (its `SCContentFilter` is a fixed snapshot, not updated afterward), so neither ever leaks into
+        // `screen.mov` (AC-TB-1 applies to every recording-flow surface, including these two). The widget
+        // shows here — alongside the highlight, before the capture session even exists — rather than
+        // after `session.start()` succeeds, specifically so its window exists in time for that snapshot.
         showHighlight(for: target, settings: settings)
+        RecordingWidgetPanel.show()
 
         do {
             let session = try await CaptureSession(target: target, settings: settings, packageURL: packageURL)
@@ -81,11 +85,11 @@ import RecorderCore
             self.packageURL = packageURL
             self.currentTarget = target
             state = .recording
-            RecordingWidgetPanel.show()
             applyDockIconPolicy(hiddenWhileRecording: true)
         } catch {
             NSLog("Recorder: capture failed to start: \(error)")
             hideHighlight()
+            RecordingWidgetPanel.hide()
             try? FileManager.default.removeItem(at: packageURL)
             state = .idle
         }
@@ -179,16 +183,18 @@ import RecorderCore
     }
 
     /// Confirms via `NSAlert`, then discards exactly like `cancel()` (SPEC §4.7 "Delete asks for
-    /// confirmation").
+    /// confirmation"). "Keep Recording" is added first — and so is the alert's default button (Return
+    /// key, initial focus) — precisely so an accidental Return doesn't discard a recording.
     func delete() {
         guard state == .recording || state == .paused else { return }
         let alert = NSAlert()
         alert.messageText = "Delete this recording?"
         alert.informativeText = "This can't be undone."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        alert.addButton(withTitle: "Keep Recording")
+        let deleteButton = alert.addButton(withTitle: "Delete")
+        deleteButton.hasDestructiveAction = true
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
         cancel()
     }
 
