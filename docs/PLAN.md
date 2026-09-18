@@ -41,7 +41,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 
 | Milestone | Tasks | Done |
 |---|---|---|
-| M0 Foundations | T-001…T-006 | 0/6 |
+| M0 Foundations | T-001…T-006 | 1/6 |
 | M1 Record | T-101…T-114 | 0/14 |
 | M2 Record+ | T-201…T-208 | 0/8 |
 | M3 Editor shell | T-301…T-313 | 0/13 |
@@ -61,7 +61,7 @@ Update the "Done" column whenever you tick a task.
   - HUMAN: `make cert` asks for the login-keychain password once; on first `codesign` click "Always Allow".
   - Verify: `security find-identity -p codesigning | grep "Recorder Dev"` prints a line; `make app` output ends with signing by `Recorder Dev`; `codesign -dv build/Recorder.app 2>&1 | grep Authority` shows `Recorder Dev`.
 
-- [ ] **T-002 Theme** · SPEC §3
+- [x] **T-002 Theme** · SPEC §3
   - File: `Sources/Recorder/App/Theme.swift`
   - Do: one `enum Theme` with static `NSColor`s for every token in SPEC §3 (+ `Color` accessors via `Color(nsColor:)`), radii, fonts. Add `NSColor(hex:)` (6/8-digit) here — the only hex parser in the repo.
   ```swift
@@ -577,4 +577,6 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 ## Log
 
 Append one line per completed task: `T-xxx · YYYY-MM-DD · verified: <what> · deviations: <none|…>`
+
+T-002 · 2026-09-18 · verified: `make build` succeeds with `Sources/Recorder/App/Theme.swift` added (enum `Theme`, `NSColor` tokens + `Color` accessors, `Radius`, body/caption/title fonts, `timecodeFont`, `NSColor(hex:)`) · deviations: none
 
