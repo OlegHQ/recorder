@@ -15,6 +15,11 @@ this file says *in what order, in which file, with what code, and how to prove i
    perform the HUMAN step. Mark the task `- [~]` (blocked on human) until they confirm. Do not tick it yourself.
 7. If the task is wrong or impossible: do not improvise an architecture. Write `BLOCKED: <why>` under the task, stop, ask.
 
+8. **Two lanes (user decision, 2026-09-18).** Rule 1 applies per lane. *App lane*: this tree, `master`, strictly in order.
+   *Core lane*: the pure-`RecorderCore` tasks T-401, T-402, T-403, T-410, T-411, T-412 run in order in the worktree
+   `../recorder-core-lane` (branch `core-lane`) in parallel with the app lane. Core-lane agents never edit this file; the
+   coordinator merges `core-lane` into `master`, runs `make test`, then ticks/logs here.
+
 ### Ponytail rules (apply to every task)
 
 Before writing code, stop at the first rung that holds:
