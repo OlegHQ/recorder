@@ -6,9 +6,10 @@ import RecorderCore
 /// Background (T-308), Cursor (T-414/T-604), Camera (T-502), Audio (T-504), Animations (T-501) and
 /// Keys (T-602) all have real controls.
 /// SPEC §6.6 "selection in timeline ⇒ the selection's panel replaces the tabs" (AC-INS-3): a
-/// selected clip or zoom swaps the tab bar out for `ClipPanel`/`ZoomPanel`; layout/mask selection
-/// has no panel yet (T-503/T-601), so it falls back to the tabs. `‹ Back` (or `Esc`, handled by
-/// `TimelineView`'s key handling which clears the same `model.selection`/`selectedClip`) returns.
+/// selected clip/zoom/layout swaps the tab bar out for `ClipPanel`/`ZoomPanel`/`LayoutPanel`;
+/// mask selection has no panel yet (T-601), so it falls back to the tabs. `‹ Back` (or `Esc`,
+/// handled by `TimelineView`'s key handling which clears the same `model.selection`/
+/// `selectedClip`) returns.
 struct InspectorView: View {
     let model: EditorModel
     @State private var tab: Tab
@@ -23,13 +24,14 @@ struct InspectorView: View {
     private enum Selection {
         case clip(Int)
         case zoom(UUID)
+        case layout(UUID)
     }
 
     private var selection: Selection? {
         if let i = model.selectedClip, model.project.clips.indices.contains(i) { return .clip(i) }
-        if model.selection.count == 1, let id = model.selection.first,
-           model.project.zooms.contains(where: { $0.id == id.uuidString }) {
-            return .zoom(id)
+        if model.selection.count == 1, let id = model.selection.first {
+            if model.project.zooms.contains(where: { $0.id == id.uuidString }) { return .zoom(id) }
+            if model.project.layouts.contains(where: { $0.id == id.uuidString }) { return .layout(id) }
         }
         return nil
     }
@@ -114,6 +116,7 @@ struct InspectorView: View {
         switch selection {
         case .clip(let i): ClipPanel(model: model, clipIndex: i)
         case .zoom(let id): ZoomPanel(model: model, zoomID: id)
+        case .layout(let id): LayoutPanel(model: model, layoutID: id)
         case nil:
             switch tab {
             case .background: BackgroundTab(model: model)

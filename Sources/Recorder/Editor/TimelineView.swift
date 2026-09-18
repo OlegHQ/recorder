@@ -66,11 +66,13 @@ final class TimelineView: NSView {
     private enum DragKind {
         case scrub
         case trimClip(index: Int, edge: RecorderCore.Edge, priorOutput: Double, beginSourceStart: Double, beginSourceEnd: Double, speed: Double)
-        // Zoom blocks are stored in *source* time and `clips` never changes under these two
-        // (unlike a clip trim), so `model.timeMap` — stable for the whole gesture — does the
-        // output→source conversion directly; no "begin" snapshot of the block itself is needed.
-        case moveZoom(id: UUID, grabOffset: Double) // grabOffset = (source under the mouse) − zoom.start, at mouseDown
-        case resizeZoom(id: UUID, edge: RecorderCore.Edge)
+        // Zoom/layout/mask blocks are all stored in *source* time and `clips` never changes under
+        // these two (unlike a clip trim), so `model.timeMap` — stable for the whole gesture — does
+        // the output→source conversion directly; no "begin" snapshot of the block itself is
+        // needed. `lane` picks which `Project` op (`moveZoom`/`moveLayout`/`moveMask`, same for
+        // resize) `updateMoveBlock`/`updateResizeBlock` calls — one generic drag, not copied per lane.
+        case moveBlock(id: UUID, lane: Lane, grabOffset: Double) // grabOffset = (source under the mouse) − block.start, at mouseDown
+        case resizeBlock(id: UUID, lane: Lane, edge: RecorderCore.Edge)
     }
     private var hoverX: CGFloat?
     private var hoverY: CGFloat?
@@ -258,7 +260,7 @@ final class TimelineView: NSView {
         drawClipLane(project, timeMap)
         drawZoomLane(project, timeMap)
         drawClickTicks(project, timeMap)
-        drawZoomGhost()
+        drawEmptyLaneGhost()
         if hasLayoutLane { drawLayoutLane(project, timeMap) }
         drawLaneDividers()
         drawPlayhead(model.playhead)
@@ -472,8 +474,7 @@ final class TimelineView: NSView {
         let row = laneRow(.layout)
         let selection = model?.selection ?? []
         for layout in project.layouts {
-            guard layout.kind == .cameraFull else { continue }
-            let label = "\u{25C9} Camera full"
+            let label = layout.kind == .cameraFull ? "\u{25C9} Camera full" : "\u{25CB} Hidden"
             let selected = UUID(uuidString: layout.id).map(selection.contains) ?? false
             for segment in visibleSegments(start: layout.start, end: layout.end, project: project, timeMap: timeMap) {
                 let rect = CGRect(x: x(forOutput: segment.outStart), y: row.minY + 2,
@@ -1197,29 +1198,22 @@ final class TimelineView: NSView {
         case .clipBody(let i):
             selectClip(i)
         case .blockBody(let id):
-            // SPEC §7.2 "Zoom blocks": "Double-click = select + move playhead to its start."
-            if event.clickCount >= 2, lane(ofBlock: id) == .zoom {
+            guard let lane = lane(ofBlock: id) else { break }
+            // SPEC §7.2 "Zoom blocks": "Double-click = select + move playhead to its start" — a
+            // zoom-only affordance; every lane's body-drag otherwise moves the block (§7.2's
+            // hit-test table: "move (zoom/layout/mask only; clips don't reorder)").
+            if event.clickCount >= 2, lane == .zoom {
                 doubleClickZoom(id: id)
-            } else if lane(ofBlock: id) == .zoom {
-                beginMoveZoom(id: id, atViewX: p.x)
             } else {
-                selectBlock(id, addToSelection: event.modifierFlags.contains(.shift))
+                beginMoveBlock(id: id, lane: lane, atViewX: p.x)
             }
         case .blockEdge(let id, let edge):
-            if lane(ofBlock: id) == .zoom {
-                beginResizeZoom(id: id, edge: edge)
-            } else {
-                selectBlock(id, addToSelection: event.modifierFlags.contains(.shift))
-            }
+            guard let lane = lane(ofBlock: id) else { break }
+            beginResizeBlock(id: id, lane: lane, edge: edge)
         case .cutBubble(let afterClip):
             showRestorePopover(afterClip: afterClip, at: p)
         case .emptyLane(let lane, let source):
-            if lane == .zoom {
-                addZoom(atSource: source)
-            } else {
-                // Layout/mask lanes don't add-on-click yet (T-503/T-601); still "empty space".
-                deselect()
-            }
+            addBlock(lane: lane, atSource: source)
         case .none:
             deselect()
         }
@@ -1237,10 +1231,10 @@ final class TimelineView: NSView {
         case .trimClip(let index, let edge, let priorOutput, let beginStart, let beginEnd, let speed):
             updateTrim(index: index, edge: edge, priorOutput: priorOutput, beginSourceStart: beginStart,
                        beginSourceEnd: beginEnd, speed: speed, viewX: p.x, snapDisabled: snapDisabled)
-        case .moveZoom(let id, let grabOffset):
-            updateMoveZoom(id: id, grabOffset: grabOffset, viewX: p.x, snapDisabled: snapDisabled)
-        case .resizeZoom(let id, let edge):
-            updateResizeZoom(id: id, edge: edge, viewX: p.x, snapDisabled: snapDisabled)
+        case .moveBlock(let id, let lane, let grabOffset):
+            updateMoveBlock(id: id, lane: lane, grabOffset: grabOffset, viewX: p.x, snapDisabled: snapDisabled)
+        case .resizeBlock(let id, let lane, let edge):
+            updateResizeBlock(id: id, lane: lane, edge: edge, viewX: p.x, snapDisabled: snapDisabled)
         case nil:
             break
         }
@@ -1250,10 +1244,10 @@ final class TimelineView: NSView {
         switch dragKind {
         case .trimClip:
             model?.commitGesture("Trim")
-        case .moveZoom:
-            model?.commitGesture("Move Zoom")
-        case .resizeZoom:
-            model?.commitGesture("Resize Zoom")
+        case .moveBlock(_, let lane, _):
+            model?.commitGesture("Move \(laneName(lane))")
+        case .resizeBlock(_, let lane, _):
+            model?.commitGesture("Resize \(laneName(lane))")
         case .scrub, nil:
             dragKind = nil
             return
@@ -1275,7 +1269,7 @@ final class TimelineView: NSView {
 
     private func cancelActiveDrag() {
         switch dragKind {
-        case .trimClip, .moveZoom, .resizeZoom:
+        case .trimClip, .moveBlock, .resizeBlock:
             model?.cancelGesture()
         case .scrub, nil:
             dragKind = nil
@@ -1329,25 +1323,44 @@ final class TimelineView: NSView {
         return "\(playheadLabel(duration)) (\u{0394} \(sign)\(playheadLabel(abs(delta))))"
     }
 
-    // MARK: - Zoom blocks (SPEC §7.2 "Zoom blocks")
+    // MARK: - Zoom/layout/mask blocks (SPEC §7.2 "Zoom blocks" + the hit-test table's "Empty zoom/
+    // layout/mask lane" row) — one generic body-move/edge-resize/add-on-click/ghost per lane,
+    // parametrised by `Lane` and dispatched to the matching `Project` op; nothing here is copied
+    // per lane.
 
-    /// `.auto` if a left-click event lies within ±1 s of `s`, else `.manual`.
+    /// `.auto` if a left-click event lies within ±1 s of `s`, else `.manual` (zoom-only: layout/
+    /// mask blocks have no auto/manual distinction).
     private func zoomMode(nearSource s: Double) -> Zoom.Mode {
         (model?.events.clicks().contains { abs($0.t - s) <= 1 } ?? false) ? .auto : .manual
     }
 
-    /// Empty-lane click / `Z`: adds a zoom and selects it. One undo step.
-    private func addZoom(atSource s: Double) {
+    private func laneName(_ lane: Lane) -> String {
+        switch lane {
+        case .clip: return "Clip"
+        case .zoom: return "Zoom"
+        case .layout: return "Layout"
+        case .mask: return "Mask"
+        }
+    }
+
+    /// Empty-lane click / `Z` (zoom only): adds a block appropriate to that lane and selects it.
+    /// One undo step.
+    private func addBlock(lane: Lane, atSource s: Double) {
         guard let model else { return }
         var newID: UUID?
-        model.edit("Add Zoom") { newID = $0.addZoom(atSource: s, mode: zoomMode(nearSource: s)) }
+        switch lane {
+        case .zoom: model.edit("Add Zoom") { newID = $0.addZoom(atSource: s, mode: zoomMode(nearSource: s)) }
+        case .layout: model.edit("Add Layout") { newID = $0.addLayout(atSource: s, kind: .cameraFull) }
+        case .mask: break // T-601: `Project.addMask` + the mask lane's own empty-lane click
+        case .clip: break // clips are never added this way (SPEC's hit-test table only lists zoom/layout/mask)
+        }
         if let newID { selectBlock(newID, addToSelection: false) }
     }
 
-    /// `Z` adds at the playhead (SPEC §7.3).
+    /// `Z` adds a zoom at the playhead (SPEC §7.3).
     private func addZoom(atOutput t: Double) {
         guard let model else { return }
-        addZoom(atSource: model.timeMap.sourceTime(atOutput: t))
+        addBlock(lane: .zoom, atSource: model.timeMap.sourceTime(atOutput: t))
     }
 
     /// `⌘D` duplicates the selected zoom/mask right after itself (SPEC §7.3).
@@ -1358,7 +1371,7 @@ final class TimelineView: NSView {
         if let newID { selectBlock(newID, addToSelection: false) }
     }
 
-    /// "Double-click = select + move playhead to its start."
+    /// "Double-click = select + move playhead to its start" (SPEC §7.2 "Zoom blocks" — zoom-only).
     private func doubleClickZoom(id: UUID) {
         guard let model, let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }),
               let out = model.timeMap.outputTime(atSource: zoom.start) else { return }
@@ -1366,67 +1379,122 @@ final class TimelineView: NSView {
         model.playhead = out
     }
 
-    private func beginMoveZoom(id: UUID, atViewX viewX: CGFloat) {
-        guard let model, let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }) else { return }
+    /// The block's current start, whichever lane it's in.
+    private func blockStart(id: UUID, lane: Lane) -> Double? {
+        guard let model else { return nil }
+        switch lane {
+        case .zoom: return model.project.zooms.first { $0.id == id.uuidString }?.start
+        case .layout: return model.project.layouts.first { $0.id == id.uuidString }?.start
+        case .mask: return model.project.masks.first { $0.id == id.uuidString }?.start
+        case .clip: return nil
+        }
+    }
+
+    private func beginMoveBlock(id: UUID, lane: Lane, atViewX viewX: CGFloat) {
+        guard let model, let start = blockStart(id: id, lane: lane) else { return }
         let mouseSource = model.timeMap.sourceTime(atOutput: geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0))))
         model.beginGesture()
-        dragKind = .moveZoom(id: id, grabOffset: mouseSource - zoom.start)
+        dragKind = .moveBlock(id: id, lane: lane, grabOffset: mouseSource - start)
         selectBlock(id, addToSelection: false)
     }
 
-    /// Zoom blocks live in *source* time but `clips` never changes under this drag, so (unlike a
-    /// clip trim) `model.timeMap` is stable for its whole duration and can convert output→source
+    /// Blocks live in *source* time but `clips` never changes under this drag, so (unlike a clip
+    /// trim) `model.timeMap` is stable for its whole duration and can convert output→source
     /// directly — no fixed-anchor extrapolation needed.
-    private func updateMoveZoom(id: UUID, grabOffset: Double, viewX: CGFloat, snapDisabled: Bool) {
+    private func updateMoveBlock(id: UUID, lane: Lane, grabOffset: Double, viewX: CGFloat, snapDisabled: Bool) {
         guard let model else { return }
         let raw = geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0)))
         let (snapped, didSnap) = snappedOutput(raw, excludingBlock: id, disabled: snapDisabled)
         snapGuideX = didSnap ? x(forOutput: snapped) : nil
-        let mouseSource = model.timeMap.sourceTime(atOutput: snapped)
-        model.update { $0.moveZoom(id, toStart: mouseSource - grabOffset) }
+        let toStart = model.timeMap.sourceTime(atOutput: snapped) - grabOffset
+        model.update { project in
+            switch lane {
+            case .zoom: project.moveZoom(id, toStart: toStart)
+            case .layout: project.moveLayout(id, toStart: toStart)
+            case .mask: project.moveMask(id, toStart: toStart)
+            case .clip: break
+            }
+        }
         needsDisplay = true
     }
 
-    private func beginResizeZoom(id: UUID, edge: RecorderCore.Edge) {
-        guard let model, model.project.zooms.contains(where: { $0.id == id.uuidString }) else { return }
+    private func beginResizeBlock(id: UUID, lane: Lane, edge: RecorderCore.Edge) {
+        guard blockStart(id: id, lane: lane) != nil, let model else { return }
         model.beginGesture()
-        dragKind = .resizeZoom(id: id, edge: edge)
+        dragKind = .resizeBlock(id: id, lane: lane, edge: edge)
         selectBlock(id, addToSelection: false)
     }
 
-    private func updateResizeZoom(id: UUID, edge: RecorderCore.Edge, viewX: CGFloat, snapDisabled: Bool) {
+    private func updateResizeBlock(id: UUID, lane: Lane, edge: RecorderCore.Edge, viewX: CGFloat, snapDisabled: Bool) {
         guard let model else { return }
         let raw = geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0)))
         let (snapped, didSnap) = snappedOutput(raw, excludingBlock: id, disabled: snapDisabled)
         snapGuideX = didSnap ? x(forOutput: snapped) : nil
         let source = model.timeMap.sourceTime(atOutput: snapped) // read before `update`'s exclusive `inout` access to `project`
-        model.update { $0.resizeZoom(id, edge: edge, to: source) }
+        model.update { project in
+            switch lane {
+            case .zoom: project.resizeZoom(id, edge: edge, to: source)
+            case .layout: project.resizeLayout(id, edge: edge, to: source)
+            case .mask: break // T-601: `Project.resizeMask` + the mask lane's own edge-drag
+            case .clip: break
+            }
+        }
         needsDisplay = true
     }
 
-    /// "Empty zoom lane: ghost block under pointer" (SPEC §7.1/§7.2) — the exact placement
-    /// `addZoom` would use, via the non-mutating preview so the two never disagree.
-    private func drawZoomGhost() {
+    /// Non-mutating placement preview for the empty-lane "ghost" (SPEC §7.2), whichever lane the
+    /// hover point is over — the exact placement `addBlock(lane:atSource:)` would use, so the two
+    /// never disagree.
+    private func previewPlacement(lane: Lane, atSource s: Double) -> (start: Double, end: Double)? {
+        switch lane {
+        case .zoom: return model?.project.previewZoomPlacement(atSource: s)
+        case .layout: return model?.project.previewLayoutPlacement(atSource: s)
+        case .mask: return nil // T-601: `Project.previewMaskPlacement`
+        case .clip: return nil
+        }
+    }
+
+    private func ghostFill(_ lane: Lane) -> NSColor {
+        switch lane {
+        case .clip: return Theme.clip
+        case .zoom: return Theme.accent
+        case .layout: return Theme.layout
+        case .mask: return Theme.mask
+        }
+    }
+
+    /// SPEC §7.1's "🔍 + add ← ghost on hover" glyph, per lane.
+    private func ghostLabel(_ lane: Lane) -> String {
+        switch lane {
+        case .clip: return "+ add"
+        case .zoom: return "\u{1F50D} + add"
+        case .layout: return "\u{25C9} + add"
+        case .mask: return "\u{25A6} + add"
+        }
+    }
+
+    /// "Empty zoom/layout/mask lane: ghost block under pointer" (SPEC §7.1/§7.2).
+    private func drawEmptyLaneGhost() {
         guard dragKind == nil, !isSplitMode, let model, let hoverX, let hoverY, hoverX > Self.gutter else { return }
-        let row = laneRow(.zoom)
-        guard hoverY >= row.minY, hoverY <= row.maxY else { return }
+        guard let lane = [Lane.zoom, .layout, .mask].first(where: { laneHeight($0) > 0 && hoverY >= laneRow($0).minY && hoverY <= laneRow($0).maxY }) else { return }
+        let row = laneRow(lane)
         let s = model.timeMap.sourceTime(atOutput: geometry.output(forX: geometryX(NSPoint(x: hoverX, y: 0))))
         guard model.timeMap.outputTime(atSource: s) != nil else { return } // hovering a removed segment: no gap to add into
-        guard let placement = model.project.previewZoomPlacement(atSource: s),
+        guard let placement = previewPlacement(lane: lane, atSource: s),
               let outStart = model.timeMap.outputTime(atSource: placement.start),
               let outEnd = model.timeMap.outputTime(atSource: placement.end) else { return }
         let rect = CGRect(x: x(forOutput: outStart), y: row.minY + 2, width: max(0, x(forOutput: outEnd) - x(forOutput: outStart)), height: row.height - 4)
         guard rect.width > 0.5 else { return }
         let path = NSBezierPath(roundedRect: rect, xRadius: Self.blockRadius, yRadius: Self.blockRadius)
-        Theme.accent.withAlphaComponent(0.4).setFill() // "hatched 40% opacity" (SPEC §7.1)
+        ghostFill(lane).withAlphaComponent(0.4).setFill() // "hatched 40% opacity" (SPEC §7.1)
         path.fill()
         let dashed = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: Self.blockRadius, yRadius: Self.blockRadius)
         dashed.setLineDash([3, 2], count: 2, phase: 0)
-        Theme.accent.setStroke()
+        ghostFill(lane).setStroke()
         dashed.stroke()
 
         guard rect.width > 24 else { return }
-        let label = "\u{1F50D} + add" as NSString // SPEC §7.1: "🔍 + add ← ghost on hover"
+        let label = ghostLabel(lane) as NSString
         let attrs: [NSAttributedString.Key: Any] = [.font: Theme.captionFont, .foregroundColor: Theme.textPrimary.withAlphaComponent(0.8)]
         let size = label.size(withAttributes: attrs)
         label.draw(at: CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attrs)

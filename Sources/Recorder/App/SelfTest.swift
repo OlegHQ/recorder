@@ -520,7 +520,7 @@ enum SelfTest {
         "inspector-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let outPath = args.first else {
-                throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|cursor|camera|audio|animations|keys]")
+                throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|layout|cursor|camera|audio|animations|keys]")
             }
             try await MainActor.run {
                 let fm = FileManager.default
@@ -534,11 +534,13 @@ enum SelfTest {
                 ]
                 let zoom = Zoom(start: 3, end: 7, scale: 2, mode: .manual)
                 project.zooms = [zoom]
+                let layout = Layout(start: 10, end: 15, kind: .cameraFull)
+                project.layouts = [layout]
 
                 let variant = args[safe: 1]
                 var initialTab: InspectorView.Tab = .background
                 switch variant {
-                case "zoom", "clip": break
+                case "zoom", "clip", "layout": break
                 case "cursor": initialTab = .cursor
                 case "camera": initialTab = .camera; project.source.hasCamera = true
                 case "camera-empty": initialTab = .camera
@@ -554,6 +556,7 @@ enum SelfTest {
                 let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
                 if variant == "zoom" { model.selection = [UUID(uuidString: zoom.id)!] }
                 if variant == "clip" { model.selectedClip = 1 }
+                if variant == "layout" { model.selection = [UUID(uuidString: layout.id)!] }
 
                 let height: CGFloat = 760
                 let hosting = NSHostingView(rootView: InspectorView(model: model, initialTab: initialTab))
@@ -755,6 +758,40 @@ enum SelfTest {
             guard try Project.load(from: projectURL).keys.show else {
                 throw Fail(description: "autosave didn't persist the show-keys toggle")
             }
+
+            // --- Layout panel (T-503): the exact closures `LayoutPanel`'s kind picker/Remove call
+            // — `Project.addLayout`/a plain `model.edit` field write/`Project.removeBlock` — each
+            // one undo step, invariants hold throughout. ---
+            let beforeLayoutAdd = await model.project
+            var layoutID: UUID!
+            await model.edit("Add Layout") { layoutID = $0.addLayout(atSource: 12, kind: .cameraFull) }
+            let afterLayoutAdd = await model.project
+            guard afterLayoutAdd.layouts.count == 1, afterLayoutAdd.layouts[0].kind == .cameraFull else {
+                throw Fail(description: "addLayout didn't add a cameraFull layout: \(afterLayoutAdd.layouts)")
+            }
+            if let err = afterLayoutAdd.checkInvariants() { throw Fail(description: "invariants broke after addLayout: \(err)") }
+
+            await model.edit("Layout") { project in
+                guard let i = project.layouts.firstIndex(where: { $0.id == layoutID.uuidString }) else { return }
+                project.layouts[i].kind = .hidden
+            }
+            let afterLayoutKind = await model.project
+            guard afterLayoutKind.layouts[0].kind == .hidden else { throw Fail(description: "layout kind change didn't apply") }
+
+            await model.edit("Remove layout") { $0.removeBlock(layoutID) }
+            let afterLayoutRemove = await model.project
+            guard afterLayoutRemove.layouts.isEmpty else { throw Fail(description: "layout remove didn't delete it") }
+            if let err = afterLayoutRemove.checkInvariants() { throw Fail(description: "invariants broke after layout remove: \(err)") }
+
+            // Exactly 3 undo steps (add, kind, remove).
+            await model.undo()
+            guard await model.project == afterLayoutKind else { throw Fail(description: "undo 1 should revert only the layout remove") }
+            await model.undo()
+            guard await model.project == afterLayoutAdd else { throw Fail(description: "undo 2 should revert only the layout kind change") }
+            await model.undo()
+            guard await model.project == beforeLayoutAdd else { throw Fail(description: "undo 3 should restore the pre-add project") }
+            await model.redo(); await model.redo(); await model.redo()
+            guard await model.project == afterLayoutRemove else { throw Fail(description: "redo didn't replay all 3 layout steps") }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
         // front — `EditorWindowController.makeOffscreen`) for a fixture package and caches its
@@ -1703,6 +1740,11 @@ private func runTimelineOpsSelfTest() async throws {
         defer { cleanup() }
         try runAccessibilitySelfTest(model: model, view: view)
     }
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture(hasCamera: true)
+        defer { cleanup() }
+        try runLayoutBlockSelfTest(model: model, view: view, px: px, py: py)
+    }
     try runFitOnFirstLayoutSelfTest()
 }
 
@@ -2137,5 +2179,89 @@ private func runZoomBlockSelfTest(model: EditorModel, view: TimelineView, px: (D
     view.needsDisplay = true
     guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
         throw TimelineOpsFail(description: "no bitmap rep with the zoom-lane ghost hovered")
+    }
+}
+
+/// T-503 "Layout track": add (empty-lane click), body drag = move, edge drag = resize, `Esc`
+/// mid-drag (AC-TL-6) and Remove — through the exact same generic gesture code
+/// (`beginMoveBlock`/`updateMoveBlock`/`beginResizeBlock`/`updateResizeBlock`/`addBlock(lane:atSource:)`)
+/// `runZoomBlockSelfTest` above already exercises for the zoom lane, just parametrised to `.layout`.
+@MainActor
+private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
+    // With a camera, lane order is ruler(22) + clip(44) + zoom(32) + layout(28) = 98...126.
+    let layoutLaneY = py(112)
+
+    // Empty-lane click adds a `cameraFull` layout block starting at the click's source time
+    // (the gap [0, 20) is wide open, so `addLayout`'s default 3 s block starts exactly at 10:
+    // [10, 13)), selects it, one undo step.
+    let undoBeforeAdd = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(10), y: layoutLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(10), y: layoutLaneY)))
+    guard model.project.layouts.count == 1, model.project.layouts[0].kind == .cameraFull else {
+        throw TimelineOpsFail(description: "empty-lane click didn't add a cameraFull layout: \(model.project.layouts)")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after addLayout") }
+    guard model.undoStepCount == undoBeforeAdd + 1 else { throw TimelineOpsFail(description: "addLayout should push exactly one undo step") }
+    guard let layoutID = UUID(uuidString: model.project.layouts[0].id), model.selection == [layoutID] else {
+        throw TimelineOpsFail(description: "the new layout isn't selected")
+    }
+    let layout = model.project.layouts[0] // [10, 13)
+
+    // Body drag = move: grab mid-block, drag so its start lands exactly at source 1.
+    let grabX = px((layout.start + layout.end) / 2)
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: grabX, y: layoutLaneY)))
+    let undoBeforeMove = model.undoStepCount
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(1 + (layout.end - layout.start) / 2), y: layoutLaneY)))
+    guard let movedLive = model.project.layouts.first(where: { $0.id == layout.id }), abs(movedLive.start - 1) < 0.01 else {
+        throw TimelineOpsFail(description: "move didn't track the mouse: \(String(describing: model.project.layouts.first { $0.id == layout.id }))")
+    }
+    guard model.undoStepCount == undoBeforeMove else { throw TimelineOpsFail(description: "an in-progress move shouldn't push an undo step yet") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(1 + (layout.end - layout.start) / 2), y: layoutLaneY)))
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after move") }
+    guard model.undoStepCount == undoBeforeMove + 1 else { throw TimelineOpsFail(description: "move should push exactly one undo step") }
+
+    // Esc mid-drag (AC-TL-6): restores the pre-drag project, pushes no undo step.
+    let moved = model.project.layouts.first { $0.id == layout.id }!
+    let beforeEscDrag = model.project
+    let undoBeforeEscDrag = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px((moved.start + moved.end) / 2), y: layoutLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5), y: layoutLaneY)))
+    guard model.project != beforeEscDrag else { throw TimelineOpsFail(description: "mid-drag move didn't apply live") }
+    view.cancelOperation(nil)
+    guard model.project == beforeEscDrag else { throw TimelineOpsFail(description: "Esc mid-drag didn't restore the pre-drag project") }
+    guard model.undoStepCount == undoBeforeEscDrag else { throw TimelineOpsFail(description: "a cancelled move pushed an undo step") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5), y: layoutLaneY))) // the real mouse-up AppKit still delivers
+
+    // Edge drag = resize.
+    let beforeResize = model.project.layouts.first { $0.id == layout.id }!
+    let undoBeforeResize = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(beforeResize.end) - 3, y: layoutLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(beforeResize.start + 4), y: layoutLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(beforeResize.start + 4), y: layoutLaneY)))
+    guard let resized = model.project.layouts.first(where: { $0.id == layout.id }), abs(resized.end - (beforeResize.start + 4)) < 0.01 else {
+        throw TimelineOpsFail(description: "trailing-edge drag didn't resize: \(String(describing: model.project.layouts.first { $0.id == layout.id }))")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after resize") }
+    guard model.undoStepCount == undoBeforeResize + 1 else { throw TimelineOpsFail(description: "resize should push exactly one undo step") }
+
+    // Remove (the LayoutPanel's own Remove button — `Project.removeBlock`; SPEC §7.2's "Context
+    // menus" list has no entry for the layout lane, so there's no right-click item to exercise).
+    let undoBeforeRemove = model.undoStepCount
+    model.edit("Remove layout") { $0.removeBlock(layoutID) }
+    guard model.project.layouts.isEmpty else { throw TimelineOpsFail(description: "removeBlock didn't remove the layout") }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after remove") }
+    guard model.undoStepCount == undoBeforeRemove + 1 else { throw TimelineOpsFail(description: "remove should push exactly one undo step") }
+
+    // A `.hidden`-kind block (now drawn too, not just `cameraFull`) + the ghost + accessibility
+    // paths must not crash, and the accessibility tree must include it.
+    model.edit("setup hidden") { $0.layouts = [Layout(start: 0, end: 3, kind: .hidden)] }
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: px(10), y: layoutLaneY)))
+    view.needsDisplay = true
+    guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
+        throw TimelineOpsFail(description: "no bitmap rep with a hidden-kind layout block + ghost hovered")
+    }
+    guard let children = view.accessibilityChildren() as? [NSAccessibilityElement],
+          children.contains(where: { $0.accessibilityLabel() == "Layout, Hidden, 0.0 to 3.0 seconds" }) else {
+        throw TimelineOpsFail(description: "no Layout accessibility element for the hidden-kind block")
     }
 }

@@ -312,14 +312,33 @@ public extension Project {
     /// overlaps its neighbour.
     mutating func resizeZoom(_ id: UUID, edge: Edge, to s: Double) { resizeBlock(id, in: \.zooms, edge: edge, to: s) }
 
-    // MARK: - Layout (T-503 adds add/resize; `moveLayout` lands with T-417 for the accessibility
-    // nudge, which needs a "move" path for every block kind AC-TL-8 covers).
+    // MARK: - Layout (`moveLayout` landed with T-417 for the accessibility nudge)
+
+    /// Adds a layout of `length` seconds (`Layout.Kind` `kind`) into the free gap in `layouts`
+    /// that contains source time `s`. Returns its id, or `nil` if that gap is shorter than 0.5 s.
+    @discardableResult
+    mutating func addLayout(atSource s: Double, length: Double = 3, kind: Layout.Kind) -> UUID? {
+        addBlock(atSource: s, length: length, in: \.layouts) { id, start, end in Layout(id: id, start: start, end: end, kind: kind) }
+    }
 
     /// Moves layout `id` so it starts at source time `s`, clamped against its neighbours and
     /// `[0, source.duration]`.
     mutating func moveLayout(_ id: UUID, toStart s: Double) { moveBlock(id, in: \.layouts, toStart: s) }
 
-    // MARK: - Mask (T-417 adds `moveMask` for the same reason as `moveLayout`; T-601 adds add/resize.)
+    /// Drags layout `id`'s `edge` to source time `s`, clamped so it stays >= 0.5 s and never
+    /// overlaps its neighbour.
+    mutating func resizeLayout(_ id: UUID, edge: Edge, to s: Double) { resizeBlock(id, in: \.layouts, edge: edge, to: s) }
+
+    /// Non-mutating preview of where `addLayout(atSource:length:kind:)` would place a new block —
+    /// for the empty layout-lane "ghost" (SPEC §7.2). `nil` exactly when `addLayout` would also fail.
+    func previewLayoutPlacement(atSource s: Double, length: Double = 3) -> (start: Double, end: Double)? {
+        var trial = self
+        guard let id = trial.addLayout(atSource: s, length: length, kind: .cameraFull),
+              let layout = trial.layouts.first(where: { $0.id == id.uuidString }) else { return nil }
+        return (layout.start, layout.end)
+    }
+
+    // MARK: - Mask (`moveMask` landed with T-417 for the accessibility nudge; T-601 adds add/resize.)
 
     /// Moves mask `id` so it starts at source time `s`, clamped against its neighbours and
     /// `[0, source.duration]`.
