@@ -706,6 +706,21 @@ enum SelfTest {
             guard try Project.load(from: projectURL).audio.micVolume == afterMicVolume.audio.micVolume else {
                 throw Fail(description: "autosave didn't persist the microphone volume edit")
             }
+
+            // --- Animations tab: Screen (zoom spring preset) == one undo step, autosaved. ---
+            let beforeScreen = await model.project
+            await model.edit("Zoom spring") { $0.animation.screen = .smooth }
+            let afterScreen = await model.project
+            guard afterScreen.animation.screen == .smooth, beforeScreen.animation.screen != .smooth else {
+                throw Fail(description: "screen preset edit didn't change animation.screen")
+            }
+            await model.undo()
+            guard await model.project == beforeScreen else { throw Fail(description: "screen preset should be one undo step") }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).animation.screen == .smooth else {
+                throw Fail(description: "autosave didn't persist the screen preset edit")
+            }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
         // front — `EditorWindowController.makeOffscreen`) for a fixture package and caches its
