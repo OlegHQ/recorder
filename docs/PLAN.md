@@ -220,7 +220,8 @@ Update the "Done" column whenever you tick a task.
   - HUMAN: AC-AREA-1 vs `reference/…13.02.32.png`.
   - WAITING ON HUMAN: run `make run` (or `make install`), select Area mode from the toolbar, and confirm against `reference/Screenshot 2026-09-18 at 13.02.32.png` (AC-AREA-1) — drag-to-create, move, resize by all 8 handles, ⇧ (aspect lock) and ⌥ (resize from centre), arrow-key nudge (1 px / 10 px with ⇧), the Size/Position fields staying in sync both ways, the Start button below the toolbar, and that the last rect is remembered per display across reopen. This machine has no Screen Recording/Accessibility TCC grants for this agent, so the overlay couldn't be visually driven here.
 
-- [ ] **T-109 EventRecorder** · SPEC §4.8
+- [~] **T-109 EventRecorder** · SPEC §4.8
+  - WAITING ON HUMAN: built + merged (lane-capture); selftest fails cleanly from an agent shell (TCC -3801). run `make app && build/Recorder.app/Contents/MacOS/Recorder --selftest events 3` from your own terminal while wiggling the mouse and typing a few letters → `SELFTEST events OK`.
   - File: `Sources/Recorder/Recording/EventRecorder.swift`
   ```swift
   final class EventRecorder {
@@ -235,7 +236,8 @@ Update the "Done" column whenever you tick a task.
     Cursor: 60 Hz `DispatchSourceTimer` reads `NSCursor.currentSystem`; hash `tiffRepresentation` (SHA256 via CryptoKit, first 8 hex); new hash → write largest rep as `cursors/<id>.png` + `<id>.json` `{hotX,hotY,scale}`; emit `.cursor`. Coalesce `.move` closer than 1/240 s.
   - Selftest `events 3`: records 3 s into a temp dir, prints counts per kind; OK if ≥1 cursor image exists. HUMAN: wiggle the mouse while it runs.
 
-- [ ] **T-110 CaptureSession (screen + audio writers)** · SPEC §4.8
+- [~] **T-110 CaptureSession (screen + audio writers)** · SPEC §4.8
+  - WAITING ON HUMAN: built + merged (lane-capture); selftest fails cleanly from an agent shell (TCC -3801). run `build/Recorder.app/Contents/MacOS/Recorder --selftest record display 3` from your own terminal → `SELFTEST record OK`.
   - File: `Sources/Recorder/Recording/CaptureSession.swift`
   ```swift
   final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
@@ -618,3 +620,5 @@ T-303 · 2026-09-18 · verified: `--selftest model` OK on master (undo/redo equa
 T-403 · 2026-09-18 · verified: lane-paths merged, `make test` 29/29 on master · deviations: the plan's 0.01 step-vs-closed-form bound is unreachable for semi-implicit Euler at dt = 1/240 (error ∝ (ω·dt)²); measured peaks focused 0.015, smooth 0.010, cursorSmooth 0.022, cursorMedium 0.038, cursorRapid 0.071 — test asserts per-preset bounds over the whole transient + < 1e-3 settled
 T-411 · 2026-09-18 · verified: 4 listed tests green · deviations: shake removal/loop/rotation are `// T-604` comments per plan; 0.5 px tolerance assumes a 1920 px wide source
 T-412 · 2026-09-18 · verified: 4 listed tests green · deviations: test renamed `cameraSampleIsOrderIndependent` (free-function test names share one namespace with T-411's `sampleIsOrderIndependent`)
+T-109 · 2026-09-18 · verified: lane-capture merged, `make app` OK; `--selftest events 3` exits 1 cleanly without TCC (agent shell) · deviations: none; HUMAN run pending
+T-110 · 2026-09-18 · verified: `make app` OK; `--selftest record display 3` exits 1 cleanly without TCC · deviations: `finish()` returns `Source` (the type is top-level in Core, not nested in `Project`); HUMAN run pending
