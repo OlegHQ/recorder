@@ -29,6 +29,10 @@ final class PreviewView: MTKView {
     private var pendingSeekTime: Double?
     private var lastClips: [Clip]
 
+    /// Bounds the "no frame yet" redraw retry below (SPEC §6.2: "paused always shows a frame").
+    private var pendingFrameRetries = 0
+    private static let maxFrameRetries = 30
+
     init(model: EditorModel) {
         self.model = model
         self.lastClips = model.project.clips
@@ -193,6 +197,7 @@ final class PreviewView: MTKView {
         item.add(output)
         screenOutput = output
         lastScreenPixelBuffer = nil
+        pendingFrameRetries = 0
         // ponytail: camera.mov's video output lands with the camera compositing pass (T-502/M4) —
         // nothing consumes FrameState.camera yet (Compositor doesn't draw a camera quad), and
         // AVPlayerItemVideoOutput has no per-track selection without a custom AVVideoComposition.
@@ -237,12 +242,32 @@ final class PreviewView: MTKView {
         let aspect = unit.width / unit.height
         let viewportRect = screenRect(output: drawableSize, cropAspect: aspect, padding: 0)
 
-        let screenTexture = currentScreenPixelBuffer().flatMap { textureCache.texture(from: $0) }
+        let pixelBuffer = currentScreenPixelBuffer()
+        if pixelBuffer != nil {
+            pendingFrameRetries = 0
+        } else if !model.isPlaying {
+            // `copyPixelBuffer(forItemTime:)` can still be nil for a beat right after a seek
+            // completes — the item's decode pipeline hasn't caught up yet even though the seek
+            // itself is done (T-306: "paused always shows a frame"). Nothing else re-triggers a
+            // draw once we're paused and idle, so without this the screen quad stays missing
+            // forever instead of just for the one dropped frame. Bounded so a package that really
+            // has no screen video (see `rebuildComposition`'s catch) doesn't retry forever.
+            scheduleFrameRetryIfNeeded()
+        }
+        let screenTexture = pixelBuffer.flatMap { textureCache.texture(from: $0) }
         let state = makeFrameState(model: model, outputTime: model.playhead, screen: screenTexture, camera: nil, size: viewportRect.size)
 
         compositor.render(state, to: drawable.texture, commandBuffer: commandBuffer, viewport: viewportRect)
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    private func scheduleFrameRetryIfNeeded() {
+        guard screenOutput != nil, pendingFrameRetries < Self.maxFrameRetries else { return }
+        pendingFrameRetries += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { [weak self] in
+            self?.needsDisplay = true
+        }
     }
 
     /// `copyPixelBuffer(forItemTime:)`, keeping the last buffer when a new one isn't ready (SPEC
