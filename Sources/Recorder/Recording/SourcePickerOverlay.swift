@@ -36,11 +36,9 @@ enum SourcePickerOverlay {
         AreaSelectionOverlay.close()
     }
 
-    /// `Start recording` hook (button or `Return`). T-111 will point this at
-    /// `RecordingController.shared.begin(target:)`; until then it just closes the pickers and logs.
+    /// `Start recording` hook (button or `Return`).
     static func startRecording(target: CaptureTarget) {
-        close()
-        NSLog("Recorder: start recording target=\(target)")
+        Task { @MainActor in RecordingController.shared.begin(target: target) }
     }
 
     // ponytail: the window list is fetched once when the picker opens, not re-polled while it's open

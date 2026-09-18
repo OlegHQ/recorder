@@ -6,6 +6,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var statusItem: NSStatusItem!
+    private var statusTimer: Timer?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -13,6 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = Self.buildStatusItem()
         wireNewRecording()
         wireSettings()
+        wireFinishRecording()
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateStatusItem() }
+        }
 
         if !Permissions.allGranted {
             showOnboarding()
@@ -52,6 +57,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindow.show()
     }
 
+    @MainActor @objc private func finishRecording() {
+        RecordingController.shared.finish()
+    }
+
+    /// M1 stop UI (SPEC §4.7 "Menu-bar item"): status item title/icon and the status menu's "Finish
+    /// Recording" item track `RecordingController.shared.state`, polled once a second — cheaper than
+    /// making `RecordingController` `@Observable` just for this.
+    @MainActor private func updateStatusItem() {
+        let rc = RecordingController.shared
+        let recording = rc.state == .recording || rc.state == .paused
+        if recording {
+            let s = Int(rc.elapsed)
+            statusItem.button?.title = String(format: " %02d:%02d", s / 60, s % 60)
+            statusItem.button?.contentTintColor = .systemRed
+        } else {
+            statusItem.button?.title = ""
+            statusItem.button?.contentTintColor = nil
+        }
+        statusItem.menu?.item(withTitle: "Finish Recording")?.isHidden = !recording
+    }
+
     /// Wires the "New Recording" items built by `buildMainMenu`/`buildStatusItem` to `ToolbarController` (T-104).
     private func wireNewRecording() {
         for item in [NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Recording"),
@@ -66,6 +92,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSApp.mainMenu?.item(withTitle: "Recorder")?.submenu?.item(withTitle: "Settings…")
         item?.target = self
         item?.action = #selector(openSettings)
+    }
+
+    /// Wires the status menu's "Finish Recording" item (SPEC §4.7 M1 stop UI), hidden except while
+    /// recording (`updateStatusItem`).
+    private func wireFinishRecording() {
+        let item = statusItem.menu?.item(withTitle: "Finish Recording")
+        item?.target = self
+        item?.action = #selector(finishRecording)
+        item?.isHidden = true
     }
 
     // MARK: - Main menu (SPEC §8, titles/order/key equivalents normative)
@@ -158,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(item("New Recording"))
         menu.addItem(item("Projects"))
+        menu.addItem(item("Finish Recording")) // hidden except while recording (SPEC §4.7); wired/shown in `wireFinishRecording`/`updateStatusItem`
         menu.addItem(.separator())
         menu.addItem(item("Quit", action: #selector(NSApplication.terminate(_:))))
         si.menu = menu
