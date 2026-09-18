@@ -41,7 +41,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 
 | Milestone | Tasks | Done |
 |---|---|---|
-| M0 Foundations | T-001…T-006 | 1/6 |
+| M0 Foundations | T-001…T-006 | 2/6 |
 | M1 Record | T-101…T-114 | 0/14 |
 | M2 Record+ | T-201…T-208 | 0/8 |
 | M3 Editor shell | T-301…T-313 | 0/13 |
@@ -79,7 +79,7 @@ Update the "Done" column whenever you tick a task.
   - Do: `main.swift` = parse `--selftest` (T-004) else run `NSApplication` with `AppDelegate`. AppDelegate: `NSApp.appearance = NSAppearance(named: .darkAqua)`; build the main menu in code exactly as SPEC §8 (items may have `action: nil` for now — they get wired by later tasks); `applicationShouldTerminateAfterLastWindowClosed → false`; create `NSStatusItem` with menu `New Recording / Projects / Quit`.
   - Verify: `make run`. HUMAN: menu bar shows Recorder/File/Edit/Record/Export/View/Window; status item present; closing windows doesn't quit.
 
-- [ ] **T-004 Selftest harness**
+- [x] **T-004 Selftest harness**
   - File: `Sources/Recorder/App/SelfTest.swift`
   ```swift
   enum SelfTest {
@@ -581,4 +581,5 @@ Append one line per completed task: `T-xxx · YYYY-MM-DD · verified: <what> · 
 
 T-002 · 2026-09-18 · verified: `make build` succeeds with `Sources/Recorder/App/Theme.swift` added (enum `Theme`, `NSColor` tokens + `Color` accessors, `Radius`, body/caption/title fonts, `timecodeFont`, `NSColor(hex:)`) · deviations: none
 T-003 · 2026-09-18 · verified: `make build` and `make app SIGN_ID=-` succeed; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s (no crash), killed cleanly · deviations: "Record" menu's spec shorthand "Start/Finish" rendered as static title "Start/Finish" (toggling to real state comes with T-104/T-111); "View" tab items titled "1"–"6" (spec §8 says only "tabs 1–6", not yet named — inspector tab names arrive with T-308+); About/Quit/Close/Window-menu Minimize/Zoom/Bring-All-to-Front wired to standard AppKit responder-chain selectors (generic, not app logic) so the app is actually usable/quittable meanwhile; visual menu/status-item check is HUMAN (marked `[~]`).
+T-004 · 2026-09-18 · verified: `make app SIGN_ID=-` builds; `build/Recorder.app/Contents/MacOS/Recorder --selftest metal` prints `SELFTEST metal OK` and exits 0; `--selftest nope` prints reason and exits 1; `make test` still passes (1 test) · deviations: none
 

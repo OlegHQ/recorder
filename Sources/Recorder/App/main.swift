@@ -1,7 +1,8 @@
 import AppKit
 
-// Entry point. `--selftest <name>` headless checks are added by T-004 (SelfTest.runIfRequested()) —
-// until then this always runs the app.
+// Entry point. `--selftest <name>` runs a headless check instead of the GUI (see SelfTest.swift).
+SelfTest.runIfRequested()
+
 let delegate = AppDelegate()
 NSApplication.shared.delegate = delegate
 NSApplication.shared.setActivationPolicy(.regular)
