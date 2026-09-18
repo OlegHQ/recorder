@@ -83,7 +83,8 @@ import RecorderCore
     }
 
     /// Stop writers → write `events.json` (inside `CaptureSession.finish`) → build & save `project.json`
-    /// → reveal the package. Editor hand-off: see the marked call site below.
+    /// → open the editor (SPEC §4.7 "Finish → … → open editor", AC-REC-4). Editor hand-off: see the
+    /// marked call site below.
     func finish() {
         guard state == .recording || state == .paused else { return }
         state = .finishing
@@ -121,9 +122,7 @@ import RecorderCore
         await writeThumbnail(packageURL: packageURL)
 
         // MARK: Editor hand-off call site
-        // The editor window lands in M3 (another lane). Once `EditorWindowController` exists, replace
-        // this with `EditorWindowController.open(package: packageURL)`.
-        NSWorkspace.shared.activateFileViewerSelecting([packageURL])
+        EditorWindowController.open(package: packageURL)
     }
 
     func cancel() {

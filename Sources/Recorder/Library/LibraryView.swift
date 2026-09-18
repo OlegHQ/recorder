@@ -172,12 +172,7 @@ enum Library {
 
     /// Opens a `.recorder` package. This is the ONLY place that decides what "open" means; wire every
     /// open path (this file, `AppDelegate`) through it.
-    ///
-    /// ponytail: EditorWindowController hasn't landed yet (parallel lane) — for now this just reveals
-    /// the package in Finder.
-    // TODO(coordinator): replace the line below with `EditorWindowController.open(package: package)`
-    // once Editor/EditorWindowController.swift exists (it also owns "already-open → focus its window").
     static func open(_ package: URL) {
-        NSWorkspace.shared.activateFileViewerSelecting([package])
+        EditorWindowController.open(package: package)
     }
 }

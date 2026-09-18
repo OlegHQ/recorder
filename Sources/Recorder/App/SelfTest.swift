@@ -647,6 +647,40 @@ enum SelfTest {
                 throw Fail(description: "autosave didn't persist cursor edits: \(onDisk.cursor)")
             }
         },
+        // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
+        // front — `EditorWindowController.makeOffscreen`) for a fixture package and caches its
+        // display to a PNG, for eyeballing against SPEC §6.1's mockup layout. Captures the window's
+        // frame view (contentView's superview), not just contentView, so the titlebar row itself
+        // (traffic lights) is included.
+        // ponytail: two known gaps in an offscreen, never-ordered-front capture, both acceptable for
+        // a static layout check, not a pixel comparison: (1) the preview's MTKView needs a live Metal
+        // draw call to have pixels, which `cacheDisplay` never triggers, so that region comes out
+        // blank; (2) `NSTitlebarAccessoryViewController`'s view doesn't get sized by AppKit until its
+        // window has been shown at least once, so the top bar (‹ Projects · title · Auto ▾ · Crop ·
+        // Export) is present in the view tree but 0-width here — only the traffic lights show.
+        "editor-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png>") }
+            let packageURL = URL(fileURLWithPath: args[0])
+            let outURL = URL(fileURLWithPath: args[1])
+            try await MainActor.run {
+                guard let window = EditorWindowController.makeOffscreen(package: packageURL) else {
+                    throw Fail(description: "couldn't load project.json at \(packageURL.path)")
+                }
+                let capture = window.contentView?.superview ?? window.contentView
+                guard let capture else { throw Fail(description: "no capturable view") }
+                capture.layoutSubtreeIfNeeded()
+                guard let rep = capture.bitmapImageRepForCachingDisplay(in: capture.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                capture.cacheDisplay(in: capture.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else {
+                    throw Fail(description: "png encode failed")
+                }
+                try png.write(to: outURL)
+                print("wrote \(outURL.path)")
+            }
+        },
         "recover": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default

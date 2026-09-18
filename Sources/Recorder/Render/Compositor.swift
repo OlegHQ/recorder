@@ -70,13 +70,10 @@ final class Compositor {
     }
 
     /// Aspect: `auto` = the cropped source's own aspect; otherwise the picked ratio. Long edge in
-    /// pixels; rounded to even dimensions (video encoder friendliness).
+    /// pixels; rounded to even dimensions (video encoder friendliness). T-309: delegates to the Core
+    /// function so preview and export share the exact same math.
     func outputSize(for project: Project, longEdge: Int) -> CGSize {
-        let ratio = aspectRatio(for: project)
-        let long = Double(max(longEdge, 2))
-        let raw = ratio >= 1 ? CGSize(width: long, height: long / ratio) : CGSize(width: long * ratio, height: long)
-        func even(_ v: CGFloat) -> CGFloat { (v / 2).rounded() * 2 }
-        return CGSize(width: even(raw.width), height: even(raw.height))
+        RecorderCore.outputSize(aspect: project.output.aspect, croppedSource: CGSize(width: Double(project.source.pixelWidth) * project.crop.w, height: Double(project.source.pixelHeight) * project.crop.h), longEdge: longEdge)
     }
 
     /// `viewport`, when given (pixel rect, top-left origin — matches `NSView`/`screenRect`
