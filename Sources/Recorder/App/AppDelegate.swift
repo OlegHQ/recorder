@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.updateStatusItem() }
         }
 
+        // AC-REC-3: recover any package left with a `screen.mov` but no `project.json` by a prior crash.
+        Task { await RecordingRecovery.recoverOrphans(in: RecordingSettings.shared.projectsFolder) }
+
         if !Permissions.allGranted {
             showOnboarding()
         } else {
