@@ -1,6 +1,10 @@
+import CoreMedia
 import Darwin
 import Dispatch
+import Foundation
 import Metal
+import RecorderCore
+import ScreenCaptureKit
 
 /// Headless app checks, run instead of the GUI when launched with `--selftest <name> [args]`.
 /// Cases are registered by later tasks: `SelfTest.cases["name"] = { args in … throws }`.
@@ -12,6 +16,26 @@ enum SelfTest {
         },
         "permissions": { _ in
             print("screen=\(Permissions.screen) accessibility=\(Permissions.accessibility)")
+        },
+        "events": { args in
+            let seconds = args.first.flatMap(Double.init) ?? 3
+            guard let display = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false).displays.first else {
+                throw NSError(domain: "SelfTest.events", code: 1, userInfo: [NSLocalizedDescriptionKey: "no display found (Screen Recording permission likely not granted to this terminal)"])
+            }
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-selftest-events-\(UUID().uuidString)")
+            let cursorsDir = dir.appendingPathComponent("cursors")
+            let recorder = EventRecorder(target: .display(display), cursorsDir: cursorsDir)
+            recorder.start(t0HostTime: CMClockGetTime(CMClockGetHostTimeClock()))
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            let log = recorder.stop()
+            var counts: [String: Int] = [:]
+            for e in log.events { counts[e.k.rawValue, default: 0] += 1 }
+            print("SELFTEST events counts=\(counts)")
+            let cursorFiles = (try? FileManager.default.contentsOfDirectory(atPath: cursorsDir.path)) ?? []
+            guard cursorFiles.contains(where: { $0.hasSuffix(".png") }) else {
+                throw NSError(domain: "SelfTest.events", code: 2, userInfo: [NSLocalizedDescriptionKey: "no cursor image written (need at least one)"])
+            }
+            try? FileManager.default.removeItem(at: dir)
         },
     ]
 
