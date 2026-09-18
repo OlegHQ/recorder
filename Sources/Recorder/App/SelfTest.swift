@@ -500,7 +500,9 @@ enum SelfTest {
         // in place of the tabs) or "cursor" (opens the Cursor tab).
         "inspector-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard let outPath = args.first else { throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|cursor]") }
+            guard let outPath = args.first else {
+                throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|cursor|camera|audio|animations|keys]")
+            }
             try await MainActor.run {
                 let fm = FileManager.default
                 let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-png-\(UUID().uuidString)")
@@ -519,6 +521,11 @@ enum SelfTest {
                 switch variant {
                 case "zoom", "clip": break
                 case "cursor": initialTab = .cursor
+                case "camera": initialTab = .camera; project.source.hasCamera = true
+                case "camera-empty": initialTab = .camera
+                case "audio": initialTab = .audio
+                case "animations": initialTab = .animations
+                case "keys": initialTab = .keys
                 default:
                     if let kind = variant.flatMap(Background.Kind.init(rawValue:)) { project.background.kind = kind }
                 }
@@ -660,6 +667,21 @@ enum SelfTest {
             try await Task.sleep(nanoseconds: 700_000_000)
             guard try Project.load(from: projectURL).cursor.loop else {
                 throw Fail(description: "autosave didn't persist the loop toggle")
+            }
+
+            // --- Camera tab (T-502): Position (corner) picker == one undo step, autosaved. ---
+            let beforeCorner = await model.project
+            await model.edit("Camera position") { $0.camera.corner = .topLeft }
+            let afterCorner = await model.project
+            guard afterCorner.camera.corner == .topLeft, beforeCorner.camera.corner != .topLeft else {
+                throw Fail(description: "camera position edit didn't change camera.corner")
+            }
+            await model.undo()
+            guard await model.project == beforeCorner else { throw Fail(description: "camera position should be one undo step") }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).camera.corner == .topLeft else {
+                throw Fail(description: "autosave didn't persist the camera position edit")
             }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered

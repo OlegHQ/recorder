@@ -24,7 +24,8 @@ struct LabeledSlider: View {
             Text(title)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.textSecondaryColor)
-                .frame(width: 60, alignment: .leading)
+                .lineLimit(1)
+                .frame(width: 72, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture { resetIfOption() }
 

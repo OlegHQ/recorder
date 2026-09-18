@@ -3,8 +3,8 @@ import RecorderCore
 
 /// SPEC §6.6: the 300 pt-wide inspector. Hosted by the editor window as
 /// `NSHostingView(rootView: InspectorView(model: model))`. Six SF-Symbol tabs (keys `1`–`6`);
-/// Background (T-308) and Cursor (T-414, basic) have real controls — Camera/Audio/Animations/Keys
-/// are placeholders until their own tasks.
+/// Background (T-308), Cursor (T-414/T-604) and Camera (T-502) have real controls —
+/// Audio/Animations/Keys are placeholders until their own tasks.
 /// SPEC §6.6 "selection in timeline ⇒ the selection's panel replaces the tabs" (AC-INS-3): a
 /// selected clip or zoom swaps the tab bar out for `ClipPanel`/`ZoomPanel`; layout/mask selection
 /// has no panel yet (T-503/T-601), so it falls back to the tabs. `‹ Back` (or `Esc`, handled by
@@ -117,6 +117,7 @@ struct InspectorView: View {
             switch tab {
             case .background: BackgroundTab(model: model)
             case .cursor: CursorTab(model: model)
+            case .camera: CameraTab(model: model)
             default: Text("Coming in M4/M5")
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.textSecondaryColor)
