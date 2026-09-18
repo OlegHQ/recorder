@@ -37,3 +37,25 @@ public func outputSize(aspect: Output.Aspect, croppedSource: CGSize, longEdge: I
     func evenRound(_ v: Double) -> Double { 2 * (v / 2).rounded() }
     return CGSize(width: evenRound(w), height: evenRound(h))
 }
+
+/// SPEC §7.1 layout lane, §6.6 Camera/layout: the active `Project.Layout` block at source time `t`
+/// and its 0…1 blend amount, cross-fading over `fade` seconds at each block edge (gaps between
+/// blocks = the default layout, i.e. `nil`/`0`). `Spring.focused.value(at:)` shapes the ramp,
+/// normalised over the fade window so it lands exactly on 0 at the edge and 1 once `fade` seconds
+/// in. For blocks shorter than `2 · fade` the in/out ramps overlap (`min`), so the amount never
+/// reaches 1 but stays continuous and symmetric. Pure lookup: the result doesn't depend on
+/// `layouts`' array order.
+public func layoutMix(layouts: [Layout], atSource t: Double, fade: Double = 0.3) -> (kind: Layout.Kind?, amount: Double) {
+    guard let active = layouts.first(where: { t >= $0.start && t <= $0.end }) else { return (nil, 0) }
+    let rampIn = layoutFadeRamp(t - active.start, fade: fade)
+    let rampOut = layoutFadeRamp(active.end - t, fade: fade)
+    return (active.kind, min(rampIn, rampOut))
+}
+
+/// 0 at `elapsed == 0`, rising through `Spring.focused`'s shape, 1 once `elapsed >= fade`.
+private func layoutFadeRamp(_ elapsed: Double, fade: Double) -> Double {
+    guard fade > 0 else { return elapsed >= 0 ? 1 : 0 }
+    guard elapsed > 0 else { return 0 }
+    guard elapsed < fade else { return 1 }
+    return Spring.focused.value(at: elapsed) / Spring.focused.value(at: fade)
+}
