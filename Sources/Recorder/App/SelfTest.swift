@@ -523,7 +523,8 @@ enum SelfTest {
                 case "cursor": initialTab = .cursor
                 case "camera": initialTab = .camera; project.source.hasCamera = true
                 case "camera-empty": initialTab = .camera
-                case "audio": initialTab = .audio
+                case "audio": initialTab = .audio; project.source.hasMic = true; project.source.hasSystemAudio = true
+                case "audio-empty": initialTab = .audio
                 case "animations": initialTab = .animations
                 case "keys": initialTab = .keys
                 default:
@@ -682,6 +683,28 @@ enum SelfTest {
             try await Task.sleep(nanoseconds: 700_000_000)
             guard try Project.load(from: projectURL).camera.corner == .topLeft else {
                 throw Fail(description: "autosave didn't persist the camera position edit")
+            }
+
+            // --- Audio tab (T-504): Microphone volume drag == one undo step, autosaved. ---
+            let beforeMicVolume = await model.project
+            await model.beginGesture()
+            for i in 0..<10 {
+                let v = 0.9 - Double(i) / 10
+                await model.update { $0.audio.micVolume = v }
+            }
+            await model.commitGesture("Microphone volume")
+            let afterMicVolume = await model.project
+            guard afterMicVolume.audio.micVolume != beforeMicVolume.audio.micVolume else {
+                throw Fail(description: "microphone volume drag didn't change audio.micVolume")
+            }
+            await model.undo()
+            guard await model.project == beforeMicVolume else {
+                throw Fail(description: "microphone volume drag should be one undo step")
+            }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).audio.micVolume == afterMicVolume.audio.micVolume else {
+                throw Fail(description: "autosave didn't persist the microphone volume edit")
             }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
