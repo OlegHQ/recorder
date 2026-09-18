@@ -647,6 +647,75 @@ enum SelfTest {
                 throw Fail(description: "autosave didn't persist cursor edits: \(onDisk.cursor)")
             }
         },
+        // T-605 (non-Core half): `PresetStore` file storage + applying a saved preset through a real
+        // `EditorModel`, so "one undo step" and "clips/zooms untouched" are exercised end-to-end
+        // (the styling-subset value + `apply` themselves are covered by RecorderCoreTests/PresetTests).
+        "presets": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-presets-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let savedDirectory = PresetStore.directory
+            PresetStore.directory = tmp.appendingPathComponent("Presets")
+            defer { PresetStore.directory = savedDirectory }
+
+            // Save from a styled project.
+            var styled = Project(title: "Styled")
+            styled.background = Background(kind: .color, color: "#123456", blur: 0.4)
+            styled.frame = Frame(padding: 0.2, cornerRadius: 0.1, shadow: 0.9)
+            styled.cursor = CursorStyle(size: 2.5, style: .rapid, loop: true)
+            styled.animation = Animation(screen: .smooth, motionBlur: 0.9)
+            styled.camera = Camera(size: 0.4, corner: .topLeft, roundness: 0.9)
+            let preset = Preset(name: "My Preset", from: styled)
+            _ = try PresetStore.save(preset)
+
+            let listed = PresetStore.list()
+            guard listed.count == 1, listed[0] == preset else {
+                throw Fail(description: "list() didn't round-trip the saved preset")
+            }
+
+            // Apply to an unrelated project through a real EditorModel.
+            let targetPackage = tmp.appendingPathComponent("Target")
+            try fm.createDirectory(at: targetPackage, withIntermediateDirectories: true)
+            var target = Project(title: "Target")
+            target.clips = [Clip(sourceStart: 0, sourceEnd: 10, speed: 1)]
+            target.zooms = [Zoom(start: 4, end: 6, scale: 1.2)]
+            try target.save(to: targetPackage.appendingPathComponent("project.json"))
+
+            let model = await EditorModel(packageURL: targetPackage, project: target, events: EventLog())
+            await model.edit("Apply Preset") { project in listed[0].apply(to: &project) }
+            let applied = await model.project
+            guard applied.background == preset.background, applied.frame == preset.frame,
+                  applied.cursor == preset.cursor, applied.animation == preset.animation,
+                  applied.camera == preset.camera else {
+                throw Fail(description: "apply didn't set the styling subset")
+            }
+            guard applied.clips == target.clips, applied.zooms == target.zooms else {
+                throw Fail(description: "apply touched clips/zooms")
+            }
+
+            // Exactly one undo step.
+            await model.undo()
+            guard await model.project == target else { throw Fail(description: "apply wasn't exactly one undo step") }
+            await model.redo()
+
+            // Export/import round-trip (the menu just encodes/decodes `Preset` JSON to/from a
+            // user-chosen file via NSSavePanel/NSOpenPanel; exercise the same encode/decode here).
+            let exportURL = tmp.appendingPathComponent("exported.json")
+            try JSONEncoder().encode(preset).write(to: exportURL, options: .atomic)
+            let imported = try JSONDecoder().decode(Preset.self, from: Data(contentsOf: exportURL))
+            guard imported == preset else { throw Fail(description: "export/import round-trip changed the preset") }
+            _ = try PresetStore.save(imported)
+            guard PresetStore.list().count == 1 else {
+                throw Fail(description: "re-importing a same-named preset should overwrite, not duplicate")
+            }
+
+            // Delete.
+            try PresetStore.delete(preset)
+            guard PresetStore.list().isEmpty else { throw Fail(description: "delete didn't remove the preset file") }
+        },
         "recover": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
