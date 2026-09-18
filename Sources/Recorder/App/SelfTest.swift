@@ -88,6 +88,7 @@ enum SelfTest {
         "export": { args in try await ExporterSelfTest.runExportSelfTest(args) },
         "parity": { args in try await ExporterSelfTest.runParitySelfTest(args) },
         "export-gif": { args in try await ExporterSelfTest.runExportGIFSelfTest(args) },
+        "export-perf": { args in try await PerfSelfTest.runExportPerf(args) },
         "export-sheet": { args in try await ExportSheetSelfTest.run(args) },
         "export-sheet-png": { args in try await ExportSheetSelfTest.runPNG(args) },
         "library": { _ in
@@ -1213,6 +1214,8 @@ enum SelfTest {
             print("SELFTEST record duration=\(source.duration) size=\(Int(naturalSize.width))x\(Int(naturalSize.height))")
             try? FileManager.default.removeItem(at: packageURL)
         },
+        "record-perf": { args in try await PerfSelfTest.runRecordPerf(args) },
+        "idle-perf": { args in try await PerfSelfTest.runIdlePerf(args) },
         "pickers": { _ in
             // T-107/T-108 bug fix regression coverage: `SelectionRectView`'s create/resize drag math
             // (AC-AREA-1/2) and `SourcePickerOverlay`'s window hit-test ordering (AC-WIN-1), both driven
