@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// Project library window (SPEC §5.1 mockup): search + adaptive grid of recordings, inline rename,
 /// per-card context menu, empty state, "New Recording". Hosted by `Library.show()`.
@@ -37,6 +38,21 @@ struct LibraryView: View {
             Library.open(selection)
             return .handled
         }
+        .onDrop(of: [.movie, .video], isTargeted: nil, perform: handleDrop)
+    }
+
+    /// T-606, SPEC §5.1 "drag a video file in: import (M6)".
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for provider in providers {
+            guard provider.canLoadObject(ofClass: URL.self) else { continue }
+            handled = true
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in try? await store.importMovie(url) }
+            }
+        }
+        return handled
     }
 
     private var header: some View {
@@ -172,12 +188,7 @@ enum Library {
 
     /// Opens a `.recorder` package. This is the ONLY place that decides what "open" means; wire every
     /// open path (this file, `AppDelegate`) through it.
-    ///
-    /// ponytail: EditorWindowController hasn't landed yet (parallel lane) — for now this just reveals
-    /// the package in Finder.
-    // TODO(coordinator): replace the line below with `EditorWindowController.open(package: package)`
-    // once Editor/EditorWindowController.swift exists (it also owns "already-open → focus its window").
     static func open(_ package: URL) {
-        NSWorkspace.shared.activateFileViewerSelecting([package])
+        EditorWindowController.open(package: package)
     }
 }

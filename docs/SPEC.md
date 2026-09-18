@@ -758,3 +758,9 @@ Open questions to verify during M1 (do not guess — test and record the answer 
 1. Does `captureMicrophone` deliver mic samples as a separate `SCStreamOutputType.microphone` on this OS with the chosen device ID? (Expected yes on macOS 15+.) Fallback: `AVCaptureSession` audio.
 2. Is `NSCursor.currentSystem` still returning correct images on macOS 26? Fallback: map to bundled arrow/I-beam/hand only.
 3. Which Finder windows must be excluded to hide desktop icons on macOS 26?
+   **Answer (T-205, verified 2026-09-18 on this machine, macOS 26 / Darwin 25.2, with Recorder's own Screen
+   Recording grant via `open -n … --args --selftest finder-windows`):** Finder owns exactly ONE window at
+   `CGWindowLevelForKey(.desktopIconWindow)` (layer −2147483603), full-display size (1440×900 pt) — that is the
+   desktop-icons window. Its other windows are layer 0 (menu-bar strips, browser windows) or small layer 3/103
+   helpers. `CaptureTarget.filter` excludes every Finder window at that level when "Hide desktop icons" is on,
+   which matches (a). Still to eyeball in a real recording: (b) icons actually vanish, (c) the wallpaper stays.

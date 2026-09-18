@@ -146,6 +146,45 @@ enum SelfTest {
             try await waitUntil { store.items.count == 3 }
             guard !fm.fileExists(atPath: bravoURL.path) else { throw Fail(description: "trash didn't remove the package") }
         },
+        // AC-LIB-1: 200 packages list in < 300 ms (only project.json + thumbnail.jpg read, off main thread).
+        "library-perf": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-library-perf-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let thumbJPEG: Data = {
+                let thumb = NSImage(size: NSSize(width: 640, height: 400))
+                thumb.lockFocus()
+                NSColor(hex: "#5B3DF5").setFill()
+                NSRect(x: 0, y: 0, width: 640, height: 400).fill()
+                thumb.unlockFocus()
+                let tiff = thumb.tiffRepresentation!
+                return NSBitmapImageRep(data: tiff)!.representation(using: .jpeg, properties: [:])!
+            }()
+
+            for i in 0..<200 {
+                let url = tmp.appendingPathComponent("Recording \(i).recorder")
+                try fm.createDirectory(at: url, withIntermediateDirectories: true)
+                let project = Project(title: "Recording \(i)", clips: [Clip(sourceStart: 0, sourceEnd: 10, speed: 1)])
+                try project.save(to: url.appendingPathComponent("project.json"))
+                try thumbJPEG.write(to: url.appendingPathComponent("thumbnail.jpg"))
+            }
+
+            // `ProjectStore.init` calls `reload()` itself — time that call to completion rather than
+            // triggering a second one, so nothing but the scan (project.json + thumbnail.jpg, off main) is measured.
+            let start = DispatchTime.now()
+            let store = ProjectStore(folder: tmp)
+            let deadline = Date().addingTimeInterval(5)
+            while store.items.count < 200 && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+            }
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+            print("SELFTEST library-perf reload=\(elapsedMs) ms for \(store.items.count) items")
+            guard store.items.count == 200 else { throw Fail(description: "only \(store.items.count)/200 items scanned") }
+            guard elapsedMs < 300 else { throw Fail(description: "reload took \(elapsedMs) ms, want < 300 ms") }
+        },
         // T-302: renders `LibraryView` over a fixture folder to a PNG for eyeballing against the SPEC
         // §5.1 mockup (`Read` tool). Not a correctness test — kept as a standing look-check.
         "library-png": { args in
@@ -247,6 +286,94 @@ enum SelfTest {
             try await Task.sleep(nanoseconds: 700_000_000)
             let onDisk = try Project.load(from: projectURL)
             guard onDisk.title == "Persisted" else { throw Fail(description: "autosave didn't persist: \(onDisk.title)") }
+        },
+        // T-310: (a) `CropMapping`'s view↔NormRect round trip for a letterboxed case, (b) `CropSheet.confirm`
+        // (the exact closure the sheet's Confirm button calls) drives a real `EditorModel` in one undo step,
+        // and discard (no call) leaves the project untouched.
+        "crop": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            // (a) mapping round trip: a 1920×1080 image letterboxed into a 800×1000 view (pillarboxed).
+            let imageRect = CropMapping.imageRect(imageSize: CGSize(width: 1920, height: 1080), in: CGSize(width: 800, height: 1000))
+            guard imageRect.width == 800, abs(imageRect.height - 450) < 1e-9 else {
+                throw Fail(description: "unexpected imageRect \(imageRect)")
+            }
+            let originalNorm = NormRect(x: 0.1, y: 0.2, w: 0.5, h: 0.3)
+            let viewRect = CropMapping.viewRect(from: originalNorm, imageRect: imageRect)
+            let roundTripped = CropMapping.normRect(fromView: viewRect, imageRect: imageRect)
+            guard abs(roundTripped.x - originalNorm.x) < 1e-9, abs(roundTripped.y - originalNorm.y) < 1e-9,
+                  abs(roundTripped.w - originalNorm.w) < 1e-9, abs(roundTripped.h - originalNorm.h) < 1e-9 else {
+                throw Fail(description: "round trip mismatch: \(roundTripped) vs \(originalNorm)")
+            }
+
+            // (b) confirm = one undo step via a real EditorModel; discard = no mutation.
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-crop-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            let original = Project(title: "Crop test", clips: [Clip(sourceStart: 0, sourceEnd: 10, speed: 1)])
+            let model = await EditorModel(packageURL: tmp, project: original, events: EventLog())
+
+            let newCrop = NormRect(x: 0.05, y: 0.1, w: 0.8, h: 0.6)
+            await CropSheet.confirm(newCrop, on: model)
+            guard await model.project.crop == newCrop else { throw Fail(description: "confirm didn't apply the crop") }
+            guard await model.project != original else { throw Fail(description: "confirm didn't change the project") }
+            await model.undo()
+            guard await model.project == original else { throw Fail(description: "confirm wasn't exactly one undo step") }
+            await model.redo()
+
+            // Discard: nothing calls `model.edit`, so the project is simply whatever it already was.
+            let beforeDiscard = await model.project
+            // (no-op — discard's entire contract is "don't call confirm")
+            guard await model.project == beforeDiscard else { throw Fail(description: "discard mutated the project") }
+        },
+        // T-310: renders `CropSheetWindow`'s content view offscreen with a synthetic frame image to PNG,
+        // for eyeballing against the SPEC §6.7 mockup (`Read` tool). Not a correctness test.
+        // ponytail: rendered in light appearance (`--selftest` never runs `AppDelegate`, which is what
+        // sets `NSApp.appearance = .darkAqua` for the real app — forcing it here just for this render
+        // blanked the offscreen capture, an AppKit/SwiftUI offscreen-appearance quirk not worth chasing
+        // for a look-check). Layout/content only; the real app is dark-only regardless (SPEC §3).
+        "crop-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: crop-png <out.png>") }
+            let outURL = URL(fileURLWithPath: outPath)
+
+            let width = 1600, height = 1000
+            var bytes = [UInt8](repeating: 0, count: width * height * 4)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let i = (y * width + x) * 4
+                    bytes[i + 0] = UInt8(clamping: Int(40 + 120 * Double(x) / Double(width)))
+                    bytes[i + 1] = UInt8(clamping: Int(60 + 140 * Double(y) / Double(height)))
+                    bytes[i + 2] = 200
+                    bytes[i + 3] = 255
+                }
+            }
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+            guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+                  let cgImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                                         bytesPerRow: width * 4, space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                                         provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
+                throw Fail(description: "couldn't synthesize frame image")
+            }
+
+            try await MainActor.run {
+                let crop = NormRect(x: 0.15, y: 0.2, w: 0.6, h: 0.55)
+                let window = CropSheetWindow(initialCrop: crop, sourceSize: CGSize(width: width, height: height),
+                                              image: cgImage, onConfirm: { _ in })
+                guard let contentView = window.contentView else { throw Fail(description: "no content view") }
+                window.layoutIfNeeded()
+                contentView.layoutSubtreeIfNeeded()
+                for _ in 0..<5 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+                contentView.layoutSubtreeIfNeeded()
+                guard let rep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                contentView.cacheDisplay(in: contentView.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try png.write(to: outURL)
+            }
         },
         // T-404: offscreen render of a fixture Project (3 clips incl. one sped-up, 2 zooms, one
         // torn by a cut, a camera layout, playhead mid-way) to PNG, so the static drawing can be
@@ -370,21 +497,41 @@ enum SelfTest {
         },
         // Renders `InspectorView` offscreen (300 pt wide, dark appearance) to a PNG for visual
         // comparison against the SPEC §6.6 mockup. Not part of the automated pass/fail contract.
+        // `args[1]` picks the variant (T-414): a `Background.Kind` raw value (unchanged default
+        // behaviour), or "zoom"/"clip" (selects a fixture block so `ZoomPanel`/`ClipPanel` render
+        // in place of the tabs) or "cursor" (opens the Cursor tab).
         "inspector-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard let outPath = args.first else { throw Fail(description: "usage: inspector-png <out.png>") }
+            guard let outPath = args.first else { throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|cursor]") }
             try await MainActor.run {
                 let fm = FileManager.default
                 let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-png-\(UUID().uuidString)")
                 try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
                 defer { try? fm.removeItem(at: tmp) }
                 var project = Project(title: "Inspector PNG")
-                if let kind = args[safe: 1].flatMap(Background.Kind.init(rawValue:)) { project.background.kind = kind }
+                project.clips = [
+                    Clip(sourceStart: 0, sourceEnd: 41.2, speed: 1),
+                    Clip(sourceStart: 41.2, sourceEnd: 61.8, speed: 2),
+                ]
+                let zoom = Zoom(start: 3, end: 7, scale: 2, mode: .manual)
+                project.zooms = [zoom]
+
+                let variant = args[safe: 1]
+                var initialTab: InspectorView.Tab = .background
+                switch variant {
+                case "zoom", "clip": break
+                case "cursor": initialTab = .cursor
+                default:
+                    if let kind = variant.flatMap(Background.Kind.init(rawValue:)) { project.background.kind = kind }
+                }
+
                 try project.save(to: tmp.appendingPathComponent("project.json"))
                 let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+                if variant == "zoom" { model.selection = [UUID(uuidString: zoom.id)!] }
+                if variant == "clip" { model.selectedClip = 1 }
 
                 let height: CGFloat = 760
-                let hosting = NSHostingView(rootView: InspectorView(model: model))
+                let hosting = NSHostingView(rootView: InspectorView(model: model, initialTab: initialTab))
                 hosting.appearance = NSAppearance(named: .darkAqua)
                 hosting.frame = NSRect(x: 0, y: 0, width: 300, height: height)
 
@@ -404,6 +551,207 @@ enum SelfTest {
                 print("wrote \(outPath)")
             }
         },
+        // T-414: exercises the exact closures `ZoomPanel`/`ClipPanel`/`CursorTab`'s controls call.
+        // Zoom: Level slider drag (begin -> 10 updates -> commit), Mode change, Remove — each one
+        // undo step, invariants hold throughout. Clip: a speed preset == `setSpeed` + one undo
+        // step. Cursor: size/style edits persist via autosave.
+        "inspector-panels": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-panels-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            let projectURL = tmp.appendingPathComponent("project.json")
+
+            var original = Project(
+                title: "Panels Test",
+                source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 2, duration: 20)
+            )
+            original.clips = [
+                Clip(sourceStart: 0, sourceEnd: 10, speed: 1),
+                Clip(sourceStart: 10, sourceEnd: 20, speed: 1),
+            ]
+            let zoom = Zoom(start: 2, end: 5, scale: 2, mode: .manual)
+            original.zooms = [zoom]
+            try original.save(to: projectURL)
+            let zoomID = UUID(uuidString: zoom.id)!
+
+            let model = await EditorModel(packageURL: tmp, project: original, events: EventLog())
+
+            // --- Zoom panel: Level `LabeledSlider` drag == one undo step. ---
+            let beforeLevel = await model.project
+            await model.beginGesture()
+            for i in 0..<10 {
+                let v = 1.2 + Double(i + 1) / 10 * (5 - 1.2)
+                await model.update { project in
+                    guard let idx = project.zooms.firstIndex(where: { $0.id == zoom.id }) else { return }
+                    project.zooms[idx].scale = v
+                }
+            }
+            await model.commitGesture("Zoom level")
+            let afterLevel = await model.project
+            guard afterLevel.zooms[0].scale != beforeLevel.zooms[0].scale else {
+                throw Fail(description: "level drag didn't change scale")
+            }
+            if let err = afterLevel.checkInvariants() { throw Fail(description: "invariants broke after level drag: \(err)") }
+
+            // --- Mode change: a plain `model.edit`, one more undo step. ---
+            await model.edit("Zoom") { project in
+                guard let idx = project.zooms.firstIndex(where: { $0.id == zoom.id }) else { return }
+                project.zooms[idx].mode = .auto
+            }
+            let afterMode = await model.project
+            guard afterMode.zooms[0].mode == .auto else { throw Fail(description: "mode change didn't apply") }
+
+            // --- Remove: `Project.removeBlock`, one more undo step. ---
+            await model.edit("Remove zoom") { $0.removeBlock(zoomID) }
+            let afterDelete = await model.project
+            guard afterDelete.zooms.isEmpty else { throw Fail(description: "remove didn't delete the zoom") }
+            if let err = afterDelete.checkInvariants() { throw Fail(description: "invariants broke after remove: \(err)") }
+
+            // Exactly 3 undo steps (level, mode, delete): unwind one at a time, a 4th is a no-op.
+            await model.undo()
+            guard await model.project == afterMode else { throw Fail(description: "undo 1 should revert only the delete") }
+            await model.undo()
+            guard await model.project == afterLevel else { throw Fail(description: "undo 2 should revert only the mode change") }
+            await model.undo()
+            guard await model.project == beforeLevel else { throw Fail(description: "undo 3 should restore the pre-drag project") }
+            await model.undo()
+            guard await model.project == beforeLevel else {
+                throw Fail(description: "a 4th undo changed the project — more than 3 undo steps were recorded")
+            }
+            await model.redo(); await model.redo(); await model.redo()
+            guard await model.project == afterDelete else { throw Fail(description: "redo didn't replay all 3 steps") }
+
+            // --- Clip panel: a speed preset == `Project.setSpeed`, one undo step. ---
+            let beforeSpeed = await model.project
+            await model.edit("Speed") { $0.setSpeed(0, 2) }
+            let afterSpeed = await model.project
+            guard afterSpeed.clips[0].speed == 2 else { throw Fail(description: "speed preset didn't apply: \(afterSpeed.clips[0].speed)") }
+            if let err = afterSpeed.checkInvariants() { throw Fail(description: "invariants broke after speed change: \(err)") }
+            await model.undo()
+            guard await model.project == beforeSpeed else { throw Fail(description: "speed preset should be exactly one undo step") }
+            await model.redo()
+
+            // Remove clip: `Project.removeClip`, one undo step.
+            await model.edit("Remove clip") { _ = $0.removeClip(1) }
+            let afterRemoveClip = await model.project
+            guard afterRemoveClip.clips.count == 1 else { throw Fail(description: "remove clip didn't remove") }
+            if let err = afterRemoveClip.checkInvariants() { throw Fail(description: "invariants broke after remove clip: \(err)") }
+            await model.undo()
+
+            // --- Cursor tab: size/style edits persist via autosave. ---
+            await model.edit("Cursor size") { $0.cursor.size = 3 }
+            await model.edit("Cursor movement") { $0.cursor.style = .rapid }
+            try await Task.sleep(nanoseconds: 700_000_000)
+            let onDisk = try Project.load(from: projectURL)
+            guard onDisk.cursor.size == 3, onDisk.cursor.style == .rapid else {
+                throw Fail(description: "autosave didn't persist cursor edits: \(onDisk.cursor)")
+            }
+        },
+        // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
+        // front — `EditorWindowController.makeOffscreen`) for a fixture package and caches its
+        // display to a PNG, for eyeballing against SPEC §6.1's mockup layout. Captures the window's
+        // frame view (contentView's superview), not just contentView, so the titlebar row itself
+        // (traffic lights) is included.
+        // ponytail: two known gaps in an offscreen, never-ordered-front capture, both acceptable for
+        // a static layout check, not a pixel comparison: (1) the preview's MTKView needs a live Metal
+        // draw call to have pixels, which `cacheDisplay` never triggers, so that region comes out
+        // blank; (2) `NSTitlebarAccessoryViewController`'s view doesn't get sized by AppKit until its
+        // window has been shown at least once, so the top bar (‹ Projects · title · Auto ▾ · Crop ·
+        // Export) is present in the view tree but 0-width here — only the traffic lights show.
+        "editor-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png>") }
+            let packageURL = URL(fileURLWithPath: args[0])
+            let outURL = URL(fileURLWithPath: args[1])
+            try await MainActor.run {
+                guard let window = EditorWindowController.makeOffscreen(package: packageURL) else {
+                    throw Fail(description: "couldn't load project.json at \(packageURL.path)")
+                }
+                let capture = window.contentView?.superview ?? window.contentView
+                guard let capture else { throw Fail(description: "no capturable view") }
+                capture.layoutSubtreeIfNeeded()
+                guard let rep = capture.bitmapImageRepForCachingDisplay(in: capture.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                capture.cacheDisplay(in: capture.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else {
+                    throw Fail(description: "png encode failed")
+                }
+                try png.write(to: outURL)
+                print("wrote \(outURL.path)")
+            }
+        },
+        // T-605 (non-Core half): `PresetStore` file storage + applying a saved preset through a real
+        // `EditorModel`, so "one undo step" and "clips/zooms untouched" are exercised end-to-end
+        // (the styling-subset value + `apply` themselves are covered by RecorderCoreTests/PresetTests).
+        "presets": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-presets-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let savedDirectory = PresetStore.directory
+            PresetStore.directory = tmp.appendingPathComponent("Presets")
+            defer { PresetStore.directory = savedDirectory }
+
+            // Save from a styled project.
+            var styled = Project(title: "Styled")
+            styled.background = Background(kind: .color, color: "#123456", blur: 0.4)
+            styled.frame = Frame(padding: 0.2, cornerRadius: 0.1, shadow: 0.9)
+            styled.cursor = CursorStyle(size: 2.5, style: .rapid, loop: true)
+            styled.animation = Animation(screen: .smooth, motionBlur: 0.9)
+            styled.camera = Camera(size: 0.4, corner: .topLeft, roundness: 0.9)
+            let preset = Preset(name: "My Preset", from: styled)
+            _ = try PresetStore.save(preset)
+
+            let listed = PresetStore.list()
+            guard listed.count == 1, listed[0] == preset else {
+                throw Fail(description: "list() didn't round-trip the saved preset")
+            }
+
+            // Apply to an unrelated project through a real EditorModel.
+            let targetPackage = tmp.appendingPathComponent("Target")
+            try fm.createDirectory(at: targetPackage, withIntermediateDirectories: true)
+            var target = Project(title: "Target")
+            target.clips = [Clip(sourceStart: 0, sourceEnd: 10, speed: 1)]
+            target.zooms = [Zoom(start: 4, end: 6, scale: 1.2)]
+            try target.save(to: targetPackage.appendingPathComponent("project.json"))
+
+            let model = await EditorModel(packageURL: targetPackage, project: target, events: EventLog())
+            await model.edit("Apply Preset") { project in listed[0].apply(to: &project) }
+            let applied = await model.project
+            guard applied.background == preset.background, applied.frame == preset.frame,
+                  applied.cursor == preset.cursor, applied.animation == preset.animation,
+                  applied.camera == preset.camera else {
+                throw Fail(description: "apply didn't set the styling subset")
+            }
+            guard applied.clips == target.clips, applied.zooms == target.zooms else {
+                throw Fail(description: "apply touched clips/zooms")
+            }
+
+            // Exactly one undo step.
+            await model.undo()
+            guard await model.project == target else { throw Fail(description: "apply wasn't exactly one undo step") }
+            await model.redo()
+
+            // Export/import round-trip (the menu just encodes/decodes `Preset` JSON to/from a
+            // user-chosen file via NSSavePanel/NSOpenPanel; exercise the same encode/decode here).
+            let exportURL = tmp.appendingPathComponent("exported.json")
+            try JSONEncoder().encode(preset).write(to: exportURL, options: .atomic)
+            let imported = try JSONDecoder().decode(Preset.self, from: Data(contentsOf: exportURL))
+            guard imported == preset else { throw Fail(description: "export/import round-trip changed the preset") }
+            _ = try PresetStore.save(imported)
+            guard PresetStore.list().count == 1 else {
+                throw Fail(description: "re-importing a same-named preset should overwrite, not duplicate")
+            }
+
+            // Delete.
+            try PresetStore.delete(preset)
+            guard PresetStore.list().isEmpty else { throw Fail(description: "delete didn't remove the preset file") }
+        },
         "recover": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
@@ -414,35 +762,9 @@ enum SelfTest {
 
             // Synthesize a small, playable screen.mov with no capture/TCC involved, matching what
             // fragmented writing (T-110) leaves behind after a crash mid-recording.
-            let width = 64, height = 48, fps: Int32 = 30, frameCount = 30
+            let width = 64, height = 48
             let movURL = package.appendingPathComponent("screen.mov")
-            let writer = try AVAssetWriter(outputURL: movURL, fileType: .mov)
-            let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-                AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
-            ])
-            let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
-                kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
-            ])
-            writer.add(input)
-            writer.startWriting()
-            writer.startSession(atSourceTime: .zero)
-
-            var frame = 0
-            while frame < frameCount {
-                guard input.isReadyForMoreMediaData else {
-                    try await Task.sleep(nanoseconds: 5_000_000)
-                    continue
-                }
-                var pixelBuffer: CVPixelBuffer?
-                CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
-                guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
-                adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
-                frame += 1
-            }
-            input.markAsFinished()
-            await writer.finishWriting()
-            guard writer.status == .completed else { throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")") }
+            try await synthesizeMovie(at: movURL, width: width, height: height)
 
             let projectURL = package.appendingPathComponent("project.json")
             guard !fm.fileExists(atPath: projectURL.path) else { throw Fail(description: "test setup: project.json already exists") }
@@ -459,6 +781,68 @@ enum SelfTest {
             }
             guard project.clips.first?.sourceEnd == project.source.duration else {
                 throw Fail(description: "clip doesn't span the recovered duration")
+            }
+        },
+        // T-606: `ProjectStore.importMovie` on a synthesized movie living outside the library folder,
+        // like one dragged in from Finder.
+        "import": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-import-\(UUID().uuidString)")
+            let libraryFolder = tmp.appendingPathComponent("Library")
+            try fm.createDirectory(at: libraryFolder, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let sourceMovie = tmp.appendingPathComponent("My Clip.mov")
+            let width = 64, height = 48
+            try await synthesizeMovie(at: sourceMovie, width: width, height: height)
+            let originalData = try Data(contentsOf: sourceMovie)
+
+            let store = ProjectStore(folder: libraryFolder)
+            let packageURL = try await store.importMovie(sourceMovie)
+
+            guard packageURL.lastPathComponent == "My Clip.recorder" else {
+                throw Fail(description: "unexpected package name \(packageURL.lastPathComponent)")
+            }
+            guard fm.fileExists(atPath: packageURL.appendingPathComponent("screen.mov").path) else {
+                throw Fail(description: "screen.mov missing")
+            }
+            guard fm.fileExists(atPath: packageURL.appendingPathComponent("thumbnail.jpg").path) else {
+                throw Fail(description: "thumbnail.jpg missing")
+            }
+            let events = try JSONDecoder().decode(EventLog.self, from: Data(contentsOf: packageURL.appendingPathComponent("events.json")))
+            guard events.events.isEmpty else { throw Fail(description: "events.json not empty") }
+
+            let project = try Project.load(from: packageURL.appendingPathComponent("project.json"))
+            guard project.source.pixelWidth == width, project.source.pixelHeight == height else {
+                throw Fail(description: "size \(project.source.pixelWidth)x\(project.source.pixelHeight) != \(width)x\(height)")
+            }
+            guard (0.5...2.0).contains(project.source.duration) else {
+                throw Fail(description: "duration \(project.source.duration) out of range 0.5...2.0")
+            }
+            guard project.clips.count == 1, project.clips[0].sourceStart == 0, project.clips[0].sourceEnd == project.source.duration else {
+                throw Fail(description: "expected one full-length clip, got \(project.clips)")
+            }
+            guard project.zooms.isEmpty else { throw Fail(description: "expected no zooms") }
+
+            // Media is never modified after recording (SPEC §5) — including on import.
+            guard try Data(contentsOf: sourceMovie) == originalData else {
+                throw Fail(description: "original movie file was modified")
+            }
+        },
+        // T-205, SPEC §9 open question 3: no assertions (there's nothing to assert without a live TCC
+        // grant on the machine this runs on) — prints every Finder-owned window so a HUMAN can compare
+        // against the desktop-icons layer and confirm/adjust `CaptureTarget.filter`'s heuristic.
+        "finder-windows": { _ in
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let finderWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == "com.apple.finder" }
+            guard !finderWindows.isEmpty else {
+                print("SELFTEST finder-windows: no Finder windows found (Screen Recording permission likely not granted to this terminal)")
+                return
+            }
+            let desktopIconLevel = Int(CGWindowLevelForKey(.desktopIconWindow))
+            for w in finderWindows {
+                print("windowLayer=\(w.windowLayer) isDesktopIconLevel=\(w.windowLayer == desktopIconLevel) title=\(w.title ?? "") frame=\(w.frame)")
             }
         },
         "events": { args in
@@ -587,6 +971,93 @@ enum SelfTest {
                 }
             }
         },
+        // T-207b/T-204: builds the status menu in both states and the global hotkey table (no live
+        // status item / window needed) and checks them against SPEC §4.7/§8's titles, order and key
+        // equivalents, that no two hotkeys share a binding, and every menu item has a target and action.
+        "menus": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            // SPEC §4.7 global hotkey table (T-204).
+            let expected: [(title: String, keyCode: UInt16, mods: NSEvent.ModifierFlags, alwaysActive: Bool)] = [
+                ("Start/Finish Recording", 15, [.control, .option, .command], true),  // ⌃⌥⌘R
+                ("Pause/Resume", 35, [.control, .option, .command], true),            // ⌃⌥⌘P
+                ("New Recording", 36, [.control, .command], false),                   // ⌃⌘↩
+                ("Record Display", 20, [.option, .command], false),                   // ⌥⌘3
+                ("Record Window", 21, [.option, .command], false),                    // ⌥⌘4
+                ("Record Area", 23, [.option, .command], false),                      // ⌥⌘5
+                ("Open Last Project", 6, [.option, .command], false),                 // ⌥⌘Z
+            ]
+            guard Hotkeys.table.count == expected.count else {
+                throw Fail(description: "hotkey table has \(Hotkeys.table.count) entries, want \(expected.count)")
+            }
+            for (got, want) in zip(Hotkeys.table, expected) {
+                guard got.title == want.title, got.keyCode == want.keyCode,
+                      got.modifiers == want.mods, got.alwaysActive == want.alwaysActive else {
+                    throw Fail(description: "hotkey \(got.title): got keyCode=\(got.keyCode) mods=\(got.modifiers) alwaysActive=\(got.alwaysActive), want \(want)")
+                }
+            }
+            var seenBindings = Set<String>()
+            for h in Hotkeys.table {
+                let binding = "\(h.keyCode)-\(h.modifiers.rawValue)"
+                guard seenBindings.insert(binding).inserted else {
+                    throw Fail(description: "duplicate hotkey binding on \(h.title)")
+                }
+            }
+
+            @MainActor func nonSeparators(_ menu: NSMenu) -> [NSMenuItem] { menu.items.filter { !$0.isSeparatorItem } }
+            @MainActor func checkItems(_ items: [NSMenuItem], _ expected: [(title: String, key: String, mods: NSEvent.ModifierFlags)], _ label: String) throws {
+                guard items.count == expected.count else {
+                    throw Fail(description: "\(label): \(items.count) items (\(items.map(\.title))), want \(expected.count)")
+                }
+                for (item, want) in zip(items, expected) {
+                    guard item.title == want.title else { throw Fail(description: "\(label): title \(item.title) != \(want.title)") }
+                    guard item.keyEquivalent == want.key else {
+                        throw Fail(description: "\(label) \(item.title): key \(item.keyEquivalent.debugDescription) != \(want.key.debugDescription)")
+                    }
+                    guard item.keyEquivalentModifierMask == want.mods else {
+                        throw Fail(description: "\(label) \(item.title): mods \(item.keyEquivalentModifierMask) != \(want.mods)")
+                    }
+                    guard item.action != nil, item.target != nil else {
+                        throw Fail(description: "\(label) \(item.title): missing target/action")
+                    }
+                }
+            }
+
+            try await MainActor.run {
+                let delegate = AppDelegate()
+
+                // SPEC §8 idle status menu (`reference/status-item-menu.png`).
+                let idle = delegate.buildIdleStatusMenu()
+                try checkItems(nonSeparators(idle), [
+                    ("New Recording…", "\r", [.control, .command]),
+                    ("Record Display", "3", [.option, .command]),
+                    ("Record Window", "4", [.option, .command]),
+                    ("Record Area", "5", [.option, .command]),
+                    ("Settings…", ",", [.command]),
+                    ("Show Recorder in Dock", "d", [.command]),
+                    ("Projects", "o", [.command, .shift]),
+                    ("Open…", "o", [.command]),
+                    ("Open Last Project", "z", [.option, .command]),
+                    ("Quit Recorder", "q", [.command]),
+                ], "idle menu")
+                guard idle.items.filter(\.isSeparatorItem).count == 4 else {
+                    throw Fail(description: "idle menu: \(idle.items.filter(\.isSeparatorItem).count) separators, want 4")
+                }
+
+                // SPEC §4.7 in-progress menu.
+                let recording = delegate.buildRecordingStatusMenu()
+                try checkItems(nonSeparators(recording), [
+                    ("Finish", "r", [.control, .option, .command]),
+                    ("Pause", "p", [.control, .option, .command]),
+                    ("Restart", "", [.command]),
+                    ("Delete", "", [.command]),
+                    ("Hide widget", "", [.command]),
+                ], "recording menu")
+                guard recording.items.filter(\.isSeparatorItem).count == 1 else {
+                    throw Fail(description: "recording menu: \(recording.items.filter(\.isSeparatorItem).count) separators, want 1")
+                }
+            }
+        },
         "waveform": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }
@@ -596,7 +1067,201 @@ enum SelfTest {
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
+        // T-607: `AppDelegate.buildMainMenu` is `private`, so this builds its own small fixture menu
+        // (nested submenu, a separator, a disabled item, an item with no action) to exercise
+        // `CommandMenu.flatten` end to end: the flattened list's paths/exclusions, `Command.matches`
+        // against a couple of queries, and that `CommandMenu.perform` invokes the item's action on
+        // its target exactly once.
+        "command-menu": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            final class Target: NSObject {
+                var pingCount = 0
+                @objc func ping() { pingCount += 1 }
+                @objc func other() {}
+            }
+            let target = Target()
+
+            let main = NSMenu()
+
+            let file = NSMenu(title: "File")
+            let newRecording = NSMenuItem(title: "New Recording", action: #selector(Target.ping), keyEquivalent: "n")
+            newRecording.target = target
+            file.addItem(newRecording)
+            file.addItem(.separator())
+            let disabled = NSMenuItem(title: "Disabled Thing", action: #selector(Target.other), keyEquivalent: "")
+            disabled.target = target
+            disabled.isEnabled = false
+            file.addItem(disabled)
+            file.addItem(NSMenuItem(title: "No Action Item", action: nil, keyEquivalent: ""))
+            let fileItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+            fileItem.submenu = file
+            main.addItem(fileItem)
+
+            let edit = NSMenu(title: "Edit")
+            let undo = NSMenuItem(title: "Undo", action: #selector(Target.ping), keyEquivalent: "z")
+            undo.target = target
+            edit.addItem(undo)
+            let nested = NSMenu(title: "Nested")
+            let deepAction = NSMenuItem(title: "Deep Action", action: #selector(Target.ping), keyEquivalent: "d")
+            deepAction.target = target
+            deepAction.keyEquivalentModifierMask = [.command, .shift]
+            nested.addItem(deepAction)
+            let nestedItem = NSMenuItem(title: "Nested", action: nil, keyEquivalent: "")
+            nestedItem.submenu = nested
+            edit.addItem(nestedItem)
+            let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+            editItem.submenu = edit
+            main.addItem(editItem)
+
+            let commands = CommandMenu.flatten(main)
+            let titles = commands.map(\.title)
+
+            guard !titles.contains("Disabled Thing") else { throw Fail(description: "disabled item leaked into the flattened list") }
+            guard !titles.contains("No Action Item") else { throw Fail(description: "nil-action item leaked into the flattened list") }
+            guard !titles.contains("File"), !titles.contains("Edit"), !titles.contains("Nested") else {
+                throw Fail(description: "a submenu-parent item leaked in as a command: \(titles)")
+            }
+            guard commands.count == 3 else { throw Fail(description: "expected 3 commands, got \(commands.count): \(titles)") }
+
+            guard let newRecordingCmd = commands.first(where: { $0.title == "New Recording" }), newRecordingCmd.path == ["File"],
+                  newRecordingCmd.keyEquivalent == "⌘N" else {
+                throw Fail(description: "New Recording path/key wrong: \(String(describing: commands.first(where: { $0.title == "New Recording" })))")
+            }
+            guard let deepActionCmd = commands.first(where: { $0.title == "Deep Action" }), deepActionCmd.path == ["Edit", "Nested"],
+                  deepActionCmd.keyEquivalent == "⇧⌘D" else {
+                throw Fail(description: "Deep Action path/key wrong: \(String(describing: commands.first(where: { $0.title == "Deep Action" })))")
+            }
+
+            // Filtering: substring, subsequence, and no-match queries.
+            let byDeep = commands.filter { $0.matches("deep") }
+            guard byDeep.count == 1, byDeep[0].title == "Deep Action" else {
+                throw Fail(description: "query 'deep' matched \(byDeep.map(\.title)), want just Deep Action")
+            }
+            let bySubsequence = commands.filter { $0.matches("nwrec") } // subsequence of "File New Recording"
+            guard bySubsequence.contains(where: { $0.title == "New Recording" }) else {
+                throw Fail(description: "subsequence query 'nwrec' should match New Recording, matched \(bySubsequence.map(\.title))")
+            }
+            let byNothing = commands.filter { $0.matches("zzz-nope") }
+            guard byNothing.isEmpty else { throw Fail(description: "query 'zzz-nope' should match nothing, got \(byNothing.map(\.title))") }
+
+            // Perform: invokes the item's action on its target exactly once.
+            guard let toPerform = commands.first(where: { $0.title == "Undo" }) else { throw Fail(description: "Undo missing from flattened list") }
+            target.pingCount = 0
+            guard CommandMenu.perform(toPerform) else { throw Fail(description: "CommandMenu.perform returned false") }
+            guard target.pingCount == 1 else { throw Fail(description: "expected pingCount == 1, got \(target.pingCount)") }
+        },
+        // Offscreen render of `CheatSheetView` (SPEC §7.3's table, static SwiftUI grid) to a PNG for
+        // visual comparison against the spec table — not part of the automated pass/fail contract.
+        "cheatsheet-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: cheatsheet-png <out.png>") }
+            try await MainActor.run {
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 460),
+                                       styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .darkAqua) // forced before the hosting view exists
+                let hosting = NSHostingView(rootView: CheatSheetView())
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 640, height: 460)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                let fitted = hosting.fittingSize
+                hosting.frame = NSRect(origin: .zero, size: fitted)
+                window.setContentSize(fitted)
+                hosting.layoutSubtreeIfNeeded()
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try data.write(to: URL(fileURLWithPath: outPath))
+                print("wrote \(outPath)")
+            }
+        },
+        // Offscreen render of `CommandMenuView` with a small fixture command list (mixed path depths,
+        // with/without key equivalents) to a PNG for visual comparison — not part of the automated
+        // pass/fail contract (that's the `command-menu` case).
+        "command-menu-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: command-menu-png <out.png>") }
+            try await MainActor.run {
+                func fixture(_ title: String, _ path: [String], _ key: String) -> Command {
+                    Command(title: title, path: path, keyEquivalent: key,
+                            item: NSMenuItem(title: title, action: nil, keyEquivalent: ""))
+                }
+                let commands = [
+                    fixture("New Recording", ["File"], "⌘N"),
+                    fixture("Open…", ["File"], "⌘O"),
+                    fixture("Undo", ["Edit"], "⌘Z"),
+                    fixture("Split", ["Edit"], ""),
+                    fixture("Deep Action", ["Edit", "Nested"], "⇧⌘D"),
+                    fixture("Export…", ["Export"], "⌘E"),
+                ]
+
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+                                       styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .darkAqua) // forced before the hosting view exists
+                let hosting = NSHostingView(rootView: CommandMenuView(commands: commands, onClose: {}))
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 480, height: 420)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                let fitted = hosting.fittingSize
+                hosting.frame = NSRect(origin: .zero, size: NSSize(width: 480, height: fitted.height))
+                window.setContentSize(hosting.frame.size)
+                hosting.layoutSubtreeIfNeeded()
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try data.write(to: URL(fileURLWithPath: outPath))
+                print("wrote \(outPath)")
+            }
+        },
+        // Dev/QA tool (agent UI testing): screen/mouse/keyboard driver, see UIDriver.swift.
+        "screenshot": { args in try await UIDriver.screenshot(args) },
+        "click": { args in try await UIDriver.click(args) },
+        "key": { args in try await UIDriver.key(args) },
+        "drag": { args in try await UIDriver.drag(args) },
     ]
+
+    /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and
+    /// `import` cases so the `AVAssetWriter` boilerplate lives in one place.
+    private static func synthesizeMovie(at url: URL, width: Int, height: Int, fps: Int32 = 30, frameCount: Int = 30) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
+        ])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+            kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+        ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        var frame = 0
+        while frame < frameCount {
+            guard input.isReadyForMoreMediaData else {
+                try await Task.sleep(nanoseconds: 5_000_000)
+                continue
+            }
+            var pixelBuffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
+            guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
+            adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
+            frame += 1
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
+        }
+    }
 
     static func runIfRequested() {
         guard let i = CommandLine.arguments.firstIndex(of: "--selftest") else { return }

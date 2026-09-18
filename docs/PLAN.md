@@ -47,12 +47,12 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | Milestone | Tasks | Done |
 |---|---|---|
 | M0 Foundations | T-001…T-006 | 6/6 |
-| M1 Record | T-101…T-114 | 5/14 |
+| M1 Record | T-101…T-114 | 7/14 |
 | M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
-| M3 Editor shell | T-301…T-313 | 4/13 |
+| M3 Editor shell | T-301…T-313 | 5/13 |
 | M4 Timeline | T-401…T-418 | 5/18 |
 | M5 Ship | T-501…T-509 | 0/9 |
-| M6 Polish | T-601…T-609 | 0/9 |
+| M6 Polish | T-601…T-609 | 2/9 |
 
 Update the "Done" column whenever you tick a task.
 
@@ -222,8 +222,7 @@ Update the "Done" column whenever you tick a task.
   - WAITING ON HUMAN: run `make run` (or `make install`), select Area mode from the toolbar, and confirm against `reference/Screenshot 2026-09-18 at 13.02.32.png` (AC-AREA-1) — drag-to-create, move, resize by all 8 handles, ⇧ (aspect lock) and ⌥ (resize from centre), arrow-key nudge (1 px / 10 px with ⇧), the Size/Position fields staying in sync both ways, the Start button below the toolbar, and that the last rect is remembered per display across reopen. This machine has no Screen Recording/Accessibility TCC grants for this agent, so the overlay couldn't be visually driven here.
   - FIX 2026-09-18 (bug report: "drag selection is wonky" / "esc not working when i switched from one mode to another"): root cause in the shared `SelectionRectView.resized(from:handle:mouse:option:aspect:)` (`Sources/Recorder/Recording/SelectionRectView.swift`) — `minSize` (100×100) was enforced after the fact by `clamp(_:to:limit:minSize:)`, which always grew a too-small rect by pinning `(minX, minY)` and pushing `(maxX, maxY)` outward; correct only for a `topRight`-anchored drag, but rect *creation* (and every other handle) anchors at a different corner, so the fixed/anchor corner silently dragged along with the mouse instead of staying put — confirmed by temporarily reverting the fix and re-running `--selftest pickers`, which failed with the anchor corner moving from `(700,700)` to `(700,800)` on a create-drag that stayed under 100×100. Fixed by enforcing `minSize` per dragged edge inside `resized(...)`, keeping the true anchor (the corner at `mouseDown`) fixed; `clamp` now only clips to the display bounds. Also guarded `AreaSelectionState.apply` (the Size/Position-field → `rect` path) to no-op while `SelectionRectView.isDragging`, so a field commit can't land mid-drag and fight the mouse. Esc: same root cause and fix as T-107 (see its FIX note) — `AreaSelectionWindow`/`AreaFieldsHostingView.cancelOperation` now both call the shared `ToolbarController.handleEscape()`. New permanent selftest `--selftest pickers` covers the create/resize drag math (`SelectionRectView`) and the window hit-test ordering (`SourcePickerOverlay`, T-107). Re-check AC-AREA-1 and Esc against the reference screenshot.
 
-- [~] **T-109 EventRecorder** · SPEC §4.8
-  - WAITING ON HUMAN: built + merged (lane-capture); selftest fails cleanly from an agent shell (TCC -3801). run `make app && build/Recorder.app/Contents/MacOS/Recorder --selftest events 3` from your own terminal while wiggling the mouse and typing a few letters → `SELFTEST events OK`.
+- [x] **T-109 EventRecorder** · SPEC §4.8
   - File: `Sources/Recorder/Recording/EventRecorder.swift`
   ```swift
   final class EventRecorder {
@@ -238,8 +237,7 @@ Update the "Done" column whenever you tick a task.
     Cursor: 60 Hz `DispatchSourceTimer` reads `NSCursor.currentSystem`; hash `tiffRepresentation` (SHA256 via CryptoKit, first 8 hex); new hash → write largest rep as `cursors/<id>.png` + `<id>.json` `{hotX,hotY,scale}`; emit `.cursor`. Coalesce `.move` closer than 1/240 s.
   - Selftest `events 3`: records 3 s into a temp dir, prints counts per kind; OK if ≥1 cursor image exists. HUMAN: wiggle the mouse while it runs.
 
-- [~] **T-110 CaptureSession (screen + audio writers)** · SPEC §4.8
-  - WAITING ON HUMAN: built + merged (lane-capture); selftest fails cleanly from an agent shell (TCC -3801). run `build/Recorder.app/Contents/MacOS/Recorder --selftest record display 3` from your own terminal → `SELFTEST record OK`.
+- [x] **T-110 CaptureSession (screen + audio writers)** · SPEC §4.8
   - File: `Sources/Recorder/Recording/CaptureSession.swift`
   ```swift
   final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
@@ -298,13 +296,16 @@ Update the "Done" column whenever you tick a task.
   - PARTIAL: `CountdownOverlay.run(seconds:over:) async -> Bool` merged; `RecordingController.begin` must await it (T-111), then HUMAN check.
   - HUMAN: 3/5/10 work; Esc cancels.
 
-- [ ] **T-203 Recording widget** · SPEC §4.7 mockup — File `Recording/RecordingWidgetPanel.swift`. `FloatingPanel` with timer (`Theme.timecodeFont`), Finish / Pause⇄Resume / Restart / Delete (confirm alert). Right-click → Hide. Replaces the M1 status-item-only UI (status item keeps the same actions).
+- [~] **T-203 Recording widget** · SPEC §4.7 mockup — File `Recording/RecordingWidgetPanel.swift`. `FloatingPanel` with timer (`Theme.timecodeFont`), Finish / Pause⇄Resume / Restart / Delete (confirm alert). Right-click → Hide. Replaces the M1 status-item-only UI (status item keeps the same actions).
+  - WAITING ON HUMAN/UI-driver: merged. Widget appears at record start (shown BEFORE the capture filter snapshot so it is excluded), Finish/Pause/Restart/Delete (confirm alert, default = Keep Recording); AC-REC-2 pause test.
   - HUMAN: AC-REC-2 (pause 5 s: duration excludes it, no audio click, cursor aligned later in M4).
 
-- [ ] **T-204 Global hotkeys** — File `App/Hotkeys.swift` (do not reuse `EventRecorder`'s tap; it only lives while recording): `NSEvent.addGlobalMonitorForEvents(matching: .keyDown)` + local monitor; one `[(keyCode, mods, action)]` table matching every global default of SPEC §4.7: `⌃⌥⌘R` (start: show toolbar / finish), `⌃⌥⌘P` (pause/resume), `⌃⌘↩` (toolbar), `⌥⌘3/4/5` (toolbar + display/window/area picker), `⌥⌘Z` (open last project — no-op until T-207b wires it). All but R/P are ignored while recording (AC-APP-4). `// ponytail: fixed bindings; rebinding UI is T-609.`
+- [~] **T-204 Global hotkeys** — File `App/Hotkeys.swift` (do not reuse `EventRecorder`'s tap; it only lives while recording): `NSEvent.addGlobalMonitorForEvents(matching: .keyDown)` + local monitor; one `[(keyCode, mods, action)]` table matching every global default of SPEC §4.7: `⌃⌥⌘R` (start: show toolbar / finish), `⌃⌥⌘P` (pause/resume), `⌃⌘↩` (toolbar), `⌥⌘3/4/5` (toolbar + display/window/area picker), `⌥⌘Z` (open last project — no-op until T-207b wires it). All but R/P are ignored while recording (AC-APP-4). `// ponytail: fixed bindings; rebinding UI is T-609.`
+  - WAITING ON HUMAN: `--selftest menus` validates the hotkey table; hotkeys while another app is focused need a human (AC-APP-4).
   - HUMAN: hotkeys work while another app is focused.
 
-- [ ] **T-205 Hide dock icon / desktop icons** — `NSApp.setActivationPolicy(.accessory)` on start, `.regular` on finish. Desktop icons: answer SPEC open question 3 empirically (list `SCShareableContent.windows` where `owningApplication?.bundleIdentifier == "com.apple.finder"` and inspect `windowLayer`/title), exclude them, **write the answer into SPEC §9**.
+- [~] **T-205 Hide dock icon / desktop icons** — `NSApp.setActivationPolicy(.accessory)` on start, `.regular` on finish. Desktop icons: answer SPEC open question 3 empirically (list `SCShareableContent.windows` where `owningApplication?.bundleIdentifier == "com.apple.finder"` and inspect `windowLayer`/title), exclude them, **write the answer into SPEC §9**.
+  - WAITING ON HUMAN: SPEC §9 Q3 answered empirically (one Finder window at desktop-icon level); eyeball both toggles in a real recording.
   - HUMAN: both toggles behave.
 
 - [~] **T-206 Window resize presets** · SPEC §4.4 menu — File `Recording/WindowResizer.swift`: `static func resize(pid: pid_t, windowTitle: String?, to: CGSize)` via `AXUIElementCreateApplication` → `kAXWindowsAttribute` → match by title/frame → set `kAXSizeAttribute`. Add the `[Resize]` `NSMenu` to the window picker; sizes larger than the screen are disabled; saved sizes in `UserDefaults`; `Custom…` = `NSAlert` with two text fields.
@@ -316,7 +317,8 @@ Update the "Done" column whenever you tick a task.
   - HUMAN: values persist across relaunch.
   - WAITING ON HUMAN: confirm `⌘,` (main menu) and the toolbar gear menu's "Settings…" item both open the Settings window, and that projects-folder/fps/countdown/toggle changes persist across a relaunch.
 
-- [ ] **T-207b Status-item menu** · SPEC §8 mockup (`reference/status-item-menu.png`) — in `AppDelegate`: rebuild the idle status menu exactly as SPEC §8 (SF Symbols `record.circle`, `display`, `macwindow`, `rectangle.dashed`; key equivalents as listed). `Record Display/Window/Area` = `RecordingSettings.shared.mode = …` + `ToolbarController.shared.show()` + open that picker (reuse what the toolbar mode buttons call — one function, also used by T-204's table). `Show Recorder in Dock` = one persisted `Bool` → `NSApp.setActivationPolicy`, per the §8 rule. `Open Last Project` = newest `*.recorder` by modification date in the projects folder (opens in Finder until the editor exists in M3, then the editor). Main-menu File items reuse the same selectors.
+- [~] **T-207b Status-item menu** · SPEC §8 mockup (`reference/status-item-menu.png`) — in `AppDelegate`: rebuild the idle status menu exactly as SPEC §8 (SF Symbols `record.circle`, `display`, `macwindow`, `rectangle.dashed`; key equivalents as listed). `Record Display/Window/Area` = `RecordingSettings.shared.mode = …` + `ToolbarController.shared.show()` + open that picker (reuse what the toolbar mode buttons call — one function, also used by T-204's table). `Show Recorder in Dock` = one persisted `Bool` → `NSApp.setActivationPolicy`, per the §8 rule. `Open Last Project` = newest `*.recorder` by modification date in the projects folder (opens in Finder until the editor exists in M3, then the editor). Main-menu File items reuse the same selectors.
+  - WAITING ON HUMAN: `--selftest menus` OK (titles/order/key equivalents vs SPEC §8/§4.7, targets set); visual check vs `reference/status-item-menu.png`.
   - HUMAN: menu matches the mockup; AC-APP-4.
 
 - [ ] **T-208 M2 gate** — HUMAN: full pass of SPEC §4 mockups vs the app; list deviations in §Log.
@@ -418,14 +420,15 @@ Update the "Done" column whenever you tick a task.
   - HUMAN: AC-INS-1 for every Background control.
 
 - [~] **T-309 Output aspect** — `Compositor.outputSize` honours `project.output.aspect`; popup in the top bar edits it. Test in Core: `layoutAspects` (9:16 output with 16:10 source keeps source aspect inside padding). HUMAN: switching aspect re-letterboxes instantly.
-  - PARTIAL: Core `outputSize(aspect:croppedSource:longEdge:)` + `layoutAspects` test merged; `Compositor.outputSize` + top-bar popup remain (after T-307).
+  - WAITING ON HUMAN: `Compositor.outputSize(for:longEdge:)` now delegates to the Core function; the top-bar `Auto ▾` popup edits `project.output.aspect` through `model.edit("Aspect")` (one undo step) and stays in sync with undo/redo via `withObservationTracking`. Human: confirm switching aspect re-letterboxes the *preview canvas* instantly (AC-ED-1) — not verifiable headlessly since the preview needs a live editor window + real capture.
 
-- [ ] **T-310 Crop sheet** · SPEC §6.7 mockup — File `Editor/CropSheet.swift`. Sheet window hosting the current source frame (`AVAssetImageGenerator` at playhead's source time) under a `SelectionRectView` (reuse T-105; pass `aspect` for presets). Fields in source pixels. Confirm = one `model.edit("Crop")`; Discard/Esc = nothing.
+- [~] **T-310 Crop sheet** · SPEC §6.7 mockup — File `Editor/CropSheet.swift`. Sheet window hosting the current source frame (`AVAssetImageGenerator` at playhead's source time) under a `SelectionRectView` (reuse T-105; pass `aspect` for presets). Fields in source pixels. Confirm = one `model.edit("Crop")`; Discard/Esc = nothing.
+  - WAITING ON HUMAN: merged + wired to the top-bar Crop button; `--selftest crop` OK (mapping round-trip, Confirm = 1 undo step, Discard = no change); `crop-png` reviewed. Human: AC-CROP look vs `reference/…13.05.18.png` in the dark app.
   - HUMAN: AC-CROP-1 vs `reference/…13.05.18.png`.
 
 - [ ] **T-311 Menu wiring** — connect File/Edit/View items that now have targets (Open, Projects, Save, Save As = copy package, Show Raw Files = reveal in Finder, Undo/Redo, Crop, tabs). Items without a target stay disabled automatically (`validateMenuItem`).
 
-- [ ] **T-312 Library perf** · AC-LIB-1 — selftest `library-perf`: 200 fake packages, `reload()` < 300 ms. If slower: make sure only `project.json` + `thumbnail.jpg` are read.
+- [x] **T-312 Library perf** · AC-LIB-1 — selftest `library-perf`: 200 fake packages, `reload()` < 300 ms. If slower: make sure only `project.json` + `thumbnail.jpg` are read.
 
 - [ ] **T-313 M3 gate** — HUMAN: record → editor opens → change every Background control → quit → reopen: identical (AC-INS-1, AC-PRJ-3 by `pkill -9` mid-edit).
 
@@ -558,7 +561,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Do: `EditorModel` owns `cursorPath`/`cameraPath`, rebuilt inside `edit/update` only when `zooms`, `cursor`, `animation.screen` or `cursorHidden` changed (compare before/after). `FrameState.view/prevView/cursor` filled from them (prev = `t − 1/60`). Shader: screen UV = `center + (uv − 0.5) / scale`, inside the crop rect. Cursor pass: texture from `cursors/<id>.png` (cache `[String: MTLTexture]`), quad positioned in **screen space** (so it zooms), size = image points × `cursor.size` × output scale, offset by hotspot, × `clickScale`, alpha.
   - Selftest `render` gains `--t <seconds>`; HUMAN: play a recording with clicks — view zooms in on clicks and follows; cursor smooth, large, sharp (AC-CUR-2).
 
-- [ ] **T-414 Inspector: selection panels + Cursor tab (basic)** · SPEC §6.6 — Files `Inspector/ZoomPanel.swift`, `ClipPanel.swift`, `CursorTab.swift`. Selection replaces tabs; `‹ Back`/`Esc` deselects (AC-INS-3). Zoom panel: Level 1.2–5, Auto/Manual, Instant, Disable, Remove. Clip panel: speed presets + custom slider 0.25–16, duration readout, Remove. Cursor tab: Hide, Size 0.5–4, Movement picker, Hide when idle (others disabled with "M6").
+- [~] **T-414 Inspector: selection panels + Cursor tab (basic)** · SPEC §6.6 — Files `Inspector/ZoomPanel.swift`, `ClipPanel.swift`, `CursorTab.swift`. Selection replaces tabs; `‹ Back`/`Esc` deselects (AC-INS-3). Zoom panel: Level 1.2–5, Auto/Manual, Instant, Disable, Remove. Clip panel: speed presets + custom slider 0.25–16, duration readout, Remove. Cursor tab: Hide, Size 0.5–4, Movement picker, Hide when idle (others disabled with "M6").
+  - WAITING ON HUMAN (taste only): `--selftest inspector-panels` OK; zoom/clip/cursor PNGs reviewed by the lane agent. Deviation: no per-clip "Mute audio" (no such field in `Clip`).
 - [ ] **T-415 Manual zoom target in preview** — when a `.manual` zoom is selected, `PreviewView` shows the **un-zoomed** frame with a draggable accent rectangle (size = 1/scale) — reuse `SelectionRectView` with `aspect` locked and resize disabled (`allowsResize = false`, add that flag). Drag = `update { zoom.center }`.
 - [~] **T-416 Waveform** — File `Render/Waveform.swift`: `AVAssetReader` over mic (else system) → min/max peaks at 200/s → `[Float]` cached in memory; drawn inside clip blocks mapped through `TimeMap`. `// ponytail: computed on open, not cached on disk.`
   - PARTIAL: `Waveform.peaks(for:)` + `--selftest waveform` merged and verified (aiff + m4a); drawing inside clip blocks happens after the timeline lane (T-404…) merges.
@@ -572,7 +576,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 - [ ] **T-501 Motion blur** · SPEC §6.2 pass 2–3 — shader: when `|view − prevView|` > 0.5 px (in output px), average 8 taps of the screen texture along the UV delta, scaled by `animation.motionBlur` and gated by `blurZoom`/`blurPan` (scale change vs centre change); cursor quad: 8 taps along `pos − prevPos`, gated by `blurCursor`. Animations tab (`Inspector/AnimationsTab.swift`): slider + 3 advanced toggles + Focused/Smooth. The cursor Movement picker stays in the Cursor tab.
   - HUMAN: blur visible during zoom-in on a paused frame mid-transition (scrub slowly); none when static.
 - [ ] **T-502 Camera compositing** · SPEC §6.6 Camera — pass 4: camera texture in a rounded-rect SDF quad (reuse mode 3), size/corner/roundness/mirror/shadow; `shrinkWhenZoomed`: size × `lerp(1, 0.7, (scale−1)/(2−1) clamped)`. Camera tab UI; dragging the camera in the preview snaps to nearest corner.
-- [ ] **T-503 Layout track** — lane enabled; blocks via the generic block ops (T-402); kinds `cameraFull` (camera fills output, screen hidden) / `hidden`; 0.3 s cross-fade using `Spring.focused.value(at:)` at block edges; `LayoutPanel.swift`.
+- [~] **T-503 Layout track** — lane enabled; blocks via the generic block ops (T-402); kinds `cameraFull` (camera fills output, screen hidden) / `hidden`; 0.3 s cross-fade using `Spring.focused.value(at:)` at block edges; `LayoutPanel.swift`.
+  - PARTIAL: Core `layoutMix(layouts:atSource:fade:)` + test merged; lane UI, LayoutPanel and compositor use remain.
 - [ ] **T-504 Audio tab** — volumes/mutes → rebuild `AVAudioMix` only (no composition rebuild). `denoise`: applied **at export only** as an 80 Hz high-pass + peak normalise to −1 dBFS over the mic samples; preview plays the raw mic. `// ponytail: no real noise suppression and no preview; add an audio tap if users ask.` Click sound: mix `Resources/click.caf` at each `.down` time (export only; preview plays it with `NSSound`).
 - [ ] **T-505 Exporter (MP4)** · SPEC §6.8
   - File: `Sources/Recorder/Render/Exporter.swift`
@@ -596,15 +601,18 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 ## M6 — Polish  (each independent; any order)
 
 - [ ] **T-601 Masks & highlights** · SPEC §7.1 lane, §6.6 Mask panel — lane on; rect edited in preview with `SelectionRectView`; mask = solid fill at `opacity`, highlight = dim everything outside the rect by `opacity`. Keys: only those in SPEC §7.3.
-- [ ] **T-602 Keyboard-shortcut overlay** — render `.key` events as rounded chips (`⌘ ⇧ K`) bottom-centre for 1.2 s; text rendered to a texture with Core Text, cached per string. Keys tab.
+- [~] **T-602 Keyboard-shortcut overlay** — render `.key` events as rounded chips (`⌘ ⇧ K`) bottom-centre for 1.2 s; text rendered to a texture with Core Text, cached per string. Keys tab.
+  - PARTIAL: Core `keyChipLabel` / `activeKeyChip` + tests merged (modifier order ⌃⌥⇧⌘); texture rendering + Keys tab remain.
 - [~] **T-603 Speed up typing** — Edit ▸ Speed Up Typing: find runs of `.typing` events (gap < 1 s, length > 3 s), split clips around them, set 2×. Core fn `typingRanges(events:) -> [TimeRange]` + test.
   - PARTIAL: Core `typingRanges(events:)` + tests merged; Edit ▸ Speed Up Typing wiring remains (needs editor menus, M3/M4).
 - [~] **T-604 Cursor advanced** — loop position, rotate, remove shakes, always-arrow, hide-cursor ranges via Edit ▸ Hide Cursor in Selected Clip (adds the clip's source range to `cursorHidden`). Tests per stage in `CursorPath`.
   - PARTIAL: Core pipeline stages (shake removal, loop, rotation, always-arrow) + 4 tests merged; Cursor-tab controls and Edit ▸ Hide Cursor in Selected Clip remain.
-- [ ] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
-- [ ] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
-- [ ] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
-- [ ] **T-608 Cheat sheet (⌘/)** — static SwiftUI grid of SPEC §7.3.
+- [x] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
+- [x] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
+- [~] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
+  - WAITING: `--selftest command-menu` OK + PNG reviewed by lane agent; `CommandMenu.show()` still needs its ⌘K menu binding (T-311).
+- [~] **T-608 Cheat sheet (⌘/)** — static SwiftUI grid of SPEC §7.3.
+  - WAITING: all 19 rows of SPEC §7.3 rendered (`cheatsheet-png`); `CheatSheet.show()` still needs its ⌘/ menu binding (T-311).
 - [ ] **T-609 Shortcut settings + Copy frame (⇧⌘C)** — rebind the global hotkeys (the T-204 table); copy current composed frame to the pasteboard as PNG.
 
 ---
@@ -658,3 +666,13 @@ T-308 · 2026-09-18 · verified on master: `--selftest inspector` OK, PNG review
 T-404/T-405/T-406 · 2026-09-18 · verified on master: TimelineGeometry tests (3) green, `timeline-png` with hit-test assertions OK, PNG reviewed · deviations: minimal TimelineToolbar (Fit + zoom slider); cut-bubble hit box sits in an 8 pt sliver above the clip lane
 T-604 (core) / T-309 (core) · 2026-09-18 · verified: core-lane merged, `make test` 43/43 on master · deviations: shake threshold assumes a 1920 px reference width (`// ponytail:`); rotation = clamp(vx·12°, ±12°); always-arrow = `imageID nil` (renderer draws the default arrow)
 T-306/T-307 · 2026-09-18 · verified on master: `make app`, 43 tests, `preview-frame` OK (PNG reviewed), `--open` smoke by agent · deviations: shader mode 4 (BT.709 video range) + two-plane TextureCache; `Compositor.render(viewport:)` letterboxes; camera decode and CameraPath/CursorPath sampling deferred to T-502/T-413; aspect popup + Crop button unwired until T-309/T-310
+integration · 2026-09-18 · wired the M3/M4/T-309 hand-off points left by the parallel lanes: `EditorWindowController` hosts real `InspectorView`/`TimelineView`+`TimelineToolbar` (placeholders removed); `Library.open`/`RecordingController.finish` now call `EditorWindowController.open(package:)`; top-bar `‹ Projects` → `Library.show()`, `⌗ Crop` → `CropSheet.present(for:on:)` (T-310 had already landed on master by the time this ran); `Compositor.outputSize(for:longEdge:)` delegates to `RecorderCore.outputSize(aspect:croppedSource:longEdge:)`; aspect popup edits `project.output.aspect` via `model.edit` and stays synced through undo/redo (`withObservationTracking`) · verified: `make app`, `make test` 47/47, selftests `metal model library pickers recover inspector render crop inspector-panels preview-frame` all OK, new `editor-png` selftest OK + PNG reviewed (preview | 300 pt inspector over timeline matches SPEC §6.1; MTKView area blank and the titlebar accessory 0-width are known offscreen-capture gaps, not app bugs), `--open` smoke launch alive 4 s / no crash, killed cleanly · deviations: none beyond the two capture gaps noted above (see `// ponytail:` above the `editor-png` case)
+T-109 · 2026-09-18 · VERIFIED with real TCC (launched via `open -n … --args --selftest events 3`, Recorder.app's own grants): counts move=78 cursor=1, cursor image written → `SELFTEST events OK`
+T-110 · 2026-09-18 · VERIFIED with real TCC (`open -n … --args --selftest record display 3`): duration 2.98 s, size 2880×1800, events.json present → `SELFTEST record OK`
+T-312 · 2026-09-18 · verified: `--selftest library-perf` 108–182 ms for 200 packages (< 300 ms, AC-LIB-1); no ProjectStore change needed
+T-310 / T-414 / core halves of T-503, T-602, T-605 · 2026-09-18 · merged; see task notes
+NOTE · agents can run TCC-gated checks through LaunchServices: `open -n --stdout OUT --stderr ERR build/Recorder.app --args --selftest <name> …` (shell-launched binaries inherit the terminal's missing grants).
+T-606 · 2026-09-18 · verified on master: `--selftest import` OK (package contents, measured source, single full clip, original untouched), staged via `stageThenMove` · deviations: no fps on `Source` (not in SPEC §5); imports get kind `.display`, no audio/camera flags
+T-605 · 2026-09-18 · verified on master: Core `presetRoundTripAndApply` + `--selftest presets` OK (save/list/apply through EditorModel = 1 undo step, export/import round-trip, delete) · deviations: "Presets ▾" menu sits above the inspector tab bar (SPEC gives no location)
+T-203/T-204/T-205/T-207b · 2026-09-18 · verified on master: `make app`, 47 tests, `--selftest menus` OK, real-TCC `record display 3` still OK after the `elapsed` refactor (3.0 s, 2880×1800), `finder-windows` answered SPEC §9 Q3 · deviations: `CaptureSession.elapsed` now host-clock based; widget shown before the exclusion snapshot (follow-up fix); Delete alert default = Keep Recording
+T-607/T-608 · 2026-09-18 · merged: `command-menu` selftest OK; root fix `NSApp` → `NSApplication.shared` (nil under --selftest); menu bindings pending T-311

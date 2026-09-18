@@ -55,4 +55,52 @@ struct LayoutTests {
         #expect(abs(autoOutput.width / autoOutput.height - cropAspect) < 0.01)
         #expect(Int(autoOutput.width) == longEdge)
     }
+
+    @Test func layoutMixFadesAtEdges() {
+        let fade = 0.3
+        let block = Layout(id: "a", start: 2, end: 8, kind: .cameraFull)
+
+        // 0 well outside the block, and right at its edges.
+        #expect(layoutMix(layouts: [block], atSource: 0.5, fade: fade).amount == 0)
+        #expect(layoutMix(layouts: [block], atSource: 0.5, fade: fade).kind == nil)
+        #expect(layoutMix(layouts: [block], atSource: 9, fade: fade).amount == 0)
+        #expect(layoutMix(layouts: [block], atSource: block.start, fade: fade).amount == 0)
+        #expect(layoutMix(layouts: [block], atSource: block.end, fade: fade).amount == 0)
+
+        // Rising through the leading edge.
+        let rise1 = layoutMix(layouts: [block], atSource: block.start + 0.05, fade: fade).amount
+        let rise2 = layoutMix(layouts: [block], atSource: block.start + 0.15, fade: fade).amount
+        let rise3 = layoutMix(layouts: [block], atSource: block.start + 0.25, fade: fade).amount
+        #expect(0 < rise1 && rise1 < rise2 && rise2 < rise3 && rise3 < 1)
+
+        // 1 well inside the block.
+        let mid = layoutMix(layouts: [block], atSource: (block.start + block.end) / 2, fade: fade)
+        #expect(mid.kind == .cameraFull)
+        #expect(abs(mid.amount - 1) < 1e-9)
+
+        // Falling at the trailing edge, mirroring the rise.
+        let fall1 = layoutMix(layouts: [block], atSource: block.end - 0.05, fade: fade).amount
+        let fall2 = layoutMix(layouts: [block], atSource: block.end - 0.15, fade: fade).amount
+        let fall3 = layoutMix(layouts: [block], atSource: block.end - 0.25, fade: fade).amount
+        #expect(0 < fall1 && fall1 < fall2 && fall2 < fall3 && fall3 < 1)
+        #expect(abs(fall1 - rise1) < 1e-9) // symmetric in/out
+        #expect(abs(fall2 - rise2) < 1e-9)
+
+        // Continuous: a tiny nudge across each boundary (block start/end, and the point each ramp
+        // finishes) changes the amount by only a tiny amount.
+        let epsilon = 1e-7
+        for point in [block.start, block.end, block.start + fade, block.end - fade] {
+            let before = layoutMix(layouts: [block], atSource: point - epsilon, fade: fade).amount
+            let at = layoutMix(layouts: [block], atSource: point, fade: fade).amount
+            let after = layoutMix(layouts: [block], atSource: point + epsilon, fade: fade).amount
+            #expect(abs(at - before) < 1e-6)
+            #expect(abs(after - at) < 1e-6)
+        }
+
+        // Order-independent.
+        let other = Layout(id: "b", start: 20, end: 25, kind: .hidden)
+        let a = layoutMix(layouts: [block, other], atSource: 22.5, fade: fade)
+        let b = layoutMix(layouts: [other, block], atSource: 22.5, fade: fade)
+        #expect(a.kind == b.kind && abs(a.amount - b.amount) < 1e-12)
+    }
 }

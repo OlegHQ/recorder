@@ -6,18 +6,20 @@ import RecorderCore
 
 /// Turns a chosen `CaptureTarget` into a recorded `.recorder` package (SPEC §4.7–§4.8, §5). The one
 /// caller is `SourcePickerOverlay.startRecording(target:)` (also used by `AreaSelectionOverlay.start`);
-/// the M1 stop UI (status item, `AppDelegate`) calls `finish`.
+/// `finish`/`pause`/`resume`/`restart`/`delete` are called by the recording widget
+/// (`RecordingWidgetPanel`) and the status-item menu (T-207b).
 @MainActor final class RecordingController {
     static let shared = RecordingController()
 
     enum State { case idle, picking, countdown, recording, paused, finishing }
-    // `.picking`/`.paused` aren't reached yet: pickers track their own visibility (T-107/T-108), and
-    // pause/resume UI arrives with the recording widget (T-203). Kept because the signature is normative.
+    // `.picking` isn't reached yet: pickers track their own visibility (T-107/T-108). Kept because the
+    // signature is normative.
     private(set) var state: State = .idle
 
     private var session: CaptureSession?
     private var camera: CameraCapture?
     private var packageURL: URL?
+    private var currentTarget: CaptureTarget?
     private var highlightWindow: NSWindow?
 
     private init() {}
@@ -38,11 +40,15 @@ import RecorderCore
         Task { await start(target: target) }
     }
 
-    private func start(target: CaptureTarget) async {
+    /// `isRestart`/`restartCamera`: T-203's `restart()` re-enters here with the countdown and
+    /// toolbar-close skipped (no re-prompt, no toolbar to close mid-recording) and its own still-live
+    /// `CameraCapture` instance passed through (grabbing `CameraCapture.current` again would miss it —
+    /// `ToolbarController` already dropped its reference the first time this ran).
+    private func start(target: CaptureTarget, isRestart: Bool = false, restartCamera: CameraCapture? = nil) async {
         let settings = RecordingSettings.shared
         state = .countdown
 
-        if settings.countdown > 0 {
+        if settings.countdown > 0 && !isRestart {
             let targetRect = SourcePickerOverlay.flip(target.frameInScreenPoints, in: NSScreen.screens[0])
             guard await CountdownOverlay.run(seconds: settings.countdown, over: targetRect) else {
                 state = .idle // Esc: back to the picker (still open, we haven't touched it yet).
@@ -52,16 +58,20 @@ import RecorderCore
 
         // Grab our own strong reference before `ToolbarController.close()` drops its own (which would
         // otherwise let the AVCaptureSession deallocate) and hides the bubble.
-        let camera = CameraCapture.current
-        ToolbarController.shared.close()
+        let camera = isRestart ? restartCamera : CameraCapture.current
+        if !isRestart { ToolbarController.shared.close() }
         if let camera { CameraBubblePanel.show(previewLayer: camera.previewLayer) }
 
         let name = "Recording \(RecordingController.folderFormatter.string(from: Date()))"
         let packageURL = settings.projectsFolder.appendingPathComponent("\(name).recorder")
 
-        // Registered with `FloatingPanel` before `CaptureSession` reads the exclusion list below, so it
-        // never leaks into `screen.mov` (AC-TB-1 applies to this overlay too).
+        // Both registered with `FloatingPanel` *before* `CaptureSession` reads the exclusion list below
+        // (its `SCContentFilter` is a fixed snapshot, not updated afterward), so neither ever leaks into
+        // `screen.mov` (AC-TB-1 applies to every recording-flow surface, including these two). The widget
+        // shows here — alongside the highlight, before the capture session even exists — rather than
+        // after `session.start()` succeeds, specifically so its window exists in time for that snapshot.
         showHighlight(for: target, settings: settings)
+        RecordingWidgetPanel.show()
 
         do {
             let session = try await CaptureSession(target: target, settings: settings, packageURL: packageURL)
@@ -73,17 +83,21 @@ import RecorderCore
             self.session = session
             self.camera = camera
             self.packageURL = packageURL
+            self.currentTarget = target
             state = .recording
+            applyDockIconPolicy(hiddenWhileRecording: true)
         } catch {
             NSLog("Recorder: capture failed to start: \(error)")
             hideHighlight()
+            RecordingWidgetPanel.hide()
             try? FileManager.default.removeItem(at: packageURL)
             state = .idle
         }
     }
 
     /// Stop writers → write `events.json` (inside `CaptureSession.finish`) → build & save `project.json`
-    /// → reveal the package. Editor hand-off: see the marked call site below.
+    /// → open the editor (SPEC §4.7 "Finish → … → open editor", AC-REC-4). Editor hand-off: see the
+    /// marked call site below.
     func finish() {
         guard state == .recording || state == .paused else { return }
         state = .finishing
@@ -121,9 +135,7 @@ import RecorderCore
         await writeThumbnail(packageURL: packageURL)
 
         // MARK: Editor hand-off call site
-        // The editor window lands in M3 (another lane). Once `EditorWindowController` exists, replace
-        // this with `EditorWindowController.open(package: packageURL)`.
-        NSWorkspace.shared.activateFileViewerSelecting([packageURL])
+        EditorWindowController.open(package: packageURL)
     }
 
     func cancel() {
@@ -139,12 +151,70 @@ import RecorderCore
         }
     }
 
+    // MARK: - Widget/status-menu operations (SPEC §4.7) — the one implementation of each, shared by
+    // `RecordingWidgetPanel` and the status-item menu (T-207b).
+
+    func pause() {
+        guard state == .recording else { return }
+        session?.pause()
+        state = .paused
+    }
+
+    func resume() {
+        guard state == .paused else { return }
+        session?.resume()
+        state = .recording
+    }
+
+    /// Discard the current recording and start again with the same target/settings — no countdown
+    /// re-prompt (SPEC §4.7). Keeps the camera device open across the restart (see `start(target:)`).
+    func restart() {
+        guard state == .recording || state == .paused, let target = currentTarget else { return }
+        state = .finishing
+        hideHighlight()
+        let session = self.session
+        let camera = self.camera
+        Task {
+            await session?.cancel()
+            self.reset()
+            await self.start(target: target, isRestart: true, restartCamera: camera)
+        }
+    }
+
+    /// Confirms via `NSAlert`, then discards exactly like `cancel()` (SPEC §4.7 "Delete asks for
+    /// confirmation"). "Keep Recording" is added first — and so is the alert's default button (Return
+    /// key, initial focus) — precisely so an accidental Return doesn't discard a recording.
+    func delete() {
+        guard state == .recording || state == .paused else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete this recording?"
+        alert.informativeText = "This can't be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Keep Recording")
+        let deleteButton = alert.addButton(withTitle: "Delete")
+        deleteButton.hasDestructiveAction = true
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        cancel()
+    }
+
     private func reset() {
         session = nil
         camera = nil
         packageURL = nil
+        currentTarget = nil
         state = .idle
         CameraBubblePanel.hide()
+        RecordingWidgetPanel.hide()
+        applyDockIconPolicy(hiddenWhileRecording: false)
+    }
+
+    /// SPEC §4.2/§4.7 "Hide Recorder dock icon while recording": `.accessory` for the duration of a
+    /// recording, `.regular` once it ends — only when the toggle (gear menu) is on.
+    // ponytail: `restart()` calls `reset()` then re-enters `start`, so the dock icon can flash back on
+    // for the instant in between; not worth extra state to special-case a chain that's already one Task.
+    private func applyDockIconPolicy(hiddenWhileRecording: Bool) {
+        guard RecordingSettings.shared.hideDockIcon else { return }
+        NSApp.setActivationPolicy(hiddenWhileRecording ? .accessory : .regular)
     }
 
     private static let folderFormatter: DateFormatter = {
