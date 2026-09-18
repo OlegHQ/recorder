@@ -1,13 +1,17 @@
 import AppKit
 import AVFoundation
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreMedia
 import Darwin
 import Dispatch
 import Foundation
+import ImageIO
 import Metal
 import RecorderCore
 import ScreenCaptureKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Headless app checks, run instead of the GUI when launched with `--selftest <name> [args]`.
 /// Cases are registered by later tasks: `SelfTest.cases["name"] = { args in … throws }`.
@@ -19,6 +23,63 @@ enum SelfTest {
         },
         "permissions": { _ in
             print("screen=\(Permissions.screen) accessibility=\(Permissions.accessibility)")
+        },
+        // Throwaway generator (T-308, SPEC §6.6): writes `Resources/Wallpapers/01.jpg`…`12.jpg` —
+        // abstract gradients we made ourselves (never Apple's or Screen Studio's images). Run once
+        // from the repo root (`--selftest make-wallpapers`) and commit the result; re-run only if
+        // the palette needs to change.
+        "make-wallpapers": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let dir = URL(fileURLWithPath: "Resources/Wallpapers")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let context = CIContext()
+            let size = CGSize(width: 640, height: 400)
+            let rect = CGRect(origin: .zero, size: size)
+
+            func color(hue: Double, saturation: Double, brightness: Double) -> CIColor {
+                let ns = NSColor(calibratedHue: hue.truncatingRemainder(dividingBy: 1),
+                                  saturation: saturation, brightness: brightness, alpha: 1)
+                let srgb = ns.usingColorSpace(.sRGB) ?? ns
+                return CIColor(red: srgb.redComponent, green: srgb.greenComponent, blue: srgb.blueComponent)
+            }
+
+            for i in 0..<12 {
+                let id = String(format: "%02d", i + 1)
+                let hue0 = Double(i) / 12
+                let c0 = color(hue: hue0, saturation: 0.62, brightness: 0.5)
+                let c1 = color(hue: hue0 + 0.18, saturation: 0.75, brightness: 0.88)
+
+                let output: CIImage
+                if i % 2 == 0 {
+                    let filter = CIFilter.linearGradient()
+                    filter.color0 = c0
+                    filter.color1 = c1
+                    filter.point0 = i % 4 == 0 ? CGPoint(x: 0, y: 0) : CGPoint(x: size.width, y: 0)
+                    filter.point1 = i % 4 == 0 ? CGPoint(x: size.width, y: size.height) : CGPoint(x: 0, y: size.height)
+                    guard let img = filter.outputImage else { throw Fail(description: "linearGradient failed for \(id)") }
+                    output = img
+                } else {
+                    let filter = CIFilter.radialGradient()
+                    filter.color0 = c1
+                    filter.color1 = c0
+                    filter.center = CGPoint(x: size.width * (i % 4 == 1 ? 0.35 : 0.65), y: size.height * 0.5)
+                    filter.radius0 = 0
+                    filter.radius1 = Float(max(size.width, size.height) * 0.75)
+                    guard let img = filter.outputImage else { throw Fail(description: "radialGradient failed for \(id)") }
+                    output = img
+                }
+
+                guard let cgImage = context.createCGImage(output.cropped(to: rect), from: rect) else {
+                    throw Fail(description: "createCGImage failed for \(id)")
+                }
+                let url = dir.appendingPathComponent("\(id).jpg")
+                guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+                    throw Fail(description: "no destination for \(id)")
+                }
+                CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+                guard CGImageDestinationFinalize(dest) else { throw Fail(description: "finalize failed for \(id)") }
+            }
+            print("wrote 12 wallpapers to \(dir.path)")
         },
         "render": { args in try Compositor.runRenderSelfTest(args) },
         "composition": { args in try await runCompositionSelfTest(args) },
@@ -247,6 +308,97 @@ enum SelfTest {
             guard hitErrors.isEmpty else { throw Fail(description: "hitTest: \(hitErrors.joined(separator: "; "))") }
             guard let png else { throw Fail(description: "no PNG data") }
             try png.write(to: URL(fileURLWithPath: outPath))
+        },
+        // T-308: exercises the exact closures `BackgroundTab`'s controls call — `fieldBinding`
+        // (drag: beginGesture → update × N → commitGesture) for the Padding slider, and
+        // `kindBinding` (a plain `model.edit`) for the kind picker — and checks they behave as
+        // the two undo steps AC-INS-2 requires, with autosave round-tripping both edits.
+        "inspector": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            let projectURL = tmp.appendingPathComponent("project.json")
+            let original = Project(title: "Inspector Test")
+            try original.save(to: projectURL)
+
+            let model = await EditorModel(packageURL: tmp, project: original, events: EventLog())
+
+            // Padding `LabeledSlider` drag: begin -> 10 updates -> commit == one undo step.
+            await model.beginGesture()
+            for i in 0..<10 {
+                let v = Double(i + 1) / 10 * 0.3
+                await model.update { $0.frame.padding = v }
+            }
+            await model.commitGesture("Padding")
+            let afterPadding = await model.project
+            guard afterPadding.frame.padding != original.frame.padding else {
+                throw Fail(description: "padding slider drag didn't change the project")
+            }
+
+            // Background kind picker == one plain `model.edit`, one more undo step.
+            await model.edit("Background kind") { $0.background.kind = .gradient }
+            let afterKind = await model.project
+            guard afterKind.background.kind == .gradient else { throw Fail(description: "kind change didn't apply") }
+
+            // Autosave reflects both edits.
+            try await Task.sleep(nanoseconds: 700_000_000)
+            let onDisk = try Project.load(from: projectURL)
+            guard onDisk.background.kind == .gradient, onDisk.frame.padding == afterPadding.frame.padding else {
+                throw Fail(description: "autosave didn't persist the inspector edits: \(onDisk)")
+            }
+
+            // Exactly 2 undo steps: first undo reverts only the kind change, second restores the
+            // original project, a third is a no-op (proves there weren't more than 2).
+            await model.undo()
+            guard await model.project == afterPadding else {
+                throw Fail(description: "first undo should revert only the kind change")
+            }
+            await model.undo()
+            guard await model.project == original else {
+                throw Fail(description: "second undo should restore the original project")
+            }
+            await model.undo()
+            guard await model.project == original else {
+                throw Fail(description: "a third undo changed the project — more than 2 undo steps were recorded")
+            }
+        },
+        // Renders `InspectorView` offscreen (300 pt wide, dark appearance) to a PNG for visual
+        // comparison against the SPEC §6.6 mockup. Not part of the automated pass/fail contract.
+        "inspector-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: inspector-png <out.png>") }
+            try await MainActor.run {
+                let fm = FileManager.default
+                let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-png-\(UUID().uuidString)")
+                try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+                defer { try? fm.removeItem(at: tmp) }
+                var project = Project(title: "Inspector PNG")
+                if let kind = args[safe: 1].flatMap(Background.Kind.init(rawValue:)) { project.background.kind = kind }
+                try project.save(to: tmp.appendingPathComponent("project.json"))
+                let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+
+                let height: CGFloat = 760
+                let hosting = NSHostingView(rootView: InspectorView(model: model))
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 300, height: height)
+
+                let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .darkAqua)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else {
+                    throw Fail(description: "png encode failed")
+                }
+                try data.write(to: URL(fileURLWithPath: outPath))
+                print("wrote \(outPath)")
+            }
         },
         "events": { args in
             let seconds = args.first.flatMap(Double.init) ?? 3
