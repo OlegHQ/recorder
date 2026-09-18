@@ -338,11 +338,32 @@ public extension Project {
         return (layout.start, layout.end)
     }
 
-    // MARK: - Mask (`moveMask` landed with T-417 for the accessibility nudge; T-601 adds add/resize.)
+    // MARK: - Mask (`moveMask` landed with T-417 for the accessibility nudge)
+
+    /// Adds a mask of `length` seconds (`Mask.Kind` `kind`, default rect/opacity) into the free
+    /// gap in `masks` that contains source time `s`. Returns its id, or `nil` if that gap is
+    /// shorter than 0.5 s.
+    @discardableResult
+    mutating func addMask(atSource s: Double, length: Double = 3, kind: Mask.Kind, rect: NormRect = NormRect(), opacity: Double = 0.8) -> UUID? {
+        addBlock(atSource: s, length: length, in: \.masks) { id, start, end in Mask(id: id, start: start, end: end, kind: kind, rect: rect, opacity: opacity) }
+    }
 
     /// Moves mask `id` so it starts at source time `s`, clamped against its neighbours and
     /// `[0, source.duration]`.
     mutating func moveMask(_ id: UUID, toStart s: Double) { moveBlock(id, in: \.masks, toStart: s) }
+
+    /// Drags mask `id`'s `edge` to source time `s`, clamped so it stays >= 0.5 s and never
+    /// overlaps its neighbour.
+    mutating func resizeMask(_ id: UUID, edge: Edge, to s: Double) { resizeBlock(id, in: \.masks, edge: edge, to: s) }
+
+    /// Non-mutating preview of where `addMask(atSource:length:kind:)` would place a new block —
+    /// for the empty mask-lane "ghost" (SPEC §7.2). `nil` exactly when `addMask` would also fail.
+    func previewMaskPlacement(atSource s: Double, length: Double = 3) -> (start: Double, end: Double)? {
+        var trial = self
+        guard let id = trial.addMask(atSource: s, length: length, kind: .mask),
+              let mask = trial.masks.first(where: { $0.id == id.uuidString }) else { return nil }
+        return (mask.start, mask.end)
+    }
 
     /// Removes the zoom, layout or mask block with `id`, whichever track it's in.
     mutating func removeBlock(_ id: UUID) {

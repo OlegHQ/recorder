@@ -6,7 +6,7 @@ import SwiftUI
 
 /// Which timed-block track a point/x-coordinate belongs to. Top-to-bottom draw/hit-test order
 /// matches this declaration order (SPEC §7.1): clip, zoom, layout (only if `source.hasCamera`),
-/// mask (hidden until T-601).
+/// mask.
 enum Lane: CaseIterable, Sendable {
     case clip, zoom, layout, mask
 }
@@ -46,6 +46,7 @@ final class TimelineView: NSView {
     static let clipHeight: CGFloat = 44
     static let zoomHeight: CGFloat = 32
     static let layoutHeight: CGFloat = 28
+    static let maskHeight: CGFloat = 28
     static let blockRadius: CGFloat = 10
     /// SPEC §7.2 "Navigation": zoom range is whole project ↔ 1 frame = 8 pt, at 60 fps.
     static let maxPxPerSecond: Double = 8 * 60
@@ -222,7 +223,7 @@ final class TimelineView: NSView {
         case .clip: return Self.clipHeight
         case .zoom: return Self.zoomHeight
         case .layout: return hasLayoutLane ? Self.layoutHeight : 0
-        case .mask: return 0 // ponytail: mask lane hidden until T-601, which turns this on.
+        case .mask: return Self.maskHeight // SPEC §7.1: always shown, like the zoom lane (not gated on hasCamera)
         }
     }
 
@@ -262,6 +263,7 @@ final class TimelineView: NSView {
         drawClickTicks(project, timeMap)
         drawEmptyLaneGhost()
         if hasLayoutLane { drawLayoutLane(project, timeMap) }
+        drawMaskLane(project, timeMap)
         drawLaneDividers()
         drawPlayhead(model.playhead)
         // Drawn after the playhead/its timecode chip so a cut near the playhead is never hidden
@@ -314,7 +316,7 @@ final class TimelineView: NSView {
     }
 
     private func drawGutterIcons() {
-        let icons: [Lane: String] = [.clip: "rectangle.stack", .zoom: "magnifyingglass", .layout: "person.crop.square"]
+        let icons: [Lane: String] = [.clip: "rectangle.stack", .zoom: "magnifyingglass", .layout: "person.crop.square", .mask: "rectangle.dashed"]
         for lane in Lane.allCases {
             guard laneHeight(lane) > 0, let symbol = icons[lane] else { continue }
             let row = laneRow(lane)
@@ -481,6 +483,24 @@ final class TimelineView: NSView {
                                    width: max(0, x(forOutput: segment.outEnd) - x(forOutput: segment.outStart)), height: row.height - 4)
                 guard rect.width > 0.5 else { continue }
                 drawBlock(rect, fill: Theme.layout, tornLeft: segment.tornLeft, tornRight: segment.tornRight, label: label, selected: selected)
+            }
+        }
+    }
+
+    /// SPEC §7.1 mask lane (T-601, "▦" mask / "◐" highlight). The mask RECT itself is edited in
+    /// the preview (`MaskRectOverlay`), not here — this lane only shows the block's time range.
+    private func drawMaskLane(_ project: Project, _ timeMap: TimeMap) {
+        let row = laneRow(.mask)
+        let selection = model?.selection ?? []
+        for mask in project.masks {
+            let kindLabel = mask.kind == .mask ? "\u{25A6} Mask" : "\u{25D0} Highlight"
+            let label = "\(kindLabel) \(Int((mask.opacity * 100).rounded()))%"
+            let selected = UUID(uuidString: mask.id).map(selection.contains) ?? false
+            for segment in visibleSegments(start: mask.start, end: mask.end, project: project, timeMap: timeMap) {
+                let rect = CGRect(x: x(forOutput: segment.outStart), y: row.minY + 2,
+                                   width: max(0, x(forOutput: segment.outEnd) - x(forOutput: segment.outStart)), height: row.height - 4)
+                guard rect.width > 0.5 else { continue }
+                drawBlock(rect, fill: Theme.mask, tornLeft: segment.tornLeft, tornRight: segment.tornRight, label: label, selected: selected)
             }
         }
     }
@@ -779,6 +799,7 @@ final class TimelineView: NSView {
         if hasLayoutLane, let hit = hitBlockLane(p, model, lane: .layout, blocks: model.project.layouts.map { ($0.id, $0.start, $0.end) }) {
             return hit
         }
+        if let hit = hitBlockLane(p, model, lane: .mask, blocks: model.project.masks.map { ($0.id, $0.start, $0.end) }) { return hit }
         if let hit = hitCutBubble(p, model) { return hit }
         if let hit = hitEmptyLane(p, model) { return hit }
         if p.y <= Self.rulerHeight { return .ruler }
@@ -1351,7 +1372,7 @@ final class TimelineView: NSView {
         switch lane {
         case .zoom: model.edit("Add Zoom") { newID = $0.addZoom(atSource: s, mode: zoomMode(nearSource: s)) }
         case .layout: model.edit("Add Layout") { newID = $0.addLayout(atSource: s, kind: .cameraFull) }
-        case .mask: break // T-601: `Project.addMask` + the mask lane's own empty-lane click
+        case .mask: model.edit("Add Mask") { newID = $0.addMask(atSource: s, kind: .mask) }
         case .clip: break // clips are never added this way (SPEC's hit-test table only lists zoom/layout/mask)
         }
         if let newID { selectBlock(newID, addToSelection: false) }
@@ -1435,7 +1456,7 @@ final class TimelineView: NSView {
             switch lane {
             case .zoom: project.resizeZoom(id, edge: edge, to: source)
             case .layout: project.resizeLayout(id, edge: edge, to: source)
-            case .mask: break // T-601: `Project.resizeMask` + the mask lane's own edge-drag
+            case .mask: project.resizeMask(id, edge: edge, to: source)
             case .clip: break
             }
         }
@@ -1449,7 +1470,7 @@ final class TimelineView: NSView {
         switch lane {
         case .zoom: return model?.project.previewZoomPlacement(atSource: s)
         case .layout: return model?.project.previewLayoutPlacement(atSource: s)
-        case .mask: return nil // T-601: `Project.previewMaskPlacement`
+        case .mask: return model?.project.previewMaskPlacement(atSource: s)
         case .clip: return nil
         }
     }

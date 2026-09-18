@@ -330,6 +330,73 @@ enum SelfTest {
             // (no-op — discard's entire contract is "don't call confirm")
             guard await model.project == beforeDiscard else { throw Fail(description: "discard mutated the project") }
         },
+        // T-601: `MaskRectOverlay` — visibility follows selection, a drag on its `view` maps
+        // through `CropMapping` (the same pure pair "crop" above already round-trips) into the
+        // selected mask's `rect`, and the whole drag is exactly one undo step.
+        "mask-rect": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-mask-rect-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+            // A square 1000×1000 source into a 1000×1000 mount: `CropMapping.imageRect` letterboxes
+            // to exactly the full area, so view points and normalised [0,1000] source points coincide
+            // — keeps the drag's expected numbers simple without weakening what's under test (the
+            // mapping itself is already covered by "crop" above).
+            var project = Project(title: "Mask rect test", source: Source(pixelWidth: 1000, pixelHeight: 1000, duration: 20))
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)]
+            let mask = Mask(start: 2, end: 6, kind: .mask, rect: NormRect(x: 0.1, y: 0.1, w: 0.3, h: 0.3), opacity: 0.8)
+            project.masks = [mask]
+            let maskID = UUID(uuidString: mask.id)!
+
+            let model = await EditorModel(packageURL: tmp, project: project, events: EventLog())
+            let overlay = await MaskRectOverlay(model: model)
+            await overlay.layout(in: CGSize(width: 1000, height: 1000))
+            guard await overlay.view.isHidden else { throw Fail(description: "overlay should start hidden — nothing selected") }
+
+            // `withObservationTracking`'s onChange (like `EditorModel`'s own autosave elsewhere in
+            // this file) lands on a `DispatchQueue.main.async` hop — `Task.sleep` (not a manual
+            // `RunLoop` pump) is this harness's proven way to let that land before asserting.
+            await MainActor.run { model.selection = [maskID] }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            guard await !overlay.view.isHidden else { throw Fail(description: "overlay should show once the mask is selected") }
+
+            // The initial rect (top-left-origin NormRect(0.1,0.1,0.3,0.3), bottom-left-origin
+            // view space) is (100, 600, 300, 300): its interior contains (150, 650).
+            let undoBefore = await model.undoStepCount
+            await MainActor.run {
+                overlay.view.mouseDown(with: synthEvent(.leftMouseDown, CGPoint(x: 150, y: 650)))
+                overlay.view.mouseDragged(with: synthEvent(.leftMouseDragged, CGPoint(x: 250, y: 650))) // +100 x, move mode
+            }
+            let liveRect = await model.project.masks[0].rect
+            guard liveRect.x != mask.rect.x || liveRect.y != mask.rect.y else {
+                throw Fail(description: "drag didn't move the rect live")
+            }
+            guard await model.undoStepCount == undoBefore else { throw Fail(description: "an in-progress drag shouldn't push an undo step yet") }
+            await MainActor.run { overlay.view.mouseUp(with: synthEvent(.leftMouseUp, CGPoint(x: 250, y: 650))) }
+            guard await model.undoStepCount == undoBefore + 1 else { throw Fail(description: "the drag should push exactly one undo step") }
+
+            let moved = await model.project.masks[0].rect
+            let expected = NormRect(x: 0.2, y: 0.1, w: 0.3, h: 0.3)
+            guard abs(moved.x - expected.x) < 1e-6, abs(moved.y - expected.y) < 1e-6,
+                  abs(moved.w - expected.w) < 1e-6, abs(moved.h - expected.h) < 1e-6 else {
+                throw Fail(description: "unexpected rect after drag: \(moved), want \(expected)")
+            }
+            guard await model.project.checkInvariants() == nil else { throw Fail(description: "invariants broke after the rect drag") }
+
+            await model.undo()
+            let undoneRect = await model.project.masks[0].rect
+            guard abs(undoneRect.x - mask.rect.x) < 1e-6 else { throw Fail(description: "undo didn't restore the pre-drag rect") }
+
+            await MainActor.run { model.selection = [] }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            guard await overlay.view.isHidden else { throw Fail(description: "overlay should hide once deselected") }
+        },
         // T-310: renders `CropSheetWindow`'s content view offscreen with a synthetic frame image to PNG,
         // for eyeballing against the SPEC §6.7 mockup (`Read` tool). Not a correctness test.
         // ponytail: rendered in light appearance (`--selftest` never runs `AppDelegate`, which is what
@@ -399,6 +466,7 @@ enum SelfTest {
                 Zoom(start: 30, end: 38, scale: 1.6, mode: .manual),    // torn: 35...38 falls in the cut
             ]
             project.layouts = [Layout(start: 0, end: 15, kind: .cameraFull)]
+            project.masks = [Mask(start: 20, end: 26, kind: .highlight, rect: NormRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5), opacity: 0.6)]
 
             let fm = FileManager.default
             let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-timeline-\(UUID().uuidString)")
@@ -414,6 +482,7 @@ enum SelfTest {
 
             let zoom0ID = UUID(uuidString: project.zooms[0].id)!
             let layout0ID = UUID(uuidString: project.layouts[0].id)!
+            let mask0ID = UUID(uuidString: project.masks[0].id)!
 
             let view = await MainActor.run { () -> TimelineView in
                 let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 160))
@@ -442,6 +511,9 @@ enum SelfTest {
                 expect(CGPoint(x: 290, y: 40), .clipEdge(0, .trailing), "clipEdge")
                 expect(CGPoint(x: 140, y: 80), .blockBody(zoom0ID), "zoomBody")
                 expect(CGPoint(x: 150, y: 110), .blockBody(layout0ID), "layoutBody")
+                // mask [20, 26) source, inside the 2× clip1 -> output [17.5, 20.5); mid ≈ 366, mask
+                // row is the 4th (ruler 22 + clip 44 + zoom 32 + layout 28 = 98...126, mask 126...154).
+                expect(CGPoint(x: 366, y: 140), .blockBody(mask0ID), "maskBody")
                 expect(CGPoint(x: 200, y: 10), .ruler, "ruler")
                 expect(CGPoint(x: 476, y: 18), .cutBubble(afterClip: 1), "cutBubble")
                 if case .emptyLane(.zoom, _) = view.hitTest(at: CGPoint(x: 700, y: 80)) {} else {
@@ -520,7 +592,7 @@ enum SelfTest {
         "inspector-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let outPath = args.first else {
-                throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|layout|cursor|camera|audio|animations|keys]")
+                throw Fail(description: "usage: inspector-png <out.png> [background-kind|zoom|clip|layout|mask|cursor|camera|audio|animations|keys]")
             }
             try await MainActor.run {
                 let fm = FileManager.default
@@ -536,11 +608,13 @@ enum SelfTest {
                 project.zooms = [zoom]
                 let layout = Layout(start: 10, end: 15, kind: .cameraFull)
                 project.layouts = [layout]
+                let mask = Mask(start: 20, end: 24, kind: .mask, rect: NormRect(x: 0.2, y: 0.2, w: 0.4, h: 0.4), opacity: 0.8)
+                project.masks = [mask]
 
                 let variant = args[safe: 1]
                 var initialTab: InspectorView.Tab = .background
                 switch variant {
-                case "zoom", "clip", "layout": break
+                case "zoom", "clip", "layout", "mask": break
                 case "cursor": initialTab = .cursor
                 case "camera": initialTab = .camera; project.source.hasCamera = true
                 case "camera-empty": initialTab = .camera
@@ -557,6 +631,7 @@ enum SelfTest {
                 if variant == "zoom" { model.selection = [UUID(uuidString: zoom.id)!] }
                 if variant == "clip" { model.selectedClip = 1 }
                 if variant == "layout" { model.selection = [UUID(uuidString: layout.id)!] }
+                if variant == "mask" { model.selection = [UUID(uuidString: mask.id)!] }
 
                 let height: CGFloat = 760
                 let hosting = NSHostingView(rootView: InspectorView(model: model, initialTab: initialTab))
@@ -792,6 +867,59 @@ enum SelfTest {
             guard await model.project == beforeLayoutAdd else { throw Fail(description: "undo 3 should restore the pre-add project") }
             await model.redo(); await model.redo(); await model.redo()
             guard await model.project == afterLayoutRemove else { throw Fail(description: "redo didn't replay all 3 layout steps") }
+
+            // --- Mask panel (T-601): the exact closures `MaskPanel`'s kind picker/Opacity
+            // slider/Remove call — `Project.addMask`/a plain `model.edit` field write/an
+            // `update`-only slider drag bracketed by `beginGesture`/`commitGesture`/
+            // `Project.removeBlock` — each one undo step, invariants hold throughout. ---
+            let beforeMaskAdd = await model.project
+            var maskID: UUID!
+            await model.edit("Add Mask") { maskID = $0.addMask(atSource: 12, kind: .mask) }
+            let afterMaskAdd = await model.project
+            guard afterMaskAdd.masks.count == 1, afterMaskAdd.masks[0].kind == .mask, afterMaskAdd.masks[0].opacity == 0.8 else {
+                throw Fail(description: "addMask didn't add a mask-kind block at the default opacity: \(afterMaskAdd.masks)")
+            }
+            if let err = afterMaskAdd.checkInvariants() { throw Fail(description: "invariants broke after addMask: \(err)") }
+
+            await model.edit("Mask") { project in
+                guard let i = project.masks.firstIndex(where: { $0.id == maskID.uuidString }) else { return }
+                project.masks[i].kind = .highlight
+            }
+            let afterMaskKind = await model.project
+            guard afterMaskKind.masks[0].kind == .highlight else { throw Fail(description: "mask kind change didn't apply") }
+
+            // Opacity `LabeledSlider` drag: begin -> 10 updates -> commit == one undo step.
+            await model.beginGesture()
+            for i in 0..<10 {
+                let v = Double(i + 1) / 10
+                await model.update { project in
+                    guard let idx = project.masks.firstIndex(where: { $0.id == maskID.uuidString }) else { return }
+                    project.masks[idx].opacity = v
+                }
+            }
+            await model.commitGesture("Mask opacity")
+            let afterMaskOpacity = await model.project
+            guard afterMaskOpacity.masks[0].opacity != afterMaskKind.masks[0].opacity else {
+                throw Fail(description: "opacity slider drag didn't change the mask's opacity")
+            }
+            if let err = afterMaskOpacity.checkInvariants() { throw Fail(description: "invariants broke after the opacity drag: \(err)") }
+
+            await model.edit("Remove mask") { $0.removeBlock(maskID) }
+            let afterMaskRemove = await model.project
+            guard afterMaskRemove.masks.isEmpty else { throw Fail(description: "mask remove didn't delete it") }
+            if let err = afterMaskRemove.checkInvariants() { throw Fail(description: "invariants broke after mask remove: \(err)") }
+
+            // Exactly 4 undo steps (add, kind, opacity drag, remove).
+            await model.undo()
+            guard await model.project == afterMaskOpacity else { throw Fail(description: "undo 1 should revert only the mask remove") }
+            await model.undo()
+            guard await model.project == afterMaskKind else { throw Fail(description: "undo 2 should revert only the opacity drag") }
+            await model.undo()
+            guard await model.project == afterMaskAdd else { throw Fail(description: "undo 3 should revert only the mask kind change") }
+            await model.undo()
+            guard await model.project == beforeMaskAdd else { throw Fail(description: "undo 4 should restore the pre-add project") }
+            await model.redo(); await model.redo(); await model.redo(); await model.redo()
+            guard await model.project == afterMaskRemove else { throw Fail(description: "redo didn't replay all 4 mask steps") }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
         // front — `EditorWindowController.makeOffscreen`) for a fixture package and caches its
@@ -1745,6 +1873,11 @@ private func runTimelineOpsSelfTest() async throws {
         defer { cleanup() }
         try runLayoutBlockSelfTest(model: model, view: view, px: px, py: py)
     }
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        try runMaskBlockSelfTest(model: model, view: view, px: px, py: py)
+    }
     try runFitOnFirstLayoutSelfTest()
 }
 
@@ -2263,5 +2396,98 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
     guard let children = view.accessibilityChildren() as? [NSAccessibilityElement],
           children.contains(where: { $0.accessibilityLabel() == "Layout, Hidden, 0.0 to 3.0 seconds" }) else {
         throw TimelineOpsFail(description: "no Layout accessibility element for the hidden-kind block")
+    }
+}
+
+/// T-601 "Masks & highlights" (timeline half): add (empty-lane click), body drag = move, edge
+/// drag = resize, `Esc` mid-drag (AC-TL-6) and Remove — the exact same generic gesture code
+/// `runZoomBlockSelfTest`/`runLayoutBlockSelfTest` above already exercise, just parametrised to
+/// `.mask`. The mask lane needs no camera and is always shown (unlike layout).
+@MainActor
+private func runMaskBlockSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
+    // No camera ⇒ layout lane is 0 pt, so mask is the third lane: ruler(22) + clip(44) + zoom(32) = 98...126.
+    let maskLaneY = py(112)
+
+    // Empty-lane click adds a `mask`-kind block at the click's source time (the gap [0, 20) is
+    // wide open, so `addMask`'s default 3 s block starts exactly at 10: [10, 13)), selects it,
+    // one undo step.
+    let undoBeforeAdd = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(10), y: maskLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(10), y: maskLaneY)))
+    guard model.project.masks.count == 1, model.project.masks[0].kind == .mask else {
+        throw TimelineOpsFail(description: "empty-lane click didn't add a mask block: \(model.project.masks)")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after addMask") }
+    guard model.undoStepCount == undoBeforeAdd + 1 else { throw TimelineOpsFail(description: "addMask should push exactly one undo step") }
+    guard let maskID = UUID(uuidString: model.project.masks[0].id), model.selection == [maskID] else {
+        throw TimelineOpsFail(description: "the new mask isn't selected")
+    }
+    let mask = model.project.masks[0] // [10, 13)
+
+    // Body drag = move: grab mid-block, drag so its start lands exactly at source 1.
+    let grabX = px((mask.start + mask.end) / 2)
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: grabX, y: maskLaneY)))
+    let undoBeforeMove = model.undoStepCount
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(1 + (mask.end - mask.start) / 2), y: maskLaneY)))
+    guard let movedLive = model.project.masks.first(where: { $0.id == mask.id }), abs(movedLive.start - 1) < 0.01 else {
+        throw TimelineOpsFail(description: "move didn't track the mouse: \(String(describing: model.project.masks.first { $0.id == mask.id }))")
+    }
+    guard model.undoStepCount == undoBeforeMove else { throw TimelineOpsFail(description: "an in-progress move shouldn't push an undo step yet") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(1 + (mask.end - mask.start) / 2), y: maskLaneY)))
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after move") }
+    guard model.undoStepCount == undoBeforeMove + 1 else { throw TimelineOpsFail(description: "move should push exactly one undo step") }
+
+    // Esc mid-drag (AC-TL-6): restores the pre-drag project, pushes no undo step.
+    let moved = model.project.masks.first { $0.id == mask.id }!
+    let beforeEscDrag = model.project
+    let undoBeforeEscDrag = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px((moved.start + moved.end) / 2), y: maskLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5), y: maskLaneY)))
+    guard model.project != beforeEscDrag else { throw TimelineOpsFail(description: "mid-drag move didn't apply live") }
+    view.cancelOperation(nil)
+    guard model.project == beforeEscDrag else { throw TimelineOpsFail(description: "Esc mid-drag didn't restore the pre-drag project") }
+    guard model.undoStepCount == undoBeforeEscDrag else { throw TimelineOpsFail(description: "a cancelled move pushed an undo step") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5), y: maskLaneY))) // the real mouse-up AppKit still delivers
+
+    // Edge drag = resize.
+    let beforeResize = model.project.masks.first { $0.id == mask.id }!
+    let undoBeforeResize = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(beforeResize.end) - 3, y: maskLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(beforeResize.start + 4), y: maskLaneY)))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(beforeResize.start + 4), y: maskLaneY)))
+    guard let resized = model.project.masks.first(where: { $0.id == mask.id }), abs(resized.end - (beforeResize.start + 4)) < 0.01 else {
+        throw TimelineOpsFail(description: "trailing-edge drag didn't resize: \(String(describing: model.project.masks.first { $0.id == mask.id }))")
+    }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after resize") }
+    guard model.undoStepCount == undoBeforeResize + 1 else { throw TimelineOpsFail(description: "resize should push exactly one undo step") }
+
+    // Hit-test: the mask lane now participates like zoom/layout (SPEC §7.2's hit-test table).
+    // `hitTest(at:)` takes a point directly in the view's own (flipped) local space — unlike the
+    // `synthMouse`-fed events above, which go through `mouseDown`'s `convert(_:from: nil)` and so
+    // need the pre-flipped `maskLaneY`; a direct `hitTest` call uses the un-converted local y (112).
+    let bodyPoint = CGPoint(x: px((resized.start + resized.end) / 2), y: 112)
+    guard case .blockBody(let hitID) = view.hitTest(at: bodyPoint), hitID == maskID else {
+        throw TimelineOpsFail(description: "hitTest over the mask body didn't return .blockBody(maskID): \(view.hitTest(at: bodyPoint))")
+    }
+
+    // Remove (the MaskPanel's own Remove button — `Project.removeBlock`; SPEC §7.2's "Context
+    // menus" list has no entry for the mask lane, so there's no right-click item to exercise).
+    let undoBeforeRemove = model.undoStepCount
+    model.edit("Remove mask") { $0.removeBlock(maskID) }
+    guard model.project.masks.isEmpty else { throw TimelineOpsFail(description: "removeBlock didn't remove the mask") }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after remove") }
+    guard model.undoStepCount == undoBeforeRemove + 1 else { throw TimelineOpsFail(description: "remove should push exactly one undo step") }
+
+    // A `.highlight`-kind block + the ghost + accessibility paths must not crash, and the
+    // accessibility tree must include it with the SPEC-shaped label.
+    model.edit("setup highlight") { $0.masks = [Mask(start: 0, end: 3, kind: .highlight, opacity: 0.5)] }
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: px(10), y: maskLaneY)))
+    view.needsDisplay = true
+    guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
+        throw TimelineOpsFail(description: "no bitmap rep with a highlight-kind mask block + ghost hovered")
+    }
+    guard let children = view.accessibilityChildren() as? [NSAccessibilityElement],
+          children.contains(where: { $0.accessibilityLabel() == "Highlight, opacity 50%, 0.0 to 3.0 seconds" }) else {
+        throw TimelineOpsFail(description: "no Mask accessibility element for the highlight-kind block")
     }
 }
