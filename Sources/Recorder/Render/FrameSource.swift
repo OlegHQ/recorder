@@ -83,9 +83,9 @@ func makeComposition(package: URL, project: Project) async throws -> (AVMutableC
     }
     let audioMix = AVMutableAudioMix()
     audioMix.inputParameters = inputParameters
-    // ponytail: `audioTimePitchAlgorithm = .spectral` (SPEC §6.2) is a property of the
-    // AVPlayerItem/AVAssetExportSession that plays this composition (T-306), not of the
-    // composition/mix themselves — set it there.
+    // `audioTimePitchAlgorithm = .spectral` (SPEC §6.2) is a property of the AVPlayerItem/
+    // AVAssetExportSession that plays this composition, not of the composition/mix themselves —
+    // set on the `AVPlayerItem` in `PreviewView.attach` (T-306) and the exporter (T-505).
     return (composition, audioMix)
 }
 
@@ -99,19 +99,27 @@ final class TextureCache {
         self.cache = cache!
     }
 
-    /// `// ponytail: real captures decode to 420v (biplanar 4:2:0 YCbCr) — that needs luma +
-    /// chroma textures and a shader mode-4 BT.709 YCbCr→RGB pass. This returns the luma plane
-    /// for those; full colour conversion is wired when the preview (T-306) starts decoding real
-    /// frames. Single-plane formats (BGRA — synthetic fixtures) map directly.`
-    func texture(from pb: CVPixelBuffer) -> MTLTexture? {
-        let isPlanar = CVPixelBufferIsPlanar(pb)
-        let width = isPlanar ? CVPixelBufferGetWidthOfPlane(pb, 0) : CVPixelBufferGetWidth(pb)
-        let height = isPlanar ? CVPixelBufferGetHeightOfPlane(pb, 0) : CVPixelBufferGetHeight(pb)
-        let pixelFormat: MTLPixelFormat = isPlanar ? .r8Unorm : .bgra8Unorm
+    /// Real captures decode to 420v (biplanar 4:2:0 YCbCr, video range): luma (`r8Unorm`) + chroma
+    /// (`rg8Unorm`) planes, converted to RGB by shader mode 4 (BT.709, SPEC §6.2). Single-plane
+    /// buffers (BGRA — synthetic fixtures, the `render` selftest) map directly and are sampled by
+    /// mode 3 (`Compositor.drawScreen`, keyed on `chroma == nil`).
+    func texture(from pb: CVPixelBuffer) -> FrameState.Texture? {
+        guard CVPixelBufferIsPlanar(pb) else {
+            guard let bgra = plane(pb, index: 0, pixelFormat: .bgra8Unorm) else { return nil }
+            return FrameState.Texture(luma: bgra)
+        }
+        guard let luma = plane(pb, index: 0, pixelFormat: .r8Unorm),
+              let chroma = plane(pb, index: 1, pixelFormat: .rg8Unorm) else { return nil }
+        return FrameState.Texture(luma: luma, chroma: chroma)
+    }
 
+    private func plane(_ pb: CVPixelBuffer, index: Int, pixelFormat: MTLPixelFormat) -> MTLTexture? {
+        let isPlanar = CVPixelBufferIsPlanar(pb)
+        let width = isPlanar ? CVPixelBufferGetWidthOfPlane(pb, index) : CVPixelBufferGetWidth(pb)
+        let height = isPlanar ? CVPixelBufferGetHeightOfPlane(pb, index) : CVPixelBufferGetHeight(pb)
         var cvTexture: CVMetalTexture?
         let status = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, cache, pb, nil, pixelFormat, width, height, 0, &cvTexture)
+            kCFAllocatorDefault, cache, pb, nil, pixelFormat, width, height, index, &cvTexture)
         guard status == kCVReturnSuccess, let cvTexture else { return nil }
         return CVMetalTextureGetTexture(cvTexture)
     }
