@@ -53,6 +53,9 @@ final class Compositor {
     private lazy var textureLoader = MTKTextureLoader(device: device)
     private var backgroundCache: [String: MTLTexture] = [:]
     private var cursorImageCache: [String: CursorImage] = [:]
+    // T-602: chip label -> its rendered texture (rounded background + Core-Text-drawn label baked
+    // in together, straight alpha) — cached per string so a repeated shortcut doesn't re-render.
+    private var keyChipTextureCache: [String: MTLTexture] = [:]
 
     /// `package` is the project's `.recorder` directory, for `cursors/<id>.png`/`.json` (T-413);
     /// `nil` for the synthetic `render` selftest, which never sets `FrameState.cursor`.
@@ -140,6 +143,15 @@ final class Compositor {
                 drawCursor(cursor, project: s.project, rectPx: rectPx, contentUV: contentUV,
                            alphaMultiplier: screenAlpha, outputSize: s.outputSize, encoder: encoder)
             }
+
+            // T-601: masks/highlights active at this frame's SOURCE time (SPEC §7.1 lane, §6.6 Mask
+            // panel) — same rectPx/contentUV as the cursor above, so a mask zooms/pans with the
+            // content instead of staying fixed to the canvas.
+            let activeMasks = s.project.masks.filter { s.sourceTime >= $0.start && s.sourceTime <= $0.end }
+            if !activeMasks.isEmpty {
+                drawMasks(activeMasks, rectPx: rectPx, contentUV: contentUV, alphaMultiplier: screenAlpha,
+                          outputSize: s.outputSize, encoder: encoder)
+            }
         }
 
         // Pass 4: camera (rounded-rect SDF quad, SPEC §6.2 pass 4, §6.6 Camera, T-502) — bubble in
@@ -153,6 +165,13 @@ final class Compositor {
                 let rectPx = Self.lerp(bubble, full, t)
                 drawCamera(camera, project: s.project, rectPx: rectPx, alpha: cameraAlpha, outputSize: s.outputSize, encoder: encoder)
             }
+        }
+
+        // Pass 5: keyboard-shortcut chip (SPEC §6.2 pass 4 "key overlay", §6.6 Keys tab, T-602) —
+        // bottom-centre of the whole canvas (not "screen space": like the camera bubble, it doesn't
+        // zoom/pan with the content).
+        if let chip = s.keyChip {
+            drawKeyChip(chip, outputSize: s.outputSize, encoder: encoder)
         }
 
         encoder.endEncoding()
@@ -353,6 +372,58 @@ final class Compositor {
         return SIMD2(Float(bx - outputSize.width / 2), Float(by - outputSize.height / 2))
     }
 
+    // MARK: - Masks/highlights (SPEC §7.1 lane, §6.6 Mask panel, T-601)
+
+    /// `mask` = a flat, opaque-black quad at `opacity` over the rect. `highlight` = the SAME
+    /// dimming everywhere else INSIDE the screen content rect — four quads tiling the area outside
+    /// the rect (a "donut"; mode 0 flat colour, reused, so no new shader mode is needed). Both map
+    /// `mask.rect` (SPEC's "uncropped source coordinates", AC-CROP-2) through the exact
+    /// `contentUV`/`rectPx` the screen/cursor passes use, so a mask zooms and pans with the content
+    /// (`Compositor.drawCursor` maps `cursor.x/y` through the identical formula).
+    /// `// ponytail: hard edges, no fade-in/out — SPEC gives layouts (T-503) an explicit 0.3s
+    /// cross-fade but says nothing about masks; add one only if a mockup/AC calls for it.`
+    /// `// ponytail: not clipped to the screen's own rounded corners/shadow SDF — a mask can bleed a
+    /// hair past a heavily rounded corner; not worth a second SDF pass for a rare, subtle overlap.`
+    private func drawMasks(_ masks: [Mask], rectPx: CGRect, contentUV: SIMD4<Float>, alphaMultiplier: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        let u0 = Double(contentUV.x), v0 = Double(contentUV.y), u1 = Double(contentUV.z), v1 = Double(contentUV.w)
+        guard u1 > u0, v1 > v0 else { return }
+        func screenPoint(_ sx: Double, _ sy: Double) -> CGPoint {
+            CGPoint(x: rectPx.minX + (sx - u0) / (u1 - u0) * rectPx.width,
+                    y: rectPx.minY + (sy - v0) / (v1 - v0) * rectPx.height)
+        }
+        for mask in masks {
+            let alpha = mask.opacity * alphaMultiplier
+            guard alpha > 0 else { continue }
+            let color = SIMD4<Float>(0, 0, 0, Float(alpha))
+            let a = screenPoint(mask.rect.x, mask.rect.y)
+            let b = screenPoint(mask.rect.x + mask.rect.w, mask.rect.y + mask.rect.h)
+            let hole = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y)).intersection(rectPx)
+
+            switch mask.kind {
+            case .mask:
+                fillRect(hole, color: color, outputSize: outputSize, encoder: encoder)
+            case .highlight:
+                let bands = [
+                    CGRect(x: rectPx.minX, y: rectPx.minY, width: rectPx.width, height: hole.minY - rectPx.minY),             // top
+                    CGRect(x: rectPx.minX, y: hole.maxY, width: rectPx.width, height: rectPx.maxY - hole.maxY),               // bottom
+                    CGRect(x: rectPx.minX, y: hole.minY, width: hole.minX - rectPx.minX, height: hole.height),               // left
+                    CGRect(x: hole.maxX, y: hole.minY, width: rectPx.maxX - hole.maxX, height: hole.height),                 // right
+                ]
+                for band in bands { fillRect(band, color: color, outputSize: outputSize, encoder: encoder) }
+            }
+        }
+    }
+
+    /// A flat-colour (mode 0) quad at an arbitrary pixel rect — `drawMasks`' one shared draw call.
+    private func fillRect(_ rect: CGRect, color: SIMD4<Float>, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        var u = Uniforms()
+        u.rectNDC = ndcRect(rect, in: outputSize)
+        u.color = color
+        u.mode = 0
+        draw(u, encoder: encoder)
+    }
+
     // MARK: - Pass 4: camera (SPEC §6.2 pass 4, §6.6 Camera, T-502)
 
     /// Camera bubble placement — reused by both `render` (with the live zoom `viewScale`, for
@@ -472,6 +543,68 @@ final class Compositor {
         let v0 = contentUV.y + (contentUV.w - contentUV.y) * ty0
         let v1 = contentUV.y + (contentUV.w - contentUV.y) * ty1
         return SIMD4(u0, v0, u1, v1)
+    }
+
+    // MARK: - Pass 5: key chip (SPEC §6.2 pass 4, §6.6 Keys tab, T-602)
+
+    /// Draws `chip`'s texture (`chipTexture`, below) as a straight quad, bottom-centre of the whole
+    /// canvas, faded by age via mode 2's `globalAlpha` (`Shaders.swift`). SPEC gives the overlay
+    /// 1.2 s ("for 1.2 s") but no fade curve, so a straightforward linear fade over the last 0.3 s
+    /// of that hold is used here — `// ponytail: no eased fade curve; revisit only if a mockup asks
+    /// for one.`
+    private func drawKeyChip(_ chip: FrameState.KeyChipState, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        guard let texture = chipTexture(label: chip.label) else { return }
+        let hold = 1.2, fadeOut = 0.3
+        let alpha = chip.age > hold - fadeOut ? max(0, (hold - chip.age) / fadeOut) : 1.0
+        guard alpha > 0 else { return }
+
+        let shortEdge = min(outputSize.width, outputSize.height)
+        let textureAspect = Double(texture.width) / Double(max(texture.height, 1))
+        let height = 0.07 * shortEdge
+        let width = height * textureAspect
+        let marginBottom = 0.05 * shortEdge
+        let rectPx = CGRect(x: (outputSize.width - width) / 2, y: outputSize.height - marginBottom - height,
+                             width: width, height: height)
+
+        var u = Uniforms()
+        u.rectNDC = ndcRect(rectPx, in: outputSize)
+        u.uvRect = SIMD4(0, 0, 1, 1)
+        u.mode = 2
+        u.globalAlpha = Float(alpha)
+        encoder.setFragmentTexture(texture, index: 0)
+        draw(u, encoder: encoder)
+        encoder.setFragmentTexture(dummyTexture, index: 0)
+    }
+
+    /// Renders `label` once to a straight-alpha RGBA texture — a rounded pill background (Core
+    /// Graphics) with the text centred on it (Core Text, via `NSAttributedString.draw(at:)`) baked
+    /// into the SAME bitmap, cached by `label` so a repeated shortcut is drawn once.
+    private func chipTexture(label: String) -> MTLTexture? {
+        if let cached = keyChipTextureCache[label] { return cached }
+        let font = NSFont.monospacedSystemFont(ofSize: 30, weight: .semibold)
+        let text = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: NSColor.white])
+        let textSize = text.size()
+        let paddingX: CGFloat = 26, paddingY: CGFloat = 15
+        let size = CGSize(width: max(1, ceil(textSize.width + paddingX * 2)), height: max(1, ceil(textSize.height + paddingY * 2)))
+        let width = Int(size.width), height = Int(size.height)
+
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        let bgRect = CGRect(origin: .zero, size: size)
+        NSBezierPath(roundedRect: bgRect, xRadius: size.height / 2, yRadius: size.height / 2).addClip()
+        NSColor.black.withAlphaComponent(0.72).setFill()
+        bgRect.fill()
+        text.draw(at: CGPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2))
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let cgImage = ctx.makeImage(),
+              let texture = try? textureLoader.newTexture(cgImage: cgImage, options: [.SRGB: false]) else { return nil }
+        keyChipTextureCache[label] = texture
+        return texture
     }
 
     // MARK: - Shared helpers
@@ -622,7 +755,7 @@ extension Compositor {
         let model = try loadEditorModel(package: packageURL)
         let project = model.project
 
-        let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
+        let (composition, audioMix, _, _) = try await makeComposition(package: packageURL, project: project)
         let item = AVPlayerItem(asset: composition)
         item.audioMix = audioMix
         item.audioTimePitchAlgorithm = .spectral

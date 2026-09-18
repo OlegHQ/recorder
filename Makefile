@@ -24,6 +24,7 @@ app: build
 	cp Resources/Info.plist $(APP)/Contents/Info.plist
 	@if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns $(APP)/Contents/Resources/; fi
 	@if [ -d Resources/Wallpapers ]; then cp -R Resources/Wallpapers $(APP)/Contents/Resources/; fi
+	@if [ -f Resources/click.caf ]; then cp Resources/click.caf $(APP)/Contents/Resources/; fi
 	codesign --force --sign "$(SIGN_ID)" $(APP)
 
 run: app

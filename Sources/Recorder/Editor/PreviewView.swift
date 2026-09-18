@@ -20,6 +20,10 @@ final class PreviewView: MTKView {
     private let commandQueue: MTLCommandQueue
 
     private var player: AVPlayer?
+    /// T-504 selftest seam: the live item's identity/`audioMix`, so `audio-mix` can assert a
+    /// volume-only edit swaps `audioMix` without replacing the `AVPlayerItem` (no composition
+    /// rebuild). Not `private` — read-only, used only by `AudioMixSelfTest.swift`.
+    var currentItemForTest: AVPlayerItem? { player?.currentItem }
     private var screenOutput: AVPlayerItemVideoOutput?
     private var lastScreenPixelBuffer: CVPixelBuffer?
     private var statusObservation: NSKeyValueObservation?
@@ -35,6 +39,15 @@ final class PreviewView: MTKView {
     private var isSeeking = false
     private var pendingSeekTime: Double?
     private var lastClips: [Clip]
+    private var lastAudio: Audio
+
+    // T-504: the live item's mic/system composition tracks, kept so volumes/mutes can rebuild just
+    // the `AVAudioMix` (`refreshAudioMix`) without a composition rebuild/playback hiccup.
+    private var liveMicTrack: AVMutableCompositionTrack?
+    private var liveSystemTrack: AVMutableCompositionTrack?
+    // T-504: SOURCE time of the last playback tick's click-sound check — reset on every play start
+    // so a big seek/scrub never floods stale clicks (see `playClickSoundIfCrossed`).
+    private var lastClickCheckSourceTime: Double?
 
     /// Bounds the "no frame yet" redraw retry below (SPEC §6.2: "paused always shows a frame").
     private var pendingFrameRetries = 0
@@ -44,9 +57,22 @@ final class PreviewView: MTKView {
     // continuous position to follow live; the bubble snaps to the nearest corner on mouse-up.
     private var cameraDragActive = false
 
+    // T-415: manual-zoom-target overlay — a `SelectionRectView` subview covering the whole preview,
+    // shown only while a `.manual` zoom is selected (SPEC §6.6 "with a manual zoom selected, a
+    // rectangle overlay shows the zoom target and can be dragged"). `PreviewView` overrides `hitTest`
+    // (below) to keep routing every mouse event through its own `mouseDown`/`mouseDragged`/`mouseUp`
+    // (same pattern as the camera-bubble drag) and forwards to `zoomTargetView` by calling its
+    // handlers directly — that gives a `mouseUp`-time drag-end signal (`isDragging` just before the
+    // forwarded call) without adding a second mouse-handling mechanism or subclassing
+    // `SelectionRectView` (`final`).
+    private let zoomTargetView = SelectionRectView(frame: .zero)
+    private var zoomTargetContentRect: CGRect = .zero
+    private var zoomTargetGestureActive = false
+
     init(model: EditorModel) {
         self.model = model
         self.lastClips = model.project.clips
+        self.lastAudio = model.project.audio
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             fatalError("no Metal device")
         }
@@ -57,8 +83,17 @@ final class PreviewView: MTKView {
         isPaused = true
         enableSetNeedsDisplay = true
         colorPixelFormat = .bgra8Unorm
+
+        zoomTargetView.allowsResize = false
+        zoomTargetView.minSize = CGSize(width: 1, height: 1)
+        zoomTargetView.isHidden = true
+        zoomTargetView.autoresizingMask = [.width, .height]
+        zoomTargetView.onChange = { [weak self] r in self?.zoomTargetRectChanged(r) }
+        addSubview(zoomTargetView)
+
         rebuildComposition()
         observeProject()
+        observeSelection()
     }
 
     @available(*, unavailable)
@@ -71,9 +106,25 @@ final class PreviewView: MTKView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         needsDisplay = true
+        updateZoomTargetOverlay()
     }
 
     // MARK: - Transport (SPEC §7.3; `TransportBar` below calls these)
+
+    /// AC-TL-7 (split-mode hover): OUTPUT seconds. Non-nil + paused ⇒ the preview shows that frame
+    /// (a coalesced, zero-tolerance seek — same mechanism `seek(toOutput:)` uses) WITHOUT moving
+    /// `model.playhead`; `nil` seeks back to the playhead frame. Ignored while playing (`draw`'s
+    /// `displayTime` falls back to `model.playhead` then) — a live playhead already drives the
+    /// player, and split mode only hovers a paused timeline. One-line coordinator hook:
+    /// `timeline.onHoverTime = { [weak preview] in preview?.hoverTime = $0 }`.
+    var hoverTime: Double? {
+        didSet {
+            guard hoverTime != oldValue else { return }
+            needsDisplay = true
+            guard !model.isPlaying else { return }
+            performSeek(to: hoverTime ?? model.playhead)
+        }
+    }
 
     func togglePlayPause() {
         model.isPlaying ? pause() : setRate(1)
@@ -88,6 +139,11 @@ final class PreviewView: MTKView {
     func seek(toOutput t: Double) {
         let clamped = min(max(t, 0), max(model.timeMap.outputDuration, 0))
         model.playhead = clamped
+        performSeek(to: clamped)
+    }
+
+    private func performSeek(to t: Double) {
+        let clamped = min(max(t, 0), max(model.timeMap.outputDuration, 0))
         pendingSeekTime = clamped
         needsDisplay = true
         if !isSeeking { performPendingSeek() }
@@ -112,6 +168,11 @@ final class PreviewView: MTKView {
 
     private func setRate(_ rate: Float) {
         guard rate != 0, let player else { pause(); return }
+        // A lingering hover seek must not hijack where playback resumes from (AC-TL-7 is a paused-
+        // only feature; leaving the player wherever the last hover looked would desync it from
+        // `model.playhead`).
+        if hoverTime != nil { performSeek(to: model.playhead) }
+        lastClickCheckSourceTime = model.timeMap.sourceTime(atOutput: model.playhead)
         model.isPlaying = true
         player.rate = rate
         cameraPlayer?.rate = rate
@@ -141,12 +202,29 @@ final class PreviewView: MTKView {
     @objc private func tick(_ link: CADisplayLink) {
         guard let player, let item = player.currentItem else { return }
         let t = player.currentTime().seconds
+        playClickSoundIfCrossed(outputTime: t)
         model.playhead = t
         if item.duration.isValid, t >= item.duration.seconds - 1.0 / 60 {
             pause()
             return
         }
         needsDisplay = true
+    }
+
+    /// T-504: "Mouse click sound" — preview plays it live via `NSSound` at each left `.down` event
+    /// crossed during playback (export mixes it into the exported audio instead, `Exporter`'s
+    /// `addClickTrack`). Instantiated fresh per play (cheap: `byReference: true` just holds the
+    /// bundled URL) so back-to-back clicks each get their own playback instead of fighting over one
+    /// shared, possibly-still-playing `NSSound`.
+    private static let clickSoundURL = Bundle.main.url(forResource: "click", withExtension: "caf")
+
+    private func playClickSoundIfCrossed(outputTime t: Double) {
+        guard model.project.cursor.clickSound, let url = Self.clickSoundURL else { return }
+        let sourceNow = model.timeMap.sourceTime(atOutput: t)
+        defer { lastClickCheckSourceTime = sourceNow }
+        guard let last = lastClickCheckSourceTime, sourceNow > last else { return }
+        guard model.events.clicks().contains(where: { $0.t > last && $0.t <= sourceNow }) else { return }
+        NSSound(contentsOf: url, byReference: true)?.play()
     }
 
     // MARK: - Keys (SPEC §7.3): Space, ←/→, ⇧←/⇧→, Home/End, J/K/L
@@ -174,14 +252,37 @@ final class PreviewView: MTKView {
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.updateZoomTargetOverlay()
                 let clips = self.model.project.clips
+                let audio = self.model.project.audio
                 if clips != self.lastClips {
                     self.lastClips = clips
+                    self.lastAudio = audio
                     self.rebuildComposition()
                 } else {
+                    // T-504: volumes/mutes → rebuild ONLY the `AVAudioMix` on the live item, not a
+                    // full composition rebuild (no playback hiccup).
+                    if audio != self.lastAudio {
+                        self.lastAudio = audio
+                        self.refreshAudioMix()
+                    }
                     self.needsDisplay = true
                 }
                 self.observeProject()
+            }
+        }
+    }
+
+    // T-415: `model.selection` lives outside `project` (it's UI state, not saved), so it needs its
+    // own `withObservationTracking` — same one-more-registration-per-fire pattern as `observeProject`.
+    private func observeSelection() {
+        withObservationTracking {
+            _ = model.selection
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.updateZoomTargetOverlay()
+                self.observeSelection()
             }
         }
     }
@@ -193,13 +294,25 @@ final class PreviewView: MTKView {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
-                await MainActor.run { self.attach(composition: composition, audioMix: audioMix, resumeSeconds: resumeSeconds) }
+                let (composition, audioMix, micTrack, systemTrack) = try await makeComposition(package: packageURL, project: project)
+                await MainActor.run {
+                    self.liveMicTrack = micTrack
+                    self.liveSystemTrack = systemTrack
+                    self.attach(composition: composition, audioMix: audioMix, resumeSeconds: resumeSeconds)
+                }
             } catch {
                 // ponytail: a package whose screen.mov is missing/too short just shows an empty
                 // preview; recording/onboarding never hands the editor a project without one.
             }
         }
+    }
+
+    /// T-504: volumes/mutes changed but `clips` didn't — swap the live item's `AVAudioMix` for a
+    /// freshly built one over the SAME mic/system tracks (`makeAudioMix`, `FrameSource.swift`).
+    /// `AVPlayerItem.audioMix` takes effect live, no `replaceCurrentItem`/decode restart.
+    private func refreshAudioMix() {
+        guard let item = player?.currentItem else { return }
+        item.audioMix = makeAudioMix(project: model.project, micTrack: liveMicTrack, systemTrack: liveSystemTrack)
     }
 
     private func attach(composition: AVMutableComposition, audioMix: AVAudioMix, resumeSeconds: Double) {
@@ -301,7 +414,18 @@ final class PreviewView: MTKView {
         }
         let screenTexture = pixelBuffer.flatMap { textureCache.texture(from: $0) }
         let cameraTexture = currentCameraPixelBuffer().flatMap { textureCache.texture(from: $0) }
-        let state = makeFrameState(model: model, outputTime: model.playhead, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
+        // AC-TL-7: while paused, a non-nil `hoverTime` overrides what's DISPLAYED (`FrameState` is
+        // still a pure function of this one output time — `model.playhead` itself is untouched).
+        let displayTime = (!model.isPlaying ? hoverTime : nil) ?? model.playhead
+        var state = makeFrameState(model: model, outputTime: displayTime, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
+
+        // T-415: a `.manual` zoom selected ⇒ show the UN-zoomed frame (SPEC §6.6) so the target
+        // overlay (`zoomTargetView`) is drawn against the same un-zoomed content it's positioned
+        // over. Preview-only override — `makeFrameState`/export are untouched.
+        if selectedManualZoom() != nil {
+            state.view = .identity
+            state.prevView = .identity
+        }
 
         compositor.render(state, to: drawable.texture, commandBuffer: commandBuffer, viewport: viewportRect)
         commandBuffer.present(drawable)
@@ -336,6 +460,60 @@ final class PreviewView: MTKView {
         return lastCameraPixelBuffer
     }
 
+    // MARK: - Manual zoom target (SPEC §6.6, T-415)
+
+    /// The selected zoom, if it's the only selected block and its mode is `.manual` — the one state
+    /// that shows the target overlay (SPEC §6.6: "with a manual zoom selected…").
+    private func selectedManualZoom() -> Zoom? {
+        guard model.selection.count == 1, let id = model.selection.first else { return nil }
+        guard let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }) else { return nil }
+        return zoom.mode == .manual ? zoom : nil
+    }
+
+    private func updateZoomTargetOverlay() {
+        guard let zoom = selectedManualZoom() else {
+            zoomTargetView.isHidden = true
+            return
+        }
+        zoomTargetView.isHidden = false
+        zoomTargetView.frame = bounds
+        let content = ZoomTargetMapping.contentRect(viewBounds: bounds.size, project: model.project)
+        zoomTargetContentRect = content
+        zoomTargetView.limit = content
+        zoomTargetView.aspect = content.height > 0 ? content.width / content.height : nil
+        // Don't fight the mouse mid-drag (same guard `CropSheet`/`AreaSelectionOverlay` use for their
+        // own field-commit races) — `zoomTargetRectChanged` is already updating `zoom.center` live.
+        if !zoomTargetView.isDragging {
+            zoomTargetView.rect = ZoomTargetMapping.rect(center: zoom.center, scale: zoom.scale, in: content)
+        }
+        needsDisplay = true
+    }
+
+    /// `zoomTargetView.onChange`: fires on every rect mutation, including `updateZoomTargetOverlay`'s
+    /// own programmatic assignment above — only a real drag (bracketed by `beginGesture`/
+    /// `commitGesture` in `zoomTargetDragEnded`) turns a change into a `Project` edit.
+    private func zoomTargetRectChanged(_ r: CGRect) {
+        guard let zoom = selectedManualZoom() else { return }
+        if zoomTargetView.isDragging, !zoomTargetGestureActive {
+            model.beginGesture()
+            zoomTargetGestureActive = true
+        }
+        guard zoomTargetGestureActive else { return }
+        let center = ZoomTargetMapping.center(fromRect: r, in: zoomTargetContentRect)
+        let zoomID = zoom.id
+        model.update { project in
+            guard let idx = project.zooms.firstIndex(where: { $0.id == zoomID }) else { return }
+            project.zooms[idx].center = center
+        }
+        needsDisplay = true
+    }
+
+    private func zoomTargetDragEnded() {
+        guard zoomTargetGestureActive else { return }
+        zoomTargetGestureActive = false
+        model.commitGesture("Move Zoom Target")
+    }
+
     // MARK: - Camera drag (SPEC §6.6 Camera tab, T-502)
 
     /// This view isn't flipped (AppKit default, bottom-left origin/y-up) — mouse points are
@@ -358,7 +536,19 @@ final class PreviewView: MTKView {
                        width: local.width, height: local.height)
     }
 
+    // T-415: never let AppKit's default hit-testing hand events straight to `zoomTargetView` (it
+    // would bypass everything below) — `self` stays the one dispatch point, same as the camera
+    // bubble, which has no subview of its own at all.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+
     override func mouseDown(with event: NSEvent) {
+        guard zoomTargetView.isHidden else {
+            zoomTargetView.mouseDown(with: event)
+            window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
+            return
+        }
         let p = convert(event.locationInWindow, from: nil)
         if model.project.source.hasCamera, cameraBubbleRectInBounds().contains(p) {
             cameraDragActive = true
@@ -369,6 +559,7 @@ final class PreviewView: MTKView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard zoomTargetView.isHidden else { zoomTargetView.mouseDragged(with: event); return }
         guard cameraDragActive else { super.mouseDragged(with: event); return }
         // No live follow: `Camera.corner` is the only stored position (four discrete corners) — the
         // bubble snaps to whichever corner the mouse is released over, like the recording-time
@@ -376,6 +567,12 @@ final class PreviewView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard zoomTargetView.isHidden else {
+            let wasDragging = zoomTargetView.isDragging
+            zoomTargetView.mouseUp(with: event)
+            if wasDragging { zoomTargetDragEnded() }
+            return
+        }
         guard cameraDragActive else { super.mouseUp(with: event); return }
         cameraDragActive = false
         let p = convert(event.locationInWindow, from: nil)
@@ -390,6 +587,55 @@ final class PreviewView: MTKView {
         if corner != model.project.camera.corner {
             model.edit("Camera position") { $0.camera.corner = corner }
         }
+    }
+}
+
+// MARK: - Selftest `hover-preview <package>` (AC-TL-7)
+
+extension PreviewView {
+    /// Drives the real `AVPlayer` seek path (not a mock) over a package with real media: `hoverTime`
+    /// shows a different frame than `model.playhead` without moving it, and `nil` seeks back.
+    @MainActor
+    static func runHoverPreviewSelfTest(_ args: [String]) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        guard let packagePath = args.first else { throw Fail(description: "usage: hover-preview <package>") }
+        let packageURL = URL(fileURLWithPath: packagePath)
+        let model = try loadEditorModel(package: packageURL)
+        let playheadTime = min(0.4, model.timeMap.outputDuration / 2)
+        model.playhead = playheadTime
+
+        let view = PreviewView(model: model)
+        view.setFrameSize(NSSize(width: 640, height: 360))
+
+        func waitUntil(_ timeout: Double = 5, _ predicate: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !predicate() {
+                guard Date() < deadline else { throw Fail(description: "timed out waiting") }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+        func playerSeconds() -> Double { view.player?.currentTime().seconds ?? -1 }
+
+        // Let the initial attach + seek-to-playhead settle.
+        try await waitUntil { view.player?.currentItem?.status == .readyToPlay }
+        try await waitUntil { !view.isSeeking && abs(playerSeconds() - playheadTime) < 0.05 }
+
+        let hoverTarget = min(1.0, model.timeMap.outputDuration - 0.1)
+        guard hoverTarget > playheadTime + 0.05 else { throw Fail(description: "fixture too short for a distinct hover target") }
+
+        view.hoverTime = hoverTarget
+        try await waitUntil { !view.isSeeking && abs(playerSeconds() - hoverTarget) < 0.05 }
+        guard model.playhead == playheadTime else {
+            throw Fail(description: "hoverTime moved model.playhead: \(model.playhead) != \(playheadTime)")
+        }
+        print("hover-preview: playhead=\(playheadTime) hoverTarget=\(hoverTarget) player=\(playerSeconds())")
+
+        view.hoverTime = nil
+        try await waitUntil { !view.isSeeking && abs(playerSeconds() - playheadTime) < 0.05 }
+        guard model.playhead == playheadTime else {
+            throw Fail(description: "nil hoverTime changed model.playhead: \(model.playhead) != \(playheadTime)")
+        }
+        print("hover-preview OK: hover moved the player without touching model.playhead; nil restored the playhead frame")
     }
 }
 

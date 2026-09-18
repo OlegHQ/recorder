@@ -15,6 +15,11 @@ final class SelectionRectView: NSView {
     var limit: CGRect = .zero { didSet { rect = SelectionRectView.clamp(rect, to: limit, minSize: minSize) } }
     var minSize = CGSize(width: 100, height: 100)
     var aspect: CGFloat? // locked aspect (crop presets); ⇧ locks current
+    /// T-415 (manual zoom target): false hides/disables the 8 resize handles and the create-from-
+    /// empty-space drag — the rect can only be moved, never resized or recreated (its size is driven
+    /// entirely by the caller, e.g. `1/scale`). Defaults `true` so every other reuse (area selection,
+    /// crop sheet) is unaffected.
+    var allowsResize = true
     var onChange: ((CGRect) -> Void)?
     /// True between `mouseDown` and `mouseUp`. `AreaSelectionOverlay` checks this before applying a
     /// Size/Position field edit, so a field commit mid-drag (e.g. live-formatted `TextField` value updates)
@@ -157,8 +162,10 @@ final class SelectionRectView: NSView {
         Theme.textPrimary.withAlphaComponent(0.8).setStroke()
         grid.stroke()
 
-        Theme.textPrimary.setFill()
-        for h in Handle.allCases { NSBezierPath(ovalIn: handleRect(h)).fill() }
+        if allowsResize {
+            Theme.textPrimary.setFill()
+            for h in Handle.allCases { NSBezierPath(ovalIn: handleRect(h)).fill() }
+        }
     }
 
     // MARK: - Mouse
@@ -167,15 +174,17 @@ final class SelectionRectView: NSView {
         window?.makeFirstResponder(self)
         isDragging = true
         let p = convert(event.locationInWindow, from: nil)
-        if let h = hitHandle(p) {
+        if allowsResize, let h = hitHandle(p) {
             dragMode = .resize(h)
             dragStart = rect
         } else if !rect.isEmpty, rect.contains(p) {
             dragMode = .move(CGPoint(x: p.x - rect.minX, y: p.y - rect.minY))
             dragStart = rect
-        } else {
+        } else if allowsResize {
             dragMode = .create
             dragStart = CGRect(origin: p, size: .zero)
+        } else {
+            dragMode = nil
         }
         dragAspect = dragStart.height > 0 ? dragStart.width / dragStart.height : 1
     }
@@ -216,8 +225,12 @@ final class SelectionRectView: NSView {
     // MARK: - Cursor
 
     override func resetCursorRects() {
-        guard !rect.isEmpty else { addCursorRect(bounds, cursor: .crosshair); return }
+        guard !rect.isEmpty else {
+            if allowsResize { addCursorRect(bounds, cursor: .crosshair) }
+            return
+        }
         addCursorRect(rect, cursor: .openHand)
+        guard allowsResize else { return }
         for h in Handle.allCases { addCursorRect(handleRect(h).insetBy(dx: -4, dy: -4), cursor: cursor(for: h)) }
     }
 

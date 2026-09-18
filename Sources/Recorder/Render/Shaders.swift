@@ -7,7 +7,10 @@ import Foundation
 // fragment fn switched on `Uniforms.mode`:
 //   0 = flat colour
 //   1 = 2-stop linear gradient (`color` → `color2`, `gradientAngle` radians)
-//   2 = plain texture sample (wallpaper / image backgrounds)
+//   2 = plain texture sample (wallpaper / image backgrounds; also the T-602 key-chip quad — a
+//       straight-alpha texture with its rounded background already baked in by Core Text/Core
+//       Graphics), alpha × `globalAlpha` (chip fade-out; unused/`1` elsewhere so backgrounds are
+//       unaffected)
 //   3 = rounded-rect texture with soft shadow (the "screen"/"camera" quad, RGB source) — analytic
 //       SDF, no blur pass: `d = length(max(abs(p) - halfSize + r, 0)) - r`; fill alpha =
 //       `1 - smoothstep(-1, 1, d)`; shadow alpha = `shadowAlpha * (1 - smoothstep(0, shadowBlur, d))`.
@@ -106,7 +109,9 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
         float t = clamp(dot(in.uv - 0.5, dir) + 0.5, 0.0, 1.0);
         return mix(u.color, u.color2, t);
     } else if (u.mode == 2) {
-        return tex.sample(smp, in.uv);
+        float4 c = tex.sample(smp, in.uv);
+        c.a *= u.globalAlpha;
+        return c;
     } else if (u.mode == 3) {
         float4 sum = float4(0.0);
         for (int i = 0; i < 8; i++) {
