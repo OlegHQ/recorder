@@ -1544,6 +1544,139 @@ final class TimelineView: NSView {
         onHoverTime?(nil)
         needsDisplay = true
     }
+
+    // MARK: - Accessibility (AC-TL-8: "each block is an accessibility element with role, label
+    // and increment/decrement actions to move it by 1 frame")
+
+    /// SPEC's own 60 fps assumption (matches `split(atOutput:fps:)`'s default and the zoom
+    /// range's "1 frame = 8 pt") — the increment/decrement nudge size.
+    private static let axFrameSeconds = 1.0 / 60
+
+    /// One `NSAccessibilityElement` per block (clip/zoom/layout/mask), rebuilt fresh on every
+    /// call (VoiceOver only asks when it needs them, and this keeps the elements' frames/labels
+    /// always current with the live project — no separate cache to invalidate).
+    override func accessibilityChildren() -> [Any]? {
+        guard let model else { return [] }
+        var elements = axClipElements(model)
+        elements += axBlockElements(model.project.zooms, lane: .zoom, model: model,
+                                     id: { $0.id }, start: { $0.start }, end: { $0.end },
+                                     label: { "Zoom \(String(format: "%.1f", $0.scale))\u{00D7}" },
+                                     nudge: { [weak self] id, frames in self?.nudgeZoom(id, frames: frames) })
+        if hasLayoutLane {
+            elements += axBlockElements(model.project.layouts, lane: .layout, model: model,
+                                         id: { $0.id }, start: { $0.start }, end: { $0.end },
+                                         label: { "Layout, \($0.kind == .cameraFull ? "Camera full" : "Hidden")" },
+                                         nudge: { [weak self] id, frames in self?.nudgeLayout(id, frames: frames) })
+        }
+        if laneHeight(.mask) > 0 {
+            elements += axBlockElements(model.project.masks, lane: .mask, model: model,
+                                         id: { $0.id }, start: { $0.start }, end: { $0.end },
+                                         label: { "\($0.kind == .mask ? "Mask" : "Highlight"), opacity \(Int(($0.opacity * 100).rounded()))%" },
+                                         nudge: { [weak self] id, frames in self?.nudgeMask(id, frames: frames) })
+        }
+        return elements
+    }
+
+    /// Clip blocks: label per AC-TL-8's own shape, plus a speed suffix when sped up. A clip has no
+    /// "move" drag (SPEC §7.2's hit-test table: body drag doesn't move a clip, only edge-drag/trim
+    /// does), so its nudge extends/shrinks the trailing edge by one frame — `trimClip`, the exact
+    /// `TimelineOps` call an edge-drag already makes.
+    private func axClipElements(_ model: EditorModel) -> [TimelineBlockAXElement] {
+        let row = laneRow(.clip)
+        var out: [TimelineBlockAXElement] = []
+        var outStart = 0.0
+        for (i, clip) in model.project.clips.enumerated() {
+            let outEnd = outStart + clip.outputDuration
+            defer { outStart = outEnd }
+            let rect = CGRect(x: x(forOutput: outStart), y: row.minY,
+                               width: max(0, x(forOutput: outEnd) - x(forOutput: outStart)), height: row.height)
+            var label = "Clip, \(axTime(outStart)) to \(axTime(outEnd)) seconds"
+            if clip.speed != 1 { label += ", \(formatSpeed(clip.speed))\u{00D7} speed" }
+            out.append(axElement(frame: rect, label: label) { [weak self] frames in self?.nudgeClip(i, frames: frames) })
+        }
+        return out
+    }
+
+    /// Zoom/layout/mask blocks: identical shape, parametrised by lane (no copies) — `id`/`start`/
+    /// `end` extract the block's own fields, `label` supplies the kind-specific prefix, and only
+    /// the block's first visible segment (SPEC's torn-edge splitting, `visibleSegments`) becomes an
+    /// element; a block fully hidden behind a cut has nothing on screen to expose.
+    private func axBlockElements<T>(_ blocks: [T], lane: Lane, model: EditorModel,
+                                     id: (T) -> String, start: (T) -> Double, end: (T) -> Double,
+                                     label: (T) -> String, nudge: @escaping (UUID, Int) -> Void) -> [TimelineBlockAXElement] {
+        let row = laneRow(lane)
+        let timeMap = model.timeMap
+        var out: [TimelineBlockAXElement] = []
+        for b in blocks {
+            guard let uuid = UUID(uuidString: id(b)) else { continue }
+            guard let seg = visibleSegments(start: start(b), end: end(b), project: model.project, timeMap: timeMap).first else { continue }
+            let rect = CGRect(x: x(forOutput: seg.outStart), y: row.minY,
+                               width: max(0, x(forOutput: seg.outEnd) - x(forOutput: seg.outStart)), height: row.height)
+            let text = "\(label(b)), \(axTime(seg.outStart)) to \(axTime(seg.outEnd)) seconds"
+            out.append(axElement(frame: rect, label: text) { frames in nudge(uuid, frames) })
+        }
+        return out
+    }
+
+    private func axElement(frame viewRect: CGRect, label: String, nudge: ((Int) -> Void)?) -> TimelineBlockAXElement {
+        let element = TimelineBlockAXElement()
+        element.setAccessibilityParent(self)
+        element.setAccessibilityRole(.button)
+        element.setAccessibilityLabel(label)
+        element.setAccessibilityFrame(screenFrame(forViewRect: viewRect))
+        element.nudge = nudge
+        return element
+    }
+
+    /// View-local (flipped) rect → screen coordinates: through the window (`convert(_:to: nil)`,
+    /// the same direction `hitTest`'s callers use in reverse) and then `convertToScreen`.
+    private func screenFrame(forViewRect r: CGRect) -> CGRect {
+        let windowRect = convert(r, to: nil)
+        return window?.convertToScreen(windowRect) ?? windowRect
+    }
+
+    private func axTime(_ t: Double) -> String { String(format: "%.1f", max(0, t)) }
+
+    private func nudgeZoom(_ id: UUID, frames: Int) {
+        guard let model, let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }) else { return }
+        model.edit("Move Zoom") { $0.moveZoom(id, toStart: zoom.start + Double(frames) * Self.axFrameSeconds) }
+    }
+
+    private func nudgeLayout(_ id: UUID, frames: Int) {
+        guard let model, let layout = model.project.layouts.first(where: { $0.id == id.uuidString }) else { return }
+        model.edit("Move Layout") { $0.moveLayout(id, toStart: layout.start + Double(frames) * Self.axFrameSeconds) }
+    }
+
+    private func nudgeMask(_ id: UUID, frames: Int) {
+        guard let model, let mask = model.project.masks.first(where: { $0.id == id.uuidString }) else { return }
+        model.edit("Move Mask") { $0.moveMask(id, toStart: mask.start + Double(frames) * Self.axFrameSeconds) }
+    }
+
+    private func nudgeClip(_ i: Int, frames: Int) {
+        guard let model, model.project.clips.indices.contains(i) else { return }
+        let clip = model.project.clips[i]
+        let delta = Double(frames) * Self.axFrameSeconds * clip.speed // OUTPUT-frame nudge -> SOURCE delta
+        model.edit("Trim Clip") { $0.trimClip(i, edge: .trailing, toSource: clip.sourceEnd + delta) }
+    }
+}
+
+/// One accessibility element per timeline block (AC-TL-8): role `.button`, a SPEC-shaped label,
+/// frame in screen coordinates, and increment/decrement that nudge the block by one frame through
+/// the exact `EditorModel`/`TimelineOps` call the matching drag would make — one undo step each.
+private final class TimelineBlockAXElement: NSAccessibilityElement {
+    var nudge: ((Int) -> Void)?
+
+    override func accessibilityPerformIncrement() -> Bool {
+        guard let nudge else { return false }
+        nudge(1)
+        return true
+    }
+
+    override func accessibilityPerformDecrement() -> Bool {
+        guard let nudge else { return false }
+        nudge(-1)
+        return true
+    }
 }
 
 /// SPEC §7.2 "Restore": `Restore 00:05.80 removed here [Restore]`.

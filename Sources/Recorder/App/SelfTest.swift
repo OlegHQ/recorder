@@ -1654,12 +1654,12 @@ private func synthFlags(_ modifiers: NSEvent.ModifierFlags) -> NSEvent {
 /// exact): a 20 s single clip and one click event at source t=5. Each section below gets its own,
 /// so the sections are independent of each other's end state.
 @MainActor
-private func makeTimelineOpsFixture() throws -> (model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat, cleanup: () -> Void) {
+private func makeTimelineOpsFixture(hasCamera: Bool = false) throws -> (model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat, cleanup: () -> Void) {
     let fm = FileManager.default
     let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-timeline-ops-\(UUID().uuidString)")
     try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
 
-    var project = Project(title: "Ops Fixture", source: Source(duration: 20))
+    var project = Project(title: "Ops Fixture", source: Source(duration: 20, hasCamera: hasCamera))
     project.clips = [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)]
     let events = EventLog(events: [InputEvent(t: 5, k: .down, x: 0.5, y: 0.5, b: 0)])
     let model = EditorModel(packageURL: tmp, project: project, events: events)
@@ -1698,7 +1698,80 @@ private func runTimelineOpsSelfTest() async throws {
         defer { cleanup() }
         try runZoomBlockSelfTest(model: model, view: view, px: px, py: py)
     }
+    do {
+        let (model, view, _, _, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        try runAccessibilitySelfTest(model: model, view: view)
+    }
     try runFitOnFirstLayoutSelfTest()
+}
+
+/// T-417 "Accessibility" (AC-TL-8): `accessibilityChildren()` returns one element per block, role
+/// `.button`, the SPEC-shaped label, a non-empty screen-coordinate frame, and increment/decrement
+/// nudges the block by one frame through the exact `EditorModel`/`TimelineOps` path a drag would
+/// use — one undo step each.
+@MainActor
+private func runAccessibilitySelfTest(model: EditorModel, view: TimelineView) throws {
+    // Fixture: one clip [0, 20), one zoom [3, 8).
+    model.edit("setup") { $0.zooms = [Zoom(start: 3, end: 8, scale: 2, mode: .manual)] }
+    let zoomID = UUID(uuidString: model.project.zooms[0].id)!
+
+    guard let children = view.accessibilityChildren() as? [NSAccessibilityElement] else {
+        throw TimelineOpsFail(description: "accessibilityChildren() returned nil or the wrong element type")
+    }
+    // One element for the clip, one for the zoom (no camera ⇒ no layout lane; no masks in the fixture).
+    guard children.count == 2 else { throw TimelineOpsFail(description: "expected 2 accessibility children, got \(children.count)") }
+
+    for child in children {
+        guard child.accessibilityRole() == .button else { throw TimelineOpsFail(description: "block isn't role .button: \(child.accessibilityRole()?.rawValue ?? "nil")") }
+        guard !child.accessibilityFrame().isEmpty else { throw TimelineOpsFail(description: "block has an empty accessibility frame") }
+    }
+
+    guard let clipElement = children.first(where: { $0.accessibilityLabel()?.hasPrefix("Clip") == true }) else {
+        throw TimelineOpsFail(description: "no Clip accessibility element")
+    }
+    guard clipElement.accessibilityLabel() == "Clip, 0.0 to 20.0 seconds" else {
+        throw TimelineOpsFail(description: "unexpected clip label: \(clipElement.accessibilityLabel() ?? "nil")")
+    }
+
+    guard let zoomElement = children.first(where: { $0.accessibilityLabel()?.hasPrefix("Zoom") == true }) else {
+        throw TimelineOpsFail(description: "no Zoom accessibility element")
+    }
+    // AC-TL-8's own example shape: "Zoom 2.0×, 3.1 to 7.9 seconds".
+    guard zoomElement.accessibilityLabel() == "Zoom 2.0\u{00D7}, 3.0 to 8.0 seconds" else {
+        throw TimelineOpsFail(description: "unexpected zoom label: \(zoomElement.accessibilityLabel() ?? "nil")")
+    }
+
+    // Increment nudges the zoom forward by exactly one (60 fps) frame, as one undo step, through
+    // `EditorModel.edit`/`Project.moveZoom` — the same path `beginMoveBlock`/`updateMoveBlock` use.
+    let undoBefore = model.undoStepCount
+    guard zoomElement.accessibilityPerformIncrement() else { throw TimelineOpsFail(description: "accessibilityPerformIncrement returned false") }
+    guard let moved = model.project.zooms.first(where: { $0.id == zoomID.uuidString }) else { throw TimelineOpsFail(description: "zoom vanished after increment") }
+    guard abs(moved.start - (3 + 1.0 / 60)) < 1e-6 else { throw TimelineOpsFail(description: "increment didn't move the zoom by one frame: start \(moved.start)") }
+    guard model.undoStepCount == undoBefore + 1 else { throw TimelineOpsFail(description: "increment should push exactly one undo step") }
+
+    // Decrement moves it back by one frame, one more undo step.
+    guard let freshChildren = view.accessibilityChildren() as? [NSAccessibilityElement],
+          let freshZoom = freshChildren.first(where: { $0.accessibilityLabel()?.hasPrefix("Zoom") == true }) else {
+        throw TimelineOpsFail(description: "no Zoom accessibility element after increment")
+    }
+    guard freshZoom.accessibilityPerformDecrement() else { throw TimelineOpsFail(description: "accessibilityPerformDecrement returned false") }
+    guard let back = model.project.zooms.first(where: { $0.id == zoomID.uuidString }), abs(back.start - 3) < 1e-6 else {
+        throw TimelineOpsFail(description: "decrement didn't move the zoom back by one frame")
+    }
+    guard model.undoStepCount == undoBefore + 2 else { throw TimelineOpsFail(description: "decrement should push exactly one more undo step") }
+
+    // A clip's increment nudges its trailing edge forward one frame (SPEC §7.2: clip body drag
+    // doesn't move the block, only edge-drag/trim does — the nudge reuses that exact path).
+    guard let clipUndoElement = (view.accessibilityChildren() as? [NSAccessibilityElement])?.first(where: { $0.accessibilityLabel()?.hasPrefix("Clip") == true }) else {
+        throw TimelineOpsFail(description: "no Clip accessibility element for the trim nudge")
+    }
+    let undoBeforeClip = model.undoStepCount
+    guard clipUndoElement.accessibilityPerformDecrement() else { throw TimelineOpsFail(description: "clip accessibilityPerformDecrement returned false") }
+    guard abs(model.project.clips[0].sourceEnd - (20 - 1.0 / 60)) < 1e-6 else {
+        throw TimelineOpsFail(description: "clip decrement didn't trim the trailing edge by one frame: \(model.project.clips[0].sourceEnd)")
+    }
+    guard model.undoStepCount == undoBeforeClip + 1 else { throw TimelineOpsFail(description: "clip nudge should push exactly one undo step") }
 }
 
 /// T-405 fix: "the timeline opens fitted" (SPEC §7.2 "Navigation") — regardless of whether the
