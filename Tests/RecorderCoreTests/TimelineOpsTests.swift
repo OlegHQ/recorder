@@ -148,6 +148,41 @@ private struct LCG: RandomNumberGenerator {
     #expect(p.zooms.count == 1)
 }
 
+@Test func speedUpTypingKeepsInvariants() {
+    // One 20 s clip; a typing range in the middle (5...9) gets split out and doubled, a range that
+    // already sits exactly on a clip boundary (12...16, after a manual pre-cut) doesn't need a split
+    // on that edge, and a range that only partly survives an earlier cut (18...25, but the source
+    // only runs to 20) still speeds up whatever clip remains inside it.
+    var p = Project(source: Source(duration: 20), clips: [
+        Clip(sourceStart: 0, sourceEnd: 12, speed: 1),
+        Clip(sourceStart: 12, sourceEnd: 20, speed: 1),
+    ])
+    p.speedUpTyping([TimeRange(start: 5, end: 9), TimeRange(start: 12, end: 16), TimeRange(start: 18, end: 25)])
+
+    #expect(p.checkInvariants() == nil)
+    // The 5...9 range became its own clip at 2×.
+    guard let sped1 = p.clips.first(where: { $0.sourceStart == 5 && $0.sourceEnd == 9 }) else {
+        #expect(Bool(false), "expected a 5...9 clip, got \(p.clips)")
+        return
+    }
+    #expect(sped1.speed == 2)
+    // The clips right before/after it are untouched (still 1×).
+    #expect(p.clips.first(where: { $0.sourceStart == 0 && $0.sourceEnd == 5 })?.speed == 1)
+    #expect(p.clips.first(where: { $0.sourceStart == 9 && $0.sourceEnd == 12 })?.speed == 1)
+    // 12...16 already started exactly on a clip boundary; only the trailing edge needed a split.
+    guard let sped2 = p.clips.first(where: { $0.sourceStart == 12 && $0.sourceEnd == 16 }) else {
+        #expect(Bool(false), "expected a 12...16 clip, got \(p.clips)")
+        return
+    }
+    #expect(sped2.speed == 2)
+    // 18...25 is clamped by the source's own 20 s duration; the remaining 18...20 clip still speeds up.
+    guard let sped3 = p.clips.first(where: { $0.sourceStart == 18 && $0.sourceEnd == 20 }) else {
+        #expect(Bool(false), "expected an 18...20 clip, got \(p.clips)")
+        return
+    }
+    #expect(sped3.speed == 2)
+}
+
 @Test func snapPicksNearest() {
     let candidates = [1.0, 5.0, 5.4, 9.0]
 

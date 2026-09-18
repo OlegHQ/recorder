@@ -104,6 +104,32 @@ public extension Project {
         assert(checkInvariants() == nil)
     }
 
+    /// Edit ▸ Speed Up Typing (SPEC "Edit ▸ Speed Up Typing", T-603): splits clips at each SOURCE-time
+    /// range's edges (`typingRanges(events:)`, `Events.swift`) and sets every clip that ends up fully
+    /// inside a range to `factor`×. Ranges that don't align with a clip boundary get a plain interior
+    /// split (same shape as `split(atOutput:)`, but keyed directly on source time since that's what
+    /// `clips` and the ranges are already in — no `TimeMap` round trip needed). A range only partially
+    /// covered by kept clips (the rest already cut away) still speeds up whatever clip(s) remain.
+    mutating func speedUpTyping(_ ranges: [TimeRange], factor: Double = 2) {
+        for range in ranges {
+            splitClip(atSource: range.start)
+            splitClip(atSource: range.end)
+            for i in clips.indices where clips[i].sourceStart >= range.start - 1e-6 && clips[i].sourceEnd <= range.end + 1e-6 {
+                clips[i].speed = factor
+            }
+        }
+        assert(checkInvariants() == nil)
+    }
+
+    /// Splits the clip containing SOURCE time `s` into two clips of the same speed. No-op if `s`
+    /// isn't strictly inside a clip (in a gap, or within `minClipLength` of an edge/existing boundary).
+    private mutating func splitClip(atSource s: Double) {
+        guard let i = clips.firstIndex(where: { s > $0.sourceStart + Self.minClipLength && s < $0.sourceEnd - Self.minClipLength }) else { return }
+        let clip = clips[i]
+        clips[i] = Clip(sourceStart: clip.sourceStart, sourceEnd: s, speed: clip.speed)
+        clips.insert(Clip(sourceStart: s, sourceEnd: clip.sourceEnd, speed: clip.speed), at: i + 1)
+    }
+
     /// The clip covering output time `t`, clamped to the first/last clip outside `[0, outputDuration]`.
     func clipIndex(atOutput t: Double) -> Int? {
         guard !clips.isEmpty else { return nil }

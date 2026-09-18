@@ -1,15 +1,17 @@
 import AppKit
 import Observation
 import SwiftUI
+import UniformTypeIdentifiers
 import RecorderCore
 
-/// The editor's main window (SPEC §6.1 mockup): preview | 300 pt inspector over a timeline, laid
-/// out manually (no `NSSplitView`), timeline height draggable 160–420 pt, top bar in the titlebar.
+/// The editor's main window (SPEC §6.1 mockup): a top bar over preview | 300 pt inspector over a
+/// timeline, laid out manually (no `NSSplitView`), timeline height draggable 160–420 pt, `window` is
+/// `.fullSizeContentView` so that top bar draws under the native titlebar strip (T-307 fix).
 /// Opened by `RecordingController.finish` and the library through `open(package:)`.
 /// `inspectorView`/`timelineView` host `InspectorView` and `TimelineView` (+ its `TimelineToolbar`)
 /// and stay swappable NSViews only so `EditorRootView`'s manual layout doesn't care which view is in
 /// each slot.
-final class EditorWindowController: NSWindowController, NSWindowDelegate {
+final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let model: EditorModel
     let previewView: PreviewView
 
@@ -23,8 +25,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private let rootView: EditorRootView
     private var titleField: NSTextField!
     private var aspectPopUp: NSPopUpButton!
-    private var widthConstraint: NSLayoutConstraint?
-    private var resizeObserver: NSObjectProtocol?
+    // Typed handles onto the two swappable views above, kept alongside them so the menu actions
+    // (T-311) below can reach real API (`InspectorView.init(initialTab:)`, `TimelineView.setZoom`)
+    // instead of only the type-erased `NSView` the rest of the window plumbing needs.
+    private let inspectorHostingView: NSHostingView<InspectorView>
+    private let coreTimelineView: TimelineView
 
     private static var openWindows: [URL: EditorWindowController] = [:]
 
@@ -47,10 +52,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         self.previewView = preview
         self.inspectorView = inspector
         self.timelineView = timeline
-        self.rootView = EditorRootView(preview: preview, transport: transport, inspector: inspector, timeline: timeline)
+        self.inspectorHostingView = inspector
+        self.coreTimelineView = timelineView
+        self.rootView = EditorRootView(topBar: NSView(), preview: preview, transport: transport, inspector: inspector, timeline: timeline)
 
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
-                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                backing: .buffered, defer: false)
         window.minSize = NSSize(width: 1100, height: 700)
         window.title = project.title
@@ -58,8 +65,16 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         window.contentView = rootView
         super.init(window: window)
 
+        configureFullSizeTitlebar(window)
+        // `rootView.topBar` (not a same-class relay property): building the real bar needs `self` as
+        // the buttons' target, which two-phase init forbids any earlier than this — and property
+        // observers on `self`'s OWN properties never fire from inside `self`'s own initializer, only
+        // from outside it, so assigning a relay property here silently would not have swapped
+        // anything in (T-307 fix's second bug, found the same way as the first: a diagnostic tint
+        // that never appeared on screen).
+        rootView.topBar = buildTopBar()
+
         window.delegate = self
-        installTitlebarAccessory()
         observeAspect()
         if orderFront {
             window.makeKeyAndOrderFront(nil)
@@ -69,8 +84,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     @available(*, unavailable)
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    deinit { if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) } }
 
     /// Opens (or focuses, if already open) the editor for `package`. Dev/HUMAN entry point:
     /// `Recorder --open <package>`; `RecordingController.finish`/the library call this too.
@@ -111,38 +124,36 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         Self.openWindows.removeValue(forKey: model.packageURL)
     }
 
-    // MARK: - Titlebar accessory (SPEC §6.1: ‹ Projects · title · Auto ▾ · ⌗ Crop · ⬆ Export)
+    // MARK: - Top bar (SPEC §6.1: ‹ Projects · title · Auto ▾ · ⌗ Crop · ⬆ Export)
 
-    private func installTitlebarAccessory() {
-        guard let window else { return }
+    /// T-307 fix (coordinator report: the titlebar rendered completely empty, live and offscreen
+    /// alike): `NSTitlebarAccessoryViewController` with `.layoutAttribute = .right` never reliably
+    /// sized a wide, multi-control bar in this environment — its accessory view stayed effectively
+    /// invisible however its own constraints were built (confirmed with a diagnostic background tint
+    /// that never showed up in a live screenshot either). Root-caused by dropping that API entirely:
+    /// `window` opts into `.fullSizeContentView` so `EditorRootView`'s own content extends under the
+    /// native titlebar strip, and this bar is just one more manually-positioned subview of
+    /// `EditorRootView` (`EditorRootView.layout()` reserves `topBarHeight` at the top for it) — the
+    /// same plain frame-layout approach already used for preview/inspector/timeline, not a separate
+    /// AppKit subsystem with its own timing rules.
+    private func configureFullSizeTitlebar(_ window: NSWindow) {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+    }
 
+    private func buildTopBar() -> NSView {
         let stack = buildTopBarStack()
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let container = NSView()
-        container.addSubview(stack)
+        let bar = NSView()
+        bar.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -8),
-            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            // 78 pt clears the traffic lights (only floating over our content now that the window
+            // is `.fullSizeContentView`), matching the mockup's `● ● ●   ‹ Projects` spacing.
+            stack.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 78),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: bar.trailingAnchor, constant: -16),
+            stack.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
         ])
-        // Traffic lights + standard titlebar margin take ~78 pt on the left; approximate the rest
-        // as the accessory's width and keep it in sync on resize so the bar spans the titlebar
-        // the way the mockup shows (an `NSTitlebarAccessoryViewController` sizes to its view, it
-        // doesn't stretch on its own).
-        let width = container.widthAnchor.constraint(equalToConstant: max(0, window.frame.width - 78))
-        width.isActive = true
-        widthConstraint = width
-        resizeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self, weak window] _ in
-            guard let window else { return }
-            self?.widthConstraint?.constant = max(0, window.frame.width - 78)
-        }
-
-        let accessory = NSTitlebarAccessoryViewController()
-        accessory.view = container
-        accessory.layoutAttribute = .right
-        window.addTitlebarAccessoryViewController(accessory)
+        return bar
     }
 
     private func buildTopBarStack() -> NSStackView {
@@ -197,7 +208,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func backTapped() { Library.show() }
 
-    @objc private func cropTapped() {
+    // Not `private`: also the View ▸ Crop… menu item's action (`buildMainMenu`, `AppDelegate.swift`).
+    @objc func cropTapped() {
         guard let window else { return }
         CropSheet.present(for: model, on: window)
     }
@@ -233,6 +245,167 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private static let aspectTitles: [(Output.Aspect, String)] = [
         (.auto, "Auto"), (.r16x9, "16:9"), (.r9x16, "9:16"), (.r1x1, "1:1"), (.r4x3, "4:3"), (.r16x10, "16:10"),
     ]
+
+    // MARK: - Menu actions (T-311)
+
+    // `AppDelegate.buildMainMenu` builds the File/Edit/View items below with `target = nil`; AppKit
+    // walks the key window's responder chain (first responder → superviews → window → the window's
+    // controller, i.e. an instance of this class, since `NSWindowController` is auto-inserted into
+    // the chain there) to find an object implementing the selector. With no editor window key, none
+    // of these are found and the items disable themselves automatically — no manager object needed.
+    // `validateMenuItem` below adds the few conditions that need more than "does a responder exist".
+
+    @objc func saveDocument(_ sender: Any?) { model.saveNow() }
+
+    /// File ▸ Save As…: flushes pending edits, copies the package to a user-chosen location (giving
+    /// the copy a fresh id/title so it isn't confused with the original), then opens the copy —
+    /// this window keeps editing the original.
+    @objc func saveDocumentAs(_ sender: Any?) {
+        model.saveNow()
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = model.project.title
+        panel.allowedContentTypes = [UTType(exportedAs: "sh.nexo.recorder.project")]
+        panel.directoryURL = model.packageURL.deletingLastPathComponent()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
+            try fm.copyItem(at: model.packageURL, to: url)
+            let projectURL = url.appendingPathComponent("project.json")
+            var copy = try Project.load(from: projectURL)
+            copy.id = UUID().uuidString
+            copy.title = url.deletingPathExtension().lastPathComponent
+            try copy.save(to: projectURL)
+            EditorWindowController.open(package: url)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    /// File ▸ Show Raw Files: a Finder window rooted AT the package directory (not just selecting
+    /// the `.recorder` bundle in its parent, which Finder would still show as one opaque package).
+    @objc func showRawFiles(_ sender: Any?) {
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: model.packageURL.path)
+    }
+
+    @objc func performUndo(_ sender: Any?) { model.undo() }
+    @objc func performRedo(_ sender: Any?) { model.redo() }
+
+    @objc func splitAtPlayhead(_ sender: Any?) {
+        model.edit("Split") { $0.split(atOutput: model.playhead) }
+    }
+
+    /// `⌫`: the selected clip, or every selected zoom/layout/mask block. Mirrors
+    /// `TimelineView.removeSelection` (private there — this file can't call it, see T-311's file
+    /// boundary — so the same few lines are reimplemented here for the menu/responder-chain path).
+    @objc func removeSelected(_ sender: Any?) {
+        if let i = model.selectedClip {
+            model.edit("Remove Clip") { _ = $0.removeClip(i) }
+            model.selectedClip = nil
+        } else if !model.selection.isEmpty {
+            let ids = model.selection
+            model.edit("Remove") { project in for id in ids { project.removeBlock(id) } }
+            model.selection = []
+        }
+    }
+
+    /// `Z`: adds a zoom at the playhead's SOURCE time (via `TimeMap`), mode `.auto`.
+    @objc func addZoomAtPlayhead(_ sender: Any?) {
+        let s = model.timeMap.sourceTime(atOutput: model.playhead)
+        model.edit("Add Zoom") { _ = $0.addZoom(atSource: s, mode: .auto) }
+    }
+
+    /// T-410 wire: regenerates `project.zooms` from the recording's click events.
+    @objc func regenerateAutoZooms(_ sender: Any?) {
+        let zooms = generateAutoZooms(clicks: model.events.clicks(), duration: model.project.source.duration)
+        model.edit("Regenerate Auto Zooms") { $0.zooms = zooms }
+    }
+
+    @objc func removeAllZooms(_ sender: Any?) {
+        model.edit("Remove All Zooms") { $0.zooms = [] }
+    }
+
+    @objc func restoreAllCuts(_ sender: Any?) {
+        model.edit("Restore All Cuts") { $0.restoreAllCuts() }
+    }
+
+    /// T-603 wire: splits clips around every `.typing` run (`typingRanges(events:)`) and doubles
+    /// their speed (`Project.speedUpTyping`, `RecorderCore/TimelineOps.swift`).
+    @objc func speedUpTyping(_ sender: Any?) {
+        let ranges = typingRanges(events: model.events.events)
+        guard !ranges.isEmpty else { return }
+        model.edit("Speed Up Typing") { $0.speedUpTyping(ranges) }
+    }
+
+    /// T-604 wire: appends the selected clip's SOURCE range to `cursorHidden`, merged/sorted with
+    /// whatever ranges were already hidden.
+    @objc func hideCursorInSelectedClip(_ sender: Any?) {
+        guard let i = model.selectedClip, model.project.clips.indices.contains(i) else { return }
+        let clip = model.project.clips[i]
+        let added = TimeRange(start: clip.sourceStart, end: clip.sourceEnd)
+        model.edit("Hide Cursor") { $0.cursorHidden = Self.mergedRanges($0.cursorHidden + [added]) }
+    }
+
+    private static func mergedRanges(_ ranges: [TimeRange]) -> [TimeRange] {
+        var merged: [TimeRange] = []
+        for r in ranges.sorted(by: { $0.start < $1.start }) {
+            if var last = merged.last, r.start <= last.end {
+                last.end = max(last.end, r.end)
+                merged[merged.count - 1] = last
+            } else {
+                merged.append(r)
+            }
+        }
+        return merged
+    }
+
+    /// View ▸ 1–6: reconstructs `InspectorView` with a new `initialTab` (its existing public API,
+    /// the same one the `inspector-panels` selftest uses) — `tag` carries `Tab.rawValue`, set when
+    /// `AppDelegate.buildMainMenu` builds these items.
+    @objc func selectInspectorTab(_ sender: NSMenuItem) {
+        guard let tab = InspectorView.Tab(rawValue: sender.tag) else { return }
+        inspectorHostingView.rootView = InspectorView(model: model, initialTab: tab)
+    }
+
+    /// View ▸ Zoom In/Out/Fit: `TimelineView`'s own public zoom API (its ⌘=/⌘- keyDown handling
+    /// does the same thing; these are the menu-equivalent path, since `NSMenu.performKeyEquivalent`
+    /// is asked before an unhandled key event ever reaches a view's `keyDown`).
+    @objc func timelineZoomIn(_ sender: Any?) {
+        coreTimelineView.setZoom(sliderValue: coreTimelineView.zoomSliderValue + 0.1)
+    }
+
+    @objc func timelineZoomOut(_ sender: Any?) {
+        coreTimelineView.setZoom(sliderValue: coreTimelineView.zoomSliderValue - 0.1)
+    }
+
+    @objc func timelineFit(_ sender: Any?) {
+        coreTimelineView.fit()
+    }
+
+    /// Guards the handful of single-letter shortcuts (`C`, `Z`, `⌫`, `1`–`6`) from firing while a
+    /// text field (title, crop fields, …) is being edited — every other item here keeps working
+    /// normally since it carries a `⌘` modifier. Also: Undo/Redo's title/availability track the
+    /// undo stack, and Remove/Hide Cursor need a selection; everything else just needs an editor.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(performUndo):
+            item.title = model.undoName.map { "Undo \($0)" } ?? "Undo"
+            return model.undoName != nil
+        case #selector(performRedo):
+            item.title = model.redoName.map { "Redo \($0)" } ?? "Redo"
+            return model.redoName != nil
+        case #selector(splitAtPlayhead), #selector(addZoomAtPlayhead), #selector(selectInspectorTab(_:)):
+            return !isTextEditing
+        case #selector(removeSelected):
+            return !isTextEditing && (model.selectedClip != nil || !model.selection.isEmpty)
+        case #selector(hideCursorInSelectedClip):
+            return model.selectedClip != nil
+        default:
+            return true
+        }
+    }
+
+    private var isTextEditing: Bool { window?.firstResponder is NSText }
 }
 
 /// SPEC §7.1: the timeline's 32 pt toolbar row sits above the ruler/lanes. Manual layout (like
@@ -267,14 +440,18 @@ private final class TimelineContainerView: NSView {
     }
 }
 
-/// Manual layout (no `NSSplitView`): preview + transport bar | 300 pt inspector, over the
-/// timeline; the divider between them drags the timeline's height (160–420 pt). SPEC §6.1 mockup.
+/// Manual layout (no `NSSplitView`): a top bar (SPEC §6.1's `‹ Projects … ⬆ Export` row, drawn under
+/// the native titlebar — `window` is `.fullSizeContentView`, see `EditorWindowController
+/// .configureFullSizeTitlebar`) over preview + transport bar | 300 pt inspector, over the timeline;
+/// the divider between them drags the timeline's height (160–420 pt).
 private final class EditorRootView: NSView {
     static let inspectorWidth: CGFloat = 300
+    static let topBarHeight: CGFloat = 44
     static let transportHeight: CGFloat = 44
     static let dividerHeight: CGFloat = 6
     static let timelineRange: ClosedRange<CGFloat> = 160...420
 
+    var topBar: NSView { didSet { swap(oldValue, for: topBar) } }
     let preview: NSView
     let transport: NSView
     var inspector: NSView { didSet { swap(oldValue, for: inspector) } }
@@ -284,7 +461,8 @@ private final class EditorRootView: NSView {
     private var dragStartHeight: CGFloat?
     private var dragStartY: CGFloat?
 
-    init(preview: NSView, transport: NSView, inspector: NSView, timeline: NSView) {
+    init(topBar: NSView, preview: NSView, transport: NSView, inspector: NSView, timeline: NSView) {
+        self.topBar = topBar
         self.preview = preview
         self.transport = transport
         self.inspector = inspector
@@ -292,7 +470,7 @@ private final class EditorRootView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = Theme.bgWindow.cgColor
-        for view in [preview, transport, inspector, timeline] { addSubview(view) }
+        for view in [topBar, preview, transport, inspector, timeline] { addSubview(view) }
     }
 
     @available(*, unavailable)
@@ -312,11 +490,13 @@ private final class EditorRootView: NSView {
     override func layout() {
         super.layout()
         let clampedTimeline = min(max(timelineHeight, Self.timelineRange.lowerBound), Self.timelineRange.upperBound)
-        let rowHeight = max(0, bounds.height - clampedTimeline - Self.dividerHeight)
+        let available = max(0, bounds.height - clampedTimeline - Self.dividerHeight)
+        let rowHeight = max(0, available - Self.topBarHeight)
         let previewHeight = max(0, rowHeight - Self.transportHeight)
         let previewWidth = max(0, bounds.width - Self.inspectorWidth)
         let rowY = clampedTimeline + Self.dividerHeight
 
+        topBar.frame = NSRect(x: 0, y: rowY + rowHeight, width: bounds.width, height: Self.topBarHeight)
         timeline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: clampedTimeline)
         transport.frame = NSRect(x: 0, y: rowY, width: previewWidth, height: Self.transportHeight)
         preview.frame = NSRect(x: 0, y: rowY + Self.transportHeight, width: previewWidth, height: previewHeight)

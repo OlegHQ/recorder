@@ -26,6 +26,10 @@ import RecorderCore
     // ponytail: whole-struct snapshots; Project is a few KB.
     private var undoStack: [Project] = []
     private var redoStack: [Project] = []
+    // Parallel to undo/redoStack: the `edit`/`commitGesture` name that produced each snapshot, so a
+    // menu can show "Undo Split" cheaply (T-311) without changing the snapshot-stack design.
+    private var undoNames: [String] = []
+    private var redoNames: [String] = []
     private let undoCap = 200
 
     /// For selftests (AC-TL-6: "every gesture is exactly one undo step"): how many completed
@@ -34,6 +38,10 @@ import RecorderCore
 
     private var gestureSnapshot: Project?
     private var autosaveWork: DispatchWorkItem?
+
+    /// The name of the edit `undo()`/`redo()` would apply next, or `nil` if there is none.
+    var undoName: String? { undoNames.last }
+    var redoName: String? { redoNames.last }
 
     init(packageURL: URL, project: Project, events: EventLog) {
         self.packageURL = packageURL
@@ -44,11 +52,12 @@ import RecorderCore
 
     /// The ONLY way to mutate `project` outside a gesture. One call = one undo step.
     func edit(_ name: String, _ change: (inout Project) -> Void) {
-        push(project)
+        push(project, name: name)
         let before = project
         change(&project)
         rebuildPathsIfNeeded(from: before)
         redoStack.removeAll()
+        redoNames.removeAll()
         scheduleAutosave()
     }
 
@@ -64,9 +73,10 @@ import RecorderCore
 
     func commitGesture(_ name: String) {
         guard let snapshot = gestureSnapshot else { return }
-        push(snapshot)
+        push(snapshot, name: name)
         gestureSnapshot = nil
         redoStack.removeAll()
+        redoNames.removeAll()
         rebuildPathsIfNeeded(from: snapshot)
         scheduleAutosave()
     }
@@ -78,8 +88,9 @@ import RecorderCore
     }
 
     func undo() {
-        guard let previous = undoStack.popLast() else { return }
+        guard let previous = undoStack.popLast(), let name = undoNames.popLast() else { return }
         redoStack.append(project)
+        redoNames.append(name)
         let before = project
         project = previous
         rebuildPathsIfNeeded(from: before)
@@ -87,8 +98,9 @@ import RecorderCore
     }
 
     func redo() {
-        guard let next = redoStack.popLast() else { return }
+        guard let next = redoStack.popLast(), let name = redoNames.popLast() else { return }
         undoStack.append(project)
+        undoNames.append(name)
         let before = project
         project = next
         rebuildPathsIfNeeded(from: before)
@@ -118,9 +130,10 @@ import RecorderCore
         return (cursorPath, cameraPath)
     }
 
-    private func push(_ snapshot: Project) {
+    private func push(_ snapshot: Project, name: String) {
         undoStack.append(snapshot)
-        if undoStack.count > undoCap { undoStack.removeFirst() }
+        undoNames.append(name)
+        if undoStack.count > undoCap { undoStack.removeFirst(); undoNames.removeFirst() }
     }
 
     private func scheduleAutosave() {

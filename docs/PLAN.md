@@ -49,10 +49,10 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | M0 Foundations | T-001…T-006 | 6/6 |
 | M1 Record | T-101…T-114 | 7/14 |
 | M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
-| M3 Editor shell | T-301…T-313 | 5/13 |
-| M4 Timeline | T-401…T-418 | 5/18 |
-| M5 Ship | T-501…T-509 | 0/9 |
-| M6 Polish | T-601…T-609 | 2/9 |
+| M3 Editor shell | T-301…T-313 | 6/13 |
+| M4 Timeline | T-401…T-418 | 6/18 |
+| M5 Ship | T-501…T-509 | 2/9 |
+| M6 Polish | T-601…T-609 | 3/9 |
 
 Update the "Done" column whenever you tick a task.
 
@@ -411,7 +411,8 @@ Update the "Done" column whenever you tick a task.
 
 - [~] **T-307 Editor window** · SPEC §6.1 mockup — File `Editor/EditorWindowController.swift`: `NSSplitView`-free manual layout (preview | 300 pt inspector) over a timeline placeholder (`NSView`, 220 pt, height draggable 160–420). Top bar in the titlebar (`NSTitlebarAccessoryViewController`): `‹ Projects`, title (click = rename), aspect `NSPopUpButton`, Crop, Export (disabled until M5). `RecordingController.finish` and the library now open this window instead of Finder.
   - WAITING ON HUMAN: merged; layout vs §6.1 mockup, AC-REC-4. Inspector/timeline/library/finish hand-offs wired by the integration pass.
-  - HUMAN: layout matches the mockup; AC-REC-4 (editor visible < 2 s after Finish).
+  - FIX (T-311, 2026-09-18): the top bar rendered completely empty (coordinator caught it with a real on-screen screenshot) — `NSTitlebarAccessoryViewController` never reliably sized the wide bar in this environment; replaced with `.fullSizeContentView` + the bar as a manually-positioned `EditorRootView` subview. Root-cause story and the (now-not-`NSTitlebarAccessoryViewController`) top-bar code live in `EditorWindowController.swift`. Still not HUMAN-confirmed on a real screen (see T-311's Log entry) — re-check needed alongside this task's existing HUMAN items.
+  - HUMAN: layout matches the mockup; AC-REC-4 (editor visible < 2 s after Finish); the top-bar fix above.
 
 - [~] **T-308 Inspector shell + Background tab** · SPEC §6.6 — Files `Editor/Inspector/InspectorView.swift`, `Inspector/BackgroundTab.swift`, `Inspector/LabeledSlider.swift`.
   - WAITING ON HUMAN: `--selftest inspector` OK (1 drag = 1 undo step, autosave); coordinator reviewed `inspector-png` vs §6.6. Human: AC-INS-1 once hosted in the editor window (T-307). Known gap: system `.heic` wallpapers fall back to flat colour until Compositor loads absolute paths.
@@ -426,7 +427,8 @@ Update the "Done" column whenever you tick a task.
   - WAITING ON HUMAN: merged + wired to the top-bar Crop button; `--selftest crop` OK (mapping round-trip, Confirm = 1 undo step, Discard = no change); `crop-png` reviewed. Human: AC-CROP look vs `reference/…13.05.18.png` in the dark app.
   - HUMAN: AC-CROP-1 vs `reference/…13.05.18.png`.
 
-- [ ] **T-311 Menu wiring** — connect File/Edit/View items that now have targets (Open, Projects, Save, Save As = copy package, Show Raw Files = reveal in Finder, Undo/Redo, Crop, tabs). Items without a target stay disabled automatically (`validateMenuItem`).
+- [x] **T-311 Menu wiring** — connect File/Edit/View items that now have targets (Open, Projects, Save, Save As = copy package, Show Raw Files = reveal in Finder, Undo/Redo, Crop, tabs). Items without a target stay disabled automatically (`validateMenuItem`).
+  - DONE: File ▸ Save/Save As…/Show Raw Files, Edit ▸ Undo/Redo/Split/Remove/Add Zoom/Regenerate Auto Zooms/Remove All Zooms/Restore All Cuts/Speed Up Typing/Hide Cursor in Selected Clip, View ▸ tabs 1–6 (real names)/Zoom In/Zoom Out/Fit/Crop… all wired on `EditorWindowController` with `target = nil` (responder chain) + `validateMenuItem` (`NSMenuItemValidation`); View ▸ Command Menu… ⌘K / Keyboard Shortcuts ⌘/ wired on `AppDelegate` (SPEC §8 has no Help menu to put them in, so both went in View's last group, per the coordinator's instruction — SPEC §8 updated to match). Also fixed, root cause, a live bug the coordinator found while reviewing this task (T-307): the titlebar top bar rendered completely empty — `NSTitlebarAccessoryViewController` with `.layoutAttribute = .right` never reliably sized the wide multi-control bar in this environment; replaced with `window.styleMask.contains(.fullSizeContentView)` + the bar as one more manually-positioned subview of `EditorRootView` (see `EditorWindowController.swift`'s top-bar section for the full story, including a second bug the same diagnostic-tint technique caught: a same-class `didSet` relay silently never fires when assigned from inside that class's own initializer).
 
 - [x] **T-312 Library perf** · AC-LIB-1 — selftest `library-perf`: 200 fake packages, `reload()` < 300 ms. If slower: make sure only `project.json` + `thumbnail.jpg` are read.
 
@@ -515,23 +517,25 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Do: cursor per hit (`resizeLeftRight`, `openHand`/`closedHand`, `pointingHand`, `crosshair`-style plus). Click selects (white 2 px outline + glow), `⇧`-click adds same-lane, empty click/`Esc` deselects. `⌫` removes selection (`removeClip`/`removeBlock` via `model.edit`). Inspector swap arrives in T-413.
   - HUMAN: every row of the hit table shows the right cursor.
 
-- [ ] **T-407 Split** · SPEC §7.2 "Split" — **the headline interaction; implement every sentence of that paragraph.**
+- [~] **T-407 Split** · SPEC §7.2 "Split" — **the headline interaction; implement every sentence of that paragraph.**
+  - WAITING ON HUMAN: merged; `--selftest timeline-ops` drives real NSEvents (split at playhead, refusal near edges, split mode, Esc). Human feel-check + AC-TL-5/7.
   - Do: `C` → `model.edit("Split") { $0.split(atOutput: playhead) }` (works during playback: AC-TL-5). Split mode: `flagsChanged` ⌥ = momentary, `S`/✂ button = sticky, `Esc` exits. In split mode draw a full-height dashed accent blade at the snapped mouse x with a timecode chip; preview hover-scrubs to the blade time without moving `model.playhead` (add `model.hoverTime: Double?`; `PreviewView` renders `hoverTime ?? playhead`). Click = split there. Refused split (returns false) → 3-cycle 4 px horizontal shake of the blade, no alert. Success → 0.25 s fading white line.
   - HUMAN: AC-TL-5, AC-TL-7.
 
-- [ ] **T-408 Trim, remove, restore, speed, ripple animation** · SPEC §7.2
+- [~] **T-408 Trim, remove, restore, speed, ripple animation** · SPEC §7.2
+  - WAITING ON HUMAN: merged; `timeline-ops` asserts project result, invariants, 1 undo step, Esc-restores per gesture. Human: ripple animation, menus, ✂ bubbles.
   - Do: clip edge drag = `beginGesture` → `update { trimClip }` per mouseDragged → `commitGesture("Trim")`; `Esc` mid-drag → `cancelGesture` (AC-TL-6). During drag: chip `00:20.60 (Δ −0:01.20)`, preview shows the edge frame via `hoverTime`. ✂ bubble drawn at every seam where `clips[i].sourceEnd != clips[i+1].sourceStart` and at head/tail when trimmed; click → `NSPopover` "Restore 00:05.80 removed here [Restore]". Context menus per SPEC (clip / empty clip area / ruler) as `NSMenu`. Speed submenu + `Custom…`. Ripple animation: when `project.clips` changes and **no drag is active**, animate block x/width from old to new geometry over 0.18 s (keep `previousRects: [Int: CGRect]`, drive with the display link, ease-out). `// ponytail: animate by index; fine because ops change at most one seam.`
   - HUMAN: remove a middle segment → neighbours slide together, bubble appears, restore works, undo is one step each.
 
-- [ ] **T-409 Snapping + zoom-block gestures** · SPEC §7.2 "Snapping", "Zoom blocks"
+- [~] **T-409 Snapping + zoom-block gestures** · SPEC §7.2 "Snapping", "Zoom blocks"
+  - WAITING ON HUMAN: merged; snapping on/off-candidate assertions in `timeline-ops`. Human: AC-TL-3 feel on a long project.
   - Do: candidates = playhead, all clip edges, all block edges (except the dragged one), left-click times from `events` (draw them as 1×4 pt ticks in the zoom lane); threshold `6 / pxPerSecond`; `⌘` held disables; while snapped draw a 1 px accent guide across all lanes. Applies to: split blade, trims, block move/resize. Empty zoom lane: ghost block under pointer; click → `addZoom` (mode `.auto` if a click event lies within ±1 s, else `.manual`). Body drag = `moveZoom`, edges = `resizeZoom`. `Z` adds at playhead. Double-click = select + playhead to start. `⌘D` duplicates after itself. Context menu Disable/Enable · Instant · Remove.
   - HUMAN: AC-TL-3 feel check with a long project; AC-TL-6.
 
-- [ ] **T-410 AutoZoom** · SPEC §6.4
+- [x] **T-410 AutoZoom** · SPEC §6.4
   - File: `Sources/RecorderCore/AutoZoom.swift` — `public func generateAutoZooms(clicks: [InputEvent], duration: Double) -> [Zoom]` implementing the 5 numbered rules literally.
   - Tests (AC-AZ-1): `clusterByTimeAndDistance` · `mergeCloseZooms` · `dropShortAndClamp` · `outputSortedNonOverlappingDeterministic`.
-  - CORE DONE (lane-autozoom merged 2026-09-18, 4 tests green); only the Wire line below remains → tick after T-111/T-311.
-  - Wire: `RecordingController.finish` fills `project.zooms`; Edit ▸ Regenerate Auto Zooms / Remove All Zooms.
+  - DONE: core (lane-autozoom, 4 tests green) + wiring complete — `RecordingController.finish` already filled `project.zooms` (T-111); T-311 added `Edit ▸ Regenerate Auto Zooms` (`EditorWindowController.regenerateAutoZooms`) and `Edit ▸ Remove All Zooms` (`.removeAllZooms`), both verified headlessly in the `menu-actions` selftest (produces the expected zoom, one undo step).
 
 - [x] **T-411 CursorPath** · SPEC §6.5
   - File: `Sources/RecorderCore/CursorPath.swift`
@@ -557,7 +561,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - Do: build the target signal per step (outside enabled zooms: identity; inside: `scale`, centre = manual centre or dead-zone follower: move the target only when the cursor leaves the central 60% of the current viewport, then by just enough to bring it back to the 60% box). Simulate `cx, cy, scale` with `Spring.step`. `instant` zooms: copy target, zero velocity. After each step clamp centre so the viewport `[c − 0.5/scale, c + 0.5/scale]` stays inside 0…1.
   - Tests: `viewportAlwaysInsideSource` (AC-ZM-2, random zooms) · `sampleIsOrderIndependent` (AC-ZM-3) · `instantZoomJumps` · `outsideZoomsIsIdentityEventually`.
 
-- [ ] **T-413 Paths into the renderer + cursor pass** · SPEC §6.2 passes 2–3
+- [~] **T-413 Paths into the renderer + cursor pass** · SPEC §6.2 passes 2–3
+  - WAITING ON HUMAN: merged; zoom + redrawn cursor verified in `preview-frame` PNGs and one live screenshot (large crisp arrow). Human: AC-CUR/AC-ZM feel with a real recording.
   - Do: `EditorModel` owns `cursorPath`/`cameraPath`, rebuilt inside `edit/update` only when `zooms`, `cursor`, `animation.screen` or `cursorHidden` changed (compare before/after). `FrameState.view/prevView/cursor` filled from them (prev = `t − 1/60`). Shader: screen UV = `center + (uv − 0.5) / scale`, inside the crop rect. Cursor pass: texture from `cursors/<id>.png` (cache `[String: MTLTexture]`), quad positioned in **screen space** (so it zooms), size = image points × `cursor.size` × output scale, offset by hotspot, × `clickScale`, alpha.
   - Selftest `render` gains `--t <seconds>`; HUMAN: play a recording with clicks — view zooms in on clicks and follows; cursor smooth, large, sharp (AC-CUR-2).
 
@@ -565,7 +570,7 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - WAITING ON HUMAN (taste only): `--selftest inspector-panels` OK; zoom/clip/cursor PNGs reviewed by the lane agent. Deviation: no per-clip "Mute audio" (no such field in `Clip`).
 - [ ] **T-415 Manual zoom target in preview** — when a `.manual` zoom is selected, `PreviewView` shows the **un-zoomed** frame with a draggable accent rectangle (size = 1/scale) — reuse `SelectionRectView` with `aspect` locked and resize disabled (`allowsResize = false`, add that flag). Drag = `update { zoom.center }`.
 - [~] **T-416 Waveform** — File `Render/Waveform.swift`: `AVAssetReader` over mic (else system) → min/max peaks at 200/s → `[Float]` cached in memory; drawn inside clip blocks mapped through `TimeMap`. `// ponytail: computed on open, not cached on disk.`
-  - PARTIAL: `Waveform.peaks(for:)` + `--selftest waveform` merged and verified (aiff + m4a); drawing inside clip blocks happens after the timeline lane (T-404…) merges.
+  - WAITING ON HUMAN (taste): peaks + drawing inside clips merged; `timeline-png` reviewed with a synthesized mic track.
 - [ ] **T-417 Accessibility** · AC-TL-8 — `accessibilityChildren()` returns one `NSAccessibilityElement` per block, role `.button`, label per SPEC, `accessibilityPerformIncrement/Decrement` move by one frame. HUMAN: VoiceOver reads blocks.
 - [ ] **T-418 M4 gate** — `make test` all green; HUMAN walks SPEC §7.2 paragraph by paragraph and §7.3 key by key; deviations into §Log. AC-TL-3 on a 30-min recording.
 
@@ -573,13 +578,16 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 
 ## M5 — Ship  (SPEC §6.2 blur, §6.6 remaining tabs, §6.8)
 
-- [ ] **T-501 Motion blur** · SPEC §6.2 pass 2–3 — shader: when `|view − prevView|` > 0.5 px (in output px), average 8 taps of the screen texture along the UV delta, scaled by `animation.motionBlur` and gated by `blurZoom`/`blurPan` (scale change vs centre change); cursor quad: 8 taps along `pos − prevPos`, gated by `blurCursor`. Animations tab (`Inspector/AnimationsTab.swift`): slider + 3 advanced toggles + Focused/Smooth. The cursor Movement picker stays in the Cursor tab.
+- [~] **T-501 Motion blur** · SPEC §6.2 pass 2–3 — shader: when `|view − prevView|` > 0.5 px (in output px), average 8 taps of the screen texture along the UV delta, scaled by `animation.motionBlur` and gated by `blurZoom`/`blurPan` (scale change vs centre change); cursor quad: 8 taps along `pos − prevPos`, gated by `blurCursor`. Animations tab (`Inspector/AnimationsTab.swift`): slider + 3 advanced toggles + Focused/Smooth. The cursor Movement picker stays in the Cursor tab.
+  - PARTIAL: Animations tab UI merged; shader taps in progress (render lane).
   - HUMAN: blur visible during zoom-in on a paused frame mid-transition (scrub slowly); none when static.
-- [ ] **T-502 Camera compositing** · SPEC §6.6 Camera — pass 4: camera texture in a rounded-rect SDF quad (reuse mode 3), size/corner/roundness/mirror/shadow; `shrinkWhenZoomed`: size × `lerp(1, 0.7, (scale−1)/(2−1) clamped)`. Camera tab UI; dragging the camera in the preview snaps to nearest corner.
+- [~] **T-502 Camera compositing** · SPEC §6.6 Camera — pass 4: camera texture in a rounded-rect SDF quad (reuse mode 3), size/corner/roundness/mirror/shadow; `shrinkWhenZoomed`: size × `lerp(1, 0.7, (scale−1)/(2−1) clamped)`. Camera tab UI; dragging the camera in the preview snaps to nearest corner.
+  - PARTIAL: Camera tab UI merged; compositor pass + preview drag in progress (render lane).
 - [~] **T-503 Layout track** — lane enabled; blocks via the generic block ops (T-402); kinds `cameraFull` (camera fills output, screen hidden) / `hidden`; 0.3 s cross-fade using `Spring.focused.value(at:)` at block edges; `LayoutPanel.swift`.
   - PARTIAL: Core `layoutMix(layouts:atSource:fade:)` + test merged; lane UI, LayoutPanel and compositor use remain.
-- [ ] **T-504 Audio tab** — volumes/mutes → rebuild `AVAudioMix` only (no composition rebuild). `denoise`: applied **at export only** as an 80 Hz high-pass + peak normalise to −1 dBFS over the mic samples; preview plays the raw mic. `// ponytail: no real noise suppression and no preview; add an audio tap if users ask.` Click sound: mix `Resources/click.caf` at each `.down` time (export only; preview plays it with `NSSound`).
-- [ ] **T-505 Exporter (MP4)** · SPEC §6.8
+- [~] **T-504 Audio tab** — volumes/mutes → rebuild `AVAudioMix` only (no composition rebuild). `denoise`: applied **at export only** as an 80 Hz high-pass + peak normalise to −1 dBFS over the mic samples; preview plays the raw mic. `// ponytail: no real noise suppression and no preview; add an audio tap if users ask.` Click sound: mix `Resources/click.caf` at each `.down` time (export only; preview plays it with `NSSound`).
+  - PARTIAL: Audio tab UI merged (volumes, mutes, denoise, click sound); AVAudioMix rebuild in preview/export + export-only denoise filter remain.
+- [x] **T-505 Exporter (MP4)** · SPEC §6.8
   - File: `Sources/Recorder/Render/Exporter.swift`
   ```swift
   struct ExportSettings: Codable { enum Format: String, Codable { case mp4, gif }; var format: Format; var shortEdge: Int /*720,1080,2160*/; var fps: Int; var quality: Quality; var codec: Codec }
@@ -591,8 +599,9 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   ```
   - Do: video: use `AVAssetReaderTrackOutput` (not `AVAssetReaderVideoCompositionOutput`) per video track of the T-305 composition, decode sequentially, and for output frame `n` at `t = n/fps` advance each reader until its buffer PTS ≥ t (hold last). Build `FrameState` with the **same function** the preview uses (extract `func makeFrameState(model:, outputTime:, screen:, camera:, size:)` into `FrameState.swift` and call it from both). Render into a `CVPixelBuffer` from `AVAssetWriterInputPixelBufferAdaptor.pixelBufferPool` (Metal-compatible, BGRA). Audio: `AVAssetReaderAudioMixOutput` → AAC input. Bitrate formula from SPEC §6.8. Cancel → `cancelWriting` + delete file (AC-EXP-3).
   - Selftests: `export <package> <out.mp4>` (asserts duration == `timeMap.outputDuration` ± 1 frame — AC-EXP-4) · `parity <package>` (renders frame at t via preview path and export path into textures; max channel delta ≤ 1 — AC-ED-2).
-- [ ] **T-506 Export sheet UI** · SPEC §6.8 mockup — `Editor/ExportSheet.swift`: pickers, size estimate (`bitrate × duration / 8`), states Exporting/Done, Copy to clipboard (temp file URL on `NSPasteboard`), persisted defaults, editor locked while exporting. Enable the Export button + `⌘E`.
-- [ ] **T-507 GIF** — same frame loop → `CGImageDestinationCreateWithURL(… UTType.gif …)`, per-frame `kCGImagePropertyGIFDelayTime`, loop 0, long edge ≤ 960; warn if > 60 s. `// ponytail: ImageIO's default palette; add per-frame quantisation only if banding is reported.`
+- [~] **T-506 Export sheet UI** · SPEC §6.8 mockup — `Editor/ExportSheet.swift`: pickers, size estimate (`bitrate × duration / 8`), states Exporting/Done, Copy to clipboard (temp file URL on `NSPasteboard`), persisted defaults, editor locked while exporting. Enable the Export button + `⌘E`.
+  - WAITING: `ExportSheet.present(for:on:)` merged, `export-sheet` selftest OK (estimate, persistence, run to 1.0, cancel deletes partial), PNG reviewed by lane agent; Export button/⌘E wiring + human look pending.
+- [x] **T-507 GIF** — same frame loop → `CGImageDestinationCreateWithURL(… UTType.gif …)`, per-frame `kCGImagePropertyGIFDelayTime`, loop 0, long edge ≤ 960; warn if > 60 s. `// ponytail: ImageIO's default palette; add per-frame quantisation only if banding is reported.`
 - [ ] **T-508 Perf gates** — HUMAN + selftest timing: AC-EXP-1 (1 min 1080p60 < 30 s), AC-EXP-2 (10-min drift < 1 frame: compare last click sound vs cursor pulse), AC-APP-3 (idle CPU/RAM). Numbers into §Log.
 - [ ] **T-509 M5 gate / v1.0** — `make install` from a clean clone (AC-APP-1); record → edit → export end-to-end by HUMAN; tag `v1.0`.
 
@@ -603,16 +612,16 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 - [ ] **T-601 Masks & highlights** · SPEC §7.1 lane, §6.6 Mask panel — lane on; rect edited in preview with `SelectionRectView`; mask = solid fill at `opacity`, highlight = dim everything outside the rect by `opacity`. Keys: only those in SPEC §7.3.
 - [~] **T-602 Keyboard-shortcut overlay** — render `.key` events as rounded chips (`⌘ ⇧ K`) bottom-centre for 1.2 s; text rendered to a texture with Core Text, cached per string. Keys tab.
   - PARTIAL: Core `keyChipLabel` / `activeKeyChip` + tests merged (modifier order ⌃⌥⇧⌘); texture rendering + Keys tab remain.
-- [~] **T-603 Speed up typing** — Edit ▸ Speed Up Typing: find runs of `.typing` events (gap < 1 s, length > 3 s), split clips around them, set 2×. Core fn `typingRanges(events:) -> [TimeRange]` + test.
-  - PARTIAL: Core `typingRanges(events:)` + tests merged; Edit ▸ Speed Up Typing wiring remains (needs editor menus, M3/M4).
+- [x] **T-603 Speed up typing** — Edit ▸ Speed Up Typing: find runs of `.typing` events (gap < 1 s, length > 3 s), split clips around them, set 2×. Core fn `typingRanges(events:) -> [TimeRange]` + test.
+  - DONE: Core `typingRanges(events:)` (pre-existing) + new `Project.speedUpTyping(_:factor:)` (`RecorderCore/TimelineOps.swift`, splits clips at each range's source-time edges and sets the enclosed clip(s) to `factor`×) with test `speedUpTypingKeepsInvariants`; `Edit ▸ Speed Up Typing` wired on `EditorWindowController`, verified headlessly (produces the expected 2× clip, `checkInvariants() == nil`, one undo step).
 - [~] **T-604 Cursor advanced** — loop position, rotate, remove shakes, always-arrow, hide-cursor ranges via Edit ▸ Hide Cursor in Selected Clip (adds the clip's source range to `cursorHidden`). Tests per stage in `CursorPath`.
-  - PARTIAL: Core pipeline stages (shake removal, loop, rotation, always-arrow) + 4 tests merged; Cursor-tab controls and Edit ▸ Hide Cursor in Selected Clip remain.
+  - PARTIAL: Core pipeline stages (shake removal, loop, rotation, always-arrow) + 4 tests merged; `Edit ▸ Hide Cursor in Selected Clip` now wired (`EditorWindowController.hideCursorInSelectedClip`, appends the selected clip's source range to `cursorHidden`, merged/sorted; verified headlessly, one undo step) — Cursor-tab controls (loop/rotate/always-arrow/remove-shakes UI) still remain, that's inspector work outside T-311's file set.
 - [x] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
 - [x] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
 - [~] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
-  - WAITING: `--selftest command-menu` OK + PNG reviewed by lane agent; `CommandMenu.show()` still needs its ⌘K menu binding (T-311).
+  - WAITING ON HUMAN (taste only): `--selftest command-menu` OK + PNG reviewed by lane agent; `CommandMenu.show()` now bound to View ▸ Command Menu… ⌘K (`AppDelegate.wireViewHelpItems`, T-311).
 - [~] **T-608 Cheat sheet (⌘/)** — static SwiftUI grid of SPEC §7.3.
-  - WAITING: all 19 rows of SPEC §7.3 rendered (`cheatsheet-png`); `CheatSheet.show()` still needs its ⌘/ menu binding (T-311).
+  - WAITING ON HUMAN (taste only): all 19 rows of SPEC §7.3 rendered (`cheatsheet-png`); `CheatSheet.show()` now bound to View ▸ Keyboard Shortcuts ⌘/ (`AppDelegate.wireViewHelpItems`, T-311).
 - [ ] **T-609 Shortcut settings + Copy frame (⇧⌘C)** — rebind the global hotkeys (the T-204 table); copy current composed frame to the pasteboard as PNG.
 
 ---
@@ -676,3 +685,10 @@ T-606 · 2026-09-18 · verified on master: `--selftest import` OK (package conte
 T-605 · 2026-09-18 · verified on master: Core `presetRoundTripAndApply` + `--selftest presets` OK (save/list/apply through EditorModel = 1 undo step, export/import round-trip, delete) · deviations: "Presets ▾" menu sits above the inspector tab bar (SPEC gives no location)
 T-203/T-204/T-205/T-207b · 2026-09-18 · verified on master: `make app`, 47 tests, `--selftest menus` OK, real-TCC `record display 3` still OK after the `elapsed` refactor (3.0 s, 2880×1800), `finder-windows` answered SPEC §9 Q3 · deviations: `CaptureSession.elapsed` now host-clock based; widget shown before the exclusion snapshot (follow-up fix); Delete alert default = Keep Recording
 T-607/T-608 · 2026-09-18 · merged: `command-menu` selftest OK; root fix `NSApp` → `NSApplication.shared` (nil under --selftest); menu bindings pending T-311
+T-311 (+ T-410/T-603/T-604/T-607/T-608 menu halves) · 2026-09-18 · verified: `make app`; `make test` 48/48 (adds `speedUpTypingKeepsInvariants`); selftests `metal model library pickers recover inspector inspector-panels crop menus command-menu import presets menu-actions editor-png` all OK; new `--selftest menu-actions` builds the real `AppDelegate.buildMainMenu()` + a real offscreen `EditorWindowController` over a fixture package and checks target==nil (responder chain, not a manager object), `sendAction` resolves nothing with no editor open, `validateMenuItem` approves/titles items correctly once an editor exists, and Split/Remove/Add Zoom/Regenerate Auto Zooms/Remove All Zooms/Restore All Cuts/Speed Up Typing/Hide Cursor each produce the documented `Project` change with `checkInvariants() == nil` and exactly one `performUndo`/`performRedo` step; launch smoke (alive 3 s, killed own PID) · deviations: (1) Undo/Redo wired to custom `performUndo`/`performRedo` selectors (not the standard `undo:`/`redo:` pair, to avoid any collision with `NSTextView`'s own undo manager on text fields) — titles rewritten with the edit name in `validateMenuItem` since `EditorModel` gained parallel `undoNames`/`redoNames` stacks (cheap, per the task's own "if cheap" wording); (2) Remove's/TimelineView's own `⌫` handling couldn't be reused (private, different file, per T-311's boundary) — the same few lines are duplicated in `EditorWindowController.removeSelected`; (3) `AppDelegate.buildMainMenu`/`buildIdleStatusMenu`-style status menus stay `private`→un-`private` only where a selftest needs to call them directly (matches the existing pattern). Root-cause fix (coordinator report, filed against this same task): the editor window's titlebar top bar (‹ Projects · title · Auto ▾ · Crop · Export) rendered completely empty, live and offscreen alike. Two stacked bugs, both found with a temporary diagnostic background tint that never appeared on screen: (a) `NSTitlebarAccessoryViewController` with `.layoutAttribute = .right` never reliably sized the wide, multi-control bar in this environment regardless of its own Auto Layout constraints — dropped entirely in favor of `window.styleMask.contains(.fullSizeContentView)` + the bar as one more manually-positioned subview of `EditorRootView` (same plain frame-layout style already used for preview/inspector/timeline); (b) the first fix attempt used a same-class `didSet`-relay property to swap the real (button-wired) bar in after `super.init()` — Swift never fires property observers for assignments made from inside the declaring type's own initializer, no matter how many times or how late, so the "real" bar was silently never installed; fixed by assigning `rootView.topBar` directly (a different object's property, not `self`'s own) instead of through a same-class relay. `EditorWindowController.swift`'s top-bar section documents both. Not verified: a real on-screen screenshot of the live app — this machine's screen is shared with other concurrent agents/the user's own apps, and `open -n --args --open <pkg>` + `osascript activate` couldn't reliably keep the Recorder window frontmost long enough to capture it (another window kept stealing focus); the offscreen `editor-png` selftest exercises the identical `EditorWindowController` construction path (`makeOffscreen` calls the same private `init`) and shows the top bar rendering correctly, which is the strongest verification available headlessly — HUMAN should confirm the on-screen look matches SPEC §6.1 next time the app is run interactively.
+T-505 · 2026-09-18 · verified on master: `--selftest export` (duration exact, 1280×720, decodable) and `--selftest parity` maxDelta=0 over 7 times incl. 2× clip / zoom / frame boundary (AC-ED-2, AC-EXP-4) · deviations: root-caused a one-frame offset (exporter picked first PTS ≥ t, preview shows last PTS ≤ t) — both now use largest PTS ≤ t; audio appended after video
+T-507 · 2026-09-18 · verified on master: `--selftest export-gif` (23 frames for 1.5 s, loop 0, delay 0.067 s, long edge 960) · deviations: fps clamped to ≤ 24; GIF loop is a separate function reusing FrameHold/makeFrameState/Compositor
+T-407/T-408/T-409/T-416 draw · 2026-09-18 · merged; `timeline-ops` OK on master · deviations: root fixes in TimelineOps `addBlock` boundary (`<` not `<=`) and drag modifiers read from the event; clip "Mute Audio" menu item disabled (no field)
+T-413 · 2026-09-18 · merged; EditorModel caches CursorPath/CameraPath, rebuilt only when zooms/cursor/animation.screen/cursorHidden change
+Inspector tabs (T-604/T-502/T-504/Animations/T-602 UI halves) · 2026-09-18 · merged; omitted for lack of fields: Keys size/position, Camera "Add fullscreen layout"
+T-307 fix · 2026-09-18 · titlebar top bar now visible in a REAL screenshot (‹ Projects · Auto ▾ · Crop · Export); OPEN BUG: live preview shows no video frame when paused at open on master (works in the render lane's own build) — being debugged on the integration branch
