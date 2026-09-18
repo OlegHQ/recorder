@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import CoreGraphics
 import RecorderCore
@@ -42,4 +43,16 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
     let prevView = model.cameraPath.sample(atSource: sourceTime - 1.0 / 60)
     let cursor = model.cursorPath.sample(atSource: sourceTime)
     return FrameState(outputSize: size, screen: screen, camera: camera, view: view, prevView: prevView, cursor: cursor, project: model.project)
+}
+
+/// `project.json` + `events.json` (if present — a fresh/recovered package may not have one yet) →
+/// an `EditorModel`, so `CursorPath`/`CameraPath` sample real recorded input. Shared by every path
+/// that needs a real model to call `makeFrameState` with: the `preview-frame`/`export`/`parity`
+/// selftests, and (via `EditorWindowController`, which loads events.json the same way) the app.
+@MainActor
+func loadEditorModel(package: URL) throws -> EditorModel {
+    let project = try Project.load(from: package.appendingPathComponent("project.json"))
+    let events = (try? Data(contentsOf: package.appendingPathComponent("events.json")))
+        .flatMap { try? JSONDecoder().decode(EventLog.self, from: $0) } ?? EventLog()
+    return EditorModel(packageURL: package, project: project, events: events)
 }

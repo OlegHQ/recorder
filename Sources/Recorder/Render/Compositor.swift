@@ -463,12 +463,8 @@ extension Compositor {
         }
         let packageURL = URL(fileURLWithPath: args[0])
         let outURL = URL(fileURLWithPath: args[2])
-        let project = try Project.load(from: packageURL.appendingPathComponent("project.json"))
-        // Same fallback `EditorWindowController.open` uses: a fresh/recovered package may have no
-        // events.json yet. Needed from T-413 on — CursorPath/CameraPath sample real move/click data.
-        let events = (try? Data(contentsOf: packageURL.appendingPathComponent("events.json")))
-            .flatMap { try? JSONDecoder().decode(EventLog.self, from: $0) } ?? EventLog()
-        let model = EditorModel(packageURL: packageURL, project: project, events: events)
+        let model = try loadEditorModel(package: packageURL)
+        let project = model.project
 
         let (composition, audioMix) = try await makeComposition(package: packageURL, project: project)
         let item = AVPlayerItem(asset: composition)
