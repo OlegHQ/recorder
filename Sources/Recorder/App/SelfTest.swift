@@ -1219,6 +1219,11 @@ enum SelfTest {
                 print("wrote \(outPath)")
             }
         },
+        // Dev/QA tool (agent UI testing): screen/mouse/keyboard driver, see UIDriver.swift.
+        "screenshot": { args in try await UIDriver.screenshot(args) },
+        "click": { args in try await UIDriver.click(args) },
+        "key": { args in try await UIDriver.key(args) },
+        "drag": { args in try await UIDriver.drag(args) },
     ]
 
     /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and
