@@ -316,9 +316,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         record.addItem(item("Restart"))
         main.addItem(item("Record", submenu: record))
 
+        // T-506/T-609: `target = nil`, resolved through the key window's responder chain to
+        // `EditorWindowController`, same as the Edit/View items above — disabled automatically with
+        // no editor window key.
         let export = NSMenu(title: "Export")
-        export.addItem(item("Export…", "e"))
-        export.addItem(item("Copy Frame as Image", "c", [.command, .shift]))
+        export.addItem(item("Export…", "e", action: #selector(EditorWindowController.exportTapped(_:))))
+        export.addItem(item("Copy Frame as Image", "c", [.command, .shift], action: #selector(EditorWindowController.copyFrameAsImage(_:))))
         main.addItem(item("Export", submenu: export))
 
         let view = NSMenu(title: "View")
@@ -366,18 +369,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return si
     }
 
-    /// SPEC §8 mockup, titles/order/key equivalents/SF Symbols normative (`reference/status-item-menu.png`).
+    /// T-609: the key equivalent/modifiers `Hotkeys.table`'s current binding (override or default) for
+    /// `hotkeyTitle` uses — so a Settings ▸ Shortcuts rebind is reflected here the next time either
+    /// status menu is rebuilt (`updateStatusItem` rebuilds fresh each time it's opened).
+    private func hotkeyKey(_ hotkeyTitle: String) -> (key: String, mods: NSEvent.ModifierFlags) {
+        let b = Hotkeys.currentBinding(titled: hotkeyTitle)
+        return (b.character, NSEvent.ModifierFlags(rawValue: b.modifiers))
+    }
+
+    /// SPEC §8 mockup, titles/order/SF Symbols normative (`reference/status-item-menu.png`); key
+    /// equivalents mirror `Hotkeys.table`'s current bindings (T-609).
     /// Not `private`: the `menus` selftest builds both status menus directly to check them against SPEC.
     func buildIdleStatusMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(statusMenuItem("New Recording…", symbol: "record.circle", key: "\r", mods: [.control, .command],
+        let newRecordingKey = hotkeyKey("New Recording")
+        menu.addItem(statusMenuItem("New Recording…", symbol: "record.circle", key: newRecordingKey.key, mods: newRecordingKey.mods,
                                      action: #selector(newRecording)))
         menu.addItem(.separator())
-        menu.addItem(statusMenuItem("Record Display", symbol: "display", key: "3", mods: [.option, .command],
+        let displayKey = hotkeyKey("Record Display")
+        menu.addItem(statusMenuItem("Record Display", symbol: "display", key: displayKey.key, mods: displayKey.mods,
                                      action: #selector(recordDisplay)))
-        menu.addItem(statusMenuItem("Record Window", symbol: "macwindow", key: "4", mods: [.option, .command],
+        let windowKey = hotkeyKey("Record Window")
+        menu.addItem(statusMenuItem("Record Window", symbol: "macwindow", key: windowKey.key, mods: windowKey.mods,
                                      action: #selector(recordWindow)))
-        menu.addItem(statusMenuItem("Record Area", symbol: "rectangle.dashed", key: "5", mods: [.option, .command],
+        let areaKey = hotkeyKey("Record Area")
+        menu.addItem(statusMenuItem("Record Area", symbol: "rectangle.dashed", key: areaKey.key, mods: areaKey.mods,
                                      action: #selector(recordArea)))
         menu.addItem(.separator())
         menu.addItem(statusMenuItem("Settings…", key: ",", action: #selector(openSettings)))
@@ -387,7 +403,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(statusMenuItem("Projects", key: "o", mods: [.command, .shift], action: #selector(showProjects)))
         menu.addItem(statusMenuItem("Open…", key: "o", action: #selector(openDocument)))
-        let openLast = statusMenuItem("Open Last Project", key: "z", mods: [.option, .command], action: #selector(openLastProjectAction))
+        let openLastKey = hotkeyKey("Open Last Project")
+        let openLast = statusMenuItem("Open Last Project", key: openLastKey.key, mods: openLastKey.mods, action: #selector(openLastProjectAction))
         openLast.isEnabled = AppDelegate.newestProjectURL() != nil
         menu.addItem(openLast)
         menu.addItem(.separator())
@@ -402,12 +419,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// SPEC §4.7 "in-progress controls" menu, installed instead of the idle one while recording
     /// (`updateStatusItem`): Finish · Pause/Resume · Restart · Delete · ─ · Hide widget. Same
-    /// `RecordingController` methods the widget's buttons call (T-203) — one implementation each.
+    /// `RecordingController` methods the widget's buttons call (T-203) — one implementation each; key
+    /// equivalents mirror `Hotkeys.table`'s current bindings (T-609).
     @MainActor func buildRecordingStatusMenu() -> NSMenu {
         let paused = RecordingController.shared.state == .paused
         let menu = NSMenu()
-        menu.addItem(statusMenuItem("Finish", key: "r", mods: [.control, .option, .command], action: #selector(finishRecording)))
-        menu.addItem(statusMenuItem(paused ? "Resume" : "Pause", key: "p", mods: [.control, .option, .command],
+        let finishKey = hotkeyKey("Start/Finish Recording")
+        menu.addItem(statusMenuItem("Finish", key: finishKey.key, mods: finishKey.mods, action: #selector(finishRecording)))
+        let pauseKey = hotkeyKey("Pause/Resume")
+        menu.addItem(statusMenuItem(paused ? "Resume" : "Pause", key: pauseKey.key, mods: pauseKey.mods,
                                          action: #selector(togglePauseRecording)))
         menu.addItem(statusMenuItem("Restart", action: #selector(restartRecording)))
         menu.addItem(statusMenuItem("Delete", action: #selector(deleteRecording)))

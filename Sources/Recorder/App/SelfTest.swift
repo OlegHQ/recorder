@@ -346,8 +346,10 @@ enum SelfTest {
             for y in 0..<height {
                 for x in 0..<width {
                     let i = (y * width + x) * 4
-                    bytes[i + 0] = UInt8(clamping: Int(40 + 120 * Double(x) / Double(width)))
-                    bytes[i + 1] = UInt8(clamping: Int(60 + 140 * Double(y) / Double(height)))
+                    let rValue: Double = 40 + 120 * Double(x) / Double(width)
+                    let gValue: Double = 60 + 140 * Double(y) / Double(height)
+                    bytes[i + 0] = UInt8(clamping: Int(rValue))
+                    bytes[i + 1] = UInt8(clamping: Int(gValue))
                     bytes[i + 2] = 200
                     bytes[i + 3] = 255
                 }
@@ -765,8 +767,13 @@ enum SelfTest {
         // static layout check, not a pixel comparison: the preview's MTKView needs a live Metal draw
         // call to have pixels, which `cacheDisplay` never triggers, so that region comes out blank.
         // (T-307 fix: the titlebar's top bar — ‹ Projects · title · Auto ▾ · Crop · Export — used to
-        // render 0-width here too, live and offscreen; root cause was a missing Auto Layout height
-        // constraint on the accessory's container view, fixed in `installTitlebarAccessory`.)
+        // render 0-width here too, live and offscreen; root cause was the `NSTitlebarAccessoryViewController`
+        // API not reliably sizing a wide accessory view, fixed by dropping it for a manually-positioned
+        // subview of `EditorRootView` (see `EditorWindowController.configureFullSizeTitlebar`).
+        // T-506/T-609 fix: the title text itself then rendered invisible — an editable `NSTextField`
+        // reports `NSView.noIntrinsicMetric` for width until it becomes the field editor, so the top
+        // bar's `NSStackView` collapsed it to ~0 pt; `EditorWindowController.TitleField` now starts
+        // non-editable (real intrinsic width) and flips editable only for the click-to-rename gesture.)
         "editor-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png>") }
@@ -814,6 +821,36 @@ enum SelfTest {
                 return item
             }
 
+            // `MainActor.run` below only supports a synchronous body, so anything needing `await`
+            // (the fixture's `screen.mov` synthesis here, the Copy Frame check after) happens outside
+            // it — `EditorWindowController` isn't itself `@MainActor`, so those are ordinary
+            // nonisolated async calls, no further actor hop needed.
+            nonisolated(unsafe) var copyFrameController: EditorWindowController?
+
+            // A small fixture package: one 30 s clip, two close clicks at t=5.0/5.2 (for Regenerate
+            // Auto Zooms), a 10...14 typing run (for Speed Up Typing), and a real, decodable
+            // `screen.mov` (Copy Frame as Image, below, is the one action here that touches the
+            // render pipeline — everything else is a pure `Project` mutation).
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-menu-actions-\(UUID().uuidString)")
+            let packageURL = tmp.appendingPathComponent("Fixture.recorder")
+            try fm.createDirectory(at: packageURL, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            var fixtureProject = Project(title: "Menu Actions",
+                                          source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 1, duration: 30))
+            fixtureProject.clips = [Clip(sourceStart: 0, sourceEnd: 30, speed: 1)]
+            try fixtureProject.save(to: packageURL.appendingPathComponent("project.json"))
+
+            var fixtureEvents = EventLog()
+            fixtureEvents.events.append(InputEvent(t: 5.0, k: .down, x: 0.5, y: 0.5, b: 0))
+            fixtureEvents.events.append(InputEvent(t: 5.2, k: .down, x: 0.5, y: 0.5, b: 0))
+            var fixtureT = 10.0
+            while fixtureT <= 14.0 { fixtureEvents.events.append(InputEvent(t: fixtureT, k: .typing)); fixtureT += 0.5 }
+            try JSONEncoder().encode(fixtureEvents).write(to: packageURL.appendingPathComponent("events.json"), options: .atomic)
+
+            try await synthesizeMovie(at: packageURL.appendingPathComponent("screen.mov"), width: 1920, height: 1080, fps: 30, frameCount: 30)
+
             try await MainActor.run {
                 let mainMenu = AppDelegate.buildMainMenu()
 
@@ -826,6 +863,7 @@ enum SelfTest {
                     ("View", "Background"), ("View", "Cursor"), ("View", "Camera"), ("View", "Audio"),
                     ("View", "Animations"), ("View", "Keys"), ("View", "Zoom In"), ("View", "Zoom Out"),
                     ("View", "Fit"), ("View", "Crop…"),
+                    ("Export", "Export…"), ("Export", "Copy Frame as Image"),
                 ]
                 var items: [String: NSMenuItem] = [:]
                 for (menuTitle, itemTitle) in responderChainItems {
@@ -843,26 +881,6 @@ enum SelfTest {
                     let resolved = NSApplication.shared.sendAction(action, to: nil, from: menuItem)
                     guard !resolved else { throw Fail(description: "\(title): resolved a target with no editor open") }
                 }
-
-                // A small fixture package: one 30 s clip, two close clicks at t=5.0/5.2 (for
-                // Regenerate Auto Zooms), a 10...14 typing run (for Speed Up Typing).
-                let fm = FileManager.default
-                let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-menu-actions-\(UUID().uuidString)")
-                let packageURL = tmp.appendingPathComponent("Fixture.recorder")
-                try fm.createDirectory(at: packageURL, withIntermediateDirectories: true)
-                defer { try? fm.removeItem(at: tmp) }
-
-                var project = Project(title: "Menu Actions",
-                                       source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 1, duration: 30))
-                project.clips = [Clip(sourceStart: 0, sourceEnd: 30, speed: 1)]
-                try project.save(to: packageURL.appendingPathComponent("project.json"))
-
-                var events = EventLog()
-                events.events.append(InputEvent(t: 5.0, k: .down, x: 0.5, y: 0.5, b: 0))
-                events.events.append(InputEvent(t: 5.2, k: .down, x: 0.5, y: 0.5, b: 0))
-                var t = 10.0
-                while t <= 14.0 { events.events.append(InputEvent(t: t, k: .typing)); t += 0.5 }
-                try JSONEncoder().encode(events).write(to: packageURL.appendingPathComponent("events.json"), options: .atomic)
 
                 guard let window = EditorWindowController.makeOffscreen(package: packageURL),
                       let controller = window.windowController as? EditorWindowController else {
@@ -979,13 +997,15 @@ enum SelfTest {
                     guard controller.validateMenuItem(items[tabTitle]!) else { throw Fail(description: "\(tabTitle) tab should always validate") }
                 }
                 for alwaysOn in ["Save", "Save As…", "Show Raw Files", "Split", "Add Zoom", "Regenerate Auto Zooms",
-                                 "Remove All Zooms", "Restore All Cuts", "Zoom In", "Zoom Out", "Fit", "Crop…"] {
+                                 "Remove All Zooms", "Restore All Cuts", "Zoom In", "Zoom Out", "Fit", "Crop…",
+                                 "Export…", "Copy Frame as Image"] {
                     guard controller.validateMenuItem(items[alwaysOn]!) else { throw Fail(description: "\(alwaysOn) should validate with an editor open") }
                 }
 
                 // Tab switching, timeline zoom in/out/fit: no `Project` state to check, just confirm
-                // they don't crash when actually invoked. Save is safe to call for real too — Save As
-                // and Show Raw Files open a panel/Finder, so those stay structural-only checks above.
+                // they don't crash when actually invoked. Save is safe to call for real too — Save As,
+                // Show Raw Files and Export… open a panel/Finder/sheet, so those stay structural-only
+                // checks above.
                 controller.selectInspectorTab(items["Cursor"]!)
                 controller.timelineZoomIn(nil)
                 controller.timelineZoomOut(nil)
@@ -994,6 +1014,37 @@ enum SelfTest {
                 guard fm.fileExists(atPath: packageURL.appendingPathComponent("project.json").path) else {
                     throw Fail(description: "Save didn't write project.json")
                 }
+
+                // Copy Frame as Image, below, opens a SECOND, fresh `EditorWindowController` on the
+                // just-saved package rather than reusing `controller`: this one went through a dozen
+                // `model.edit`s above, each retriggering `PreviewView.rebuildComposition()` (T-306,
+                // `Editor/PreviewView.swift`, out of this task's file set) — with a real `screen.mov`
+                // now present (needed for Copy Frame itself), those stack up as concurrent, uncancelled
+                // AVFoundation decode sessions on the same file and starve a later reader for minutes.
+                // A fresh controller has none of that history. Inside the synthesized `screen.mov`'s
+                // real 1 s of frames (`frameCount: 30, fps: 30` above) — the project's own
+                // `Clip`/`TimeMap` range is 0...30 s, far longer than that.
+                guard let copyFrameWindow = EditorWindowController.makeOffscreen(package: packageURL),
+                      let freshController = copyFrameWindow.windowController as? EditorWindowController else {
+                    throw Fail(description: "couldn't reopen the editor for the Copy Frame check")
+                }
+                freshController.model.playhead = 0.2
+                copyFrameController = freshController
+            }
+
+            // Copy Frame as Image: a PNG of the project's native (cropped) resolution on an INJECTED,
+            // private pasteboard — never `.general`, so this never touches the user's real clipboard.
+            guard let controller = copyFrameController else { throw Fail(description: "no controller for Copy Frame check") }
+            let testPasteboard = NSPasteboard.withUniqueName()
+            defer { testPasteboard.releaseGlobally() }
+            await controller.copyFrameAsImage(to: testPasteboard)
+            guard let pngData = testPasteboard.data(forType: .png), let rep = NSBitmapImageRep(data: pngData) else {
+                throw Fail(description: "Copy Frame as Image: no PNG landed on the injected pasteboard")
+            }
+            let expectedWidth = await MainActor.run { controller.model.project.source.pixelWidth }
+            let expectedHeight = await MainActor.run { controller.model.project.source.pixelHeight }
+            guard rep.pixelsWide == expectedWidth, rep.pixelsHigh == expectedHeight else {
+                throw Fail(description: "Copy Frame as Image: expected \(expectedWidth)x\(expectedHeight), got \(rep.pixelsWide)x\(rep.pixelsHigh)")
             }
         },
         // T-605 (non-Core half): `PresetStore` file storage + applying a saved preset through a real
@@ -1368,6 +1419,85 @@ enum SelfTest {
                 ], "recording menu")
                 guard recording.items.filter(\.isSeparatorItem).count == 1 else {
                     throw Fail(description: "recording menu: \(recording.items.filter(\.isSeparatorItem).count) separators, want 1")
+                }
+            }
+        },
+        // T-609: `Hotkeys.rebind`/`currentBinding`/`resetToDefaults` against a THROWAWAY `UserDefaults`
+        // suite (never `.standard`, so this never touches the user's real saved shortcuts) — table
+        // reflects an override, a duplicate combo is rejected, reset restores defaults, and the
+        // status-menu key equivalents built from `Hotkeys.table` (`AppDelegate.hotkeyKey`) follow.
+        "hotkeys": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let suiteName = "recorder-selftest-hotkeys-\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suiteName) else { throw Fail(description: "no UserDefaults suite") }
+            defer {
+                defaults.removePersistentDomain(forName: suiteName)
+                Hotkeys.reload(from: .standard) // leave the process's cache pointed at the real defaults again
+            }
+
+            try await MainActor.run {
+                Hotkeys.reload(from: defaults)
+
+                guard let displayHotkey = Hotkeys.table.first(where: { $0.title == "Record Display" }),
+                      let windowHotkey = Hotkeys.table.first(where: { $0.title == "Record Window" }) else {
+                    throw Fail(description: "expected hotkeys missing from the table")
+                }
+
+                // Starts at the default (⌥⌘3).
+                let initial = Hotkeys.currentBinding(for: displayHotkey)
+                guard initial.keyCode == displayHotkey.keyCode, initial.modifiers == displayHotkey.modifiers.rawValue else {
+                    throw Fail(description: "unexpected initial binding: \(initial)")
+                }
+
+                // Rebind Record Display to ⌃⌥⌘9 — reflected immediately and persisted to `defaults`.
+                let newMods: NSEvent.ModifierFlags = [.control, .option, .command]
+                guard Hotkeys.rebind(displayHotkey, keyCode: 25 /* '9' */, modifiers: newMods, character: "9", defaults: defaults) else {
+                    throw Fail(description: "rebind was unexpectedly rejected")
+                }
+                let rebound = Hotkeys.currentBinding(titled: "Record Display")
+                guard rebound.keyCode == 25, rebound.modifiers == newMods.rawValue, rebound.character == "9" else {
+                    throw Fail(description: "rebind didn't take: \(rebound)")
+                }
+                guard let persisted = HotkeyOverrides.load(from: defaults)["Record Display"], persisted == rebound else {
+                    throw Fail(description: "rebind wasn't persisted to the injected suite")
+                }
+
+                // Duplicate: rebinding Record Window to the combo Record Display now holds is rejected,
+                // and Record Window's own binding is untouched.
+                guard !Hotkeys.rebind(windowHotkey, keyCode: 25, modifiers: newMods, character: "9", defaults: defaults) else {
+                    throw Fail(description: "duplicate binding wasn't rejected")
+                }
+                let windowUnchanged = Hotkeys.currentBinding(for: windowHotkey)
+                guard windowUnchanged.keyCode == windowHotkey.keyCode, windowUnchanged.modifiers == windowHotkey.modifiers.rawValue else {
+                    throw Fail(description: "a rejected rebind still changed Record Window's binding")
+                }
+
+                // Status-menu key equivalents mirror the override (`AppDelegate.hotkeyKey`).
+                let delegate = AppDelegate()
+                let idle = delegate.buildIdleStatusMenu()
+                guard let displayItem = idle.items.first(where: { $0.title == "Record Display" }) else {
+                    throw Fail(description: "idle menu has no 'Record Display' item")
+                }
+                guard displayItem.keyEquivalent == "9", displayItem.keyEquivalentModifierMask == newMods else {
+                    throw Fail(description: "idle menu's Record Display key didn't follow the rebind: \(displayItem.keyEquivalent.debugDescription)/\(displayItem.keyEquivalentModifierMask)")
+                }
+
+                // Reset restores every default, including Record Display's, and the menu follows again.
+                Hotkeys.resetToDefaults(defaults: defaults)
+                let afterReset = Hotkeys.currentBinding(for: displayHotkey)
+                guard afterReset.keyCode == displayHotkey.keyCode, afterReset.modifiers == displayHotkey.modifiers.rawValue,
+                      afterReset.character == displayHotkey.character else {
+                    throw Fail(description: "reset didn't restore the default: \(afterReset)")
+                }
+                guard HotkeyOverrides.load(from: defaults).isEmpty else {
+                    throw Fail(description: "reset didn't clear the persisted overrides")
+                }
+                let idleAfterReset = delegate.buildIdleStatusMenu()
+                guard let displayItemAfterReset = idleAfterReset.items.first(where: { $0.title == "Record Display" }) else {
+                    throw Fail(description: "idle menu has no 'Record Display' item after reset")
+                }
+                guard displayItemAfterReset.keyEquivalent == "3", displayItemAfterReset.keyEquivalentModifierMask == [.option, .command] else {
+                    throw Fail(description: "idle menu's Record Display key didn't follow the reset: \(displayItemAfterReset.keyEquivalent.debugDescription)")
                 }
             }
         },

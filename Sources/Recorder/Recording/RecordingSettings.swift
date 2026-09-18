@@ -64,3 +64,32 @@ import Observation
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Recorder", isDirectory: true)
     }
 }
+
+/// T-609: a single global-hotkey rebinding, as `Hotkeys.rebind`/`currentBinding` (`App/Hotkeys.swift`)
+/// produce and consume it. `modifiers` is `NSEvent.ModifierFlags.rawValue` (device-independent bits
+/// only) rather than the type itself so this file — the persisted-settings one — needs no AppKit import.
+struct HotkeyBinding: Codable, Equatable {
+    var keyCode: UInt16
+    var modifiers: UInt
+    var character: String // `NSMenuItem` keyEquivalent for this binding
+}
+
+/// One JSON-encoded `UserDefaults` key holds every hotkey rebinding override, keyed by the
+/// `Hotkey.title` it overrides. A free-standing Codable store rather than a `RecordingSettings`
+/// property, so the Shortcuts pane and its selftest can inject a throwaway `UserDefaults` suite
+/// instead of the user's real one — every call here takes `defaults` explicitly (default `.standard`),
+/// the same seam `ExportSheetModel` uses for its own persistence.
+enum HotkeyOverrides {
+    private static let key = "recording.hotkeyOverrides"
+
+    static func load(from defaults: UserDefaults = .standard) -> [String: HotkeyBinding] {
+        guard let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([String: HotkeyBinding].self, from: data) else { return [:] }
+        return decoded
+    }
+
+    static func save(_ overrides: [String: HotkeyBinding], to defaults: UserDefaults = .standard) {
+        guard let data = try? JSONEncoder().encode(overrides) else { return }
+        defaults.set(data, forKey: key)
+    }
+}

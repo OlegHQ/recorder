@@ -1,4 +1,10 @@
 import AppKit
+import AVFoundation
+import CoreGraphics
+import CoreMedia
+import CoreVideo
+import ImageIO
+import Metal
 import Observation
 import SwiftUI
 import UniformTypeIdentifiers
@@ -160,11 +166,20 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let back = NSButton(title: "‹ Projects", target: self, action: #selector(backTapped))
         styleAsText(back)
 
-        let title = NSTextField(string: model.project.title)
+        // Root cause of the top bar showing no title (T-506/T-609 investigation): `NSTextField`
+        // only computes a real `intrinsicContentSize` while `isEditable == false` — an editable field
+        // (what `NSTextField(string:)` returns) reports `NSView.noIntrinsicMetric` (-1) for width
+        // until it actually becomes the window's field editor, so the top bar's `NSStackView` reads
+        // "no natural width" and collapses it to ~0 pt; the text was always there, just laid out at
+        // near-zero width. Fix: `TitleField` starts non-editable (a real label, sizes correctly,
+        // matches SPEC §6.1's static look) and only flips `isEditable` on for the click-to-rename
+        // gesture, flipping back off once editing ends (`titleCommitted`).
+        let title = TitleField(string: model.project.title)
         title.isBordered = false
         title.drawsBackground = false
         title.font = Theme.bodyFont
         title.textColor = Theme.textPrimary
+        title.isEditable = false
         title.target = self
         title.action = #selector(titleCommitted(_:))
         titleField = title
@@ -181,9 +196,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let crop = NSButton(title: "⌗ Crop", target: self, action: #selector(cropTapped))
         styleAsText(crop)
 
-        let export = NSButton(title: "⬆ Export", target: nil, action: nil)
+        // T-506: wired directly to `self` (like the `⌗ Crop` button above) since it's this window's
+        // own control; the Export menu's items reach the same `exportTapped(_:)` through the
+        // responder chain instead (`target = nil`, `AppDelegate.buildMainMenu`).
+        let export = NSButton(title: "⬆ Export", target: self, action: #selector(exportTapped(_:)))
         styleAsText(export)
-        export.isEnabled = false // disabled until M5 (T-506)
 
         let stack = NSStackView(views: [back, title, aspect, crop, export])
         stack.orientation = .horizontal
@@ -199,6 +216,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     @objc private func titleCommitted(_ sender: NSTextField) {
+        defer { sender.isEditable = false }
         let newTitle = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !newTitle.isEmpty else { sender.stringValue = model.project.title; return }
         guard newTitle != model.project.title else { return }
@@ -212,6 +230,119 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     @objc func cropTapped() {
         guard let window else { return }
         CropSheet.present(for: model, on: window)
+    }
+
+    // T-506: also the top bar's `⬆ Export` button's action (`buildTopBarStack`) and the Export ▸
+    // Export… ⌘E menu item's action, reached through the responder chain (`target = nil`, so it
+    // disables itself with no editor window key — same mechanism as the Edit/View items above).
+    @objc func exportTapped(_ sender: Any?) {
+        guard let window else { return }
+        ExportSheet.present(for: model, on: window)
+    }
+
+    /// T-609 wire (Export ▸ Copy Frame as Image ⇧⌘C): composes the CURRENT frame (`model.playhead`)
+    /// through the same `makeFrameState`/`Compositor.render` path the preview and exporter both use
+    /// (it has no public "current frame image" API to call instead), at the project's own native
+    /// (cropped) resolution, and puts the result on the pasteboard as PNG. Decodes with
+    /// `AVAssetReader` + sequential `copyNextSampleBuffer()` — the EXPORTER's path (`FrameHold` in
+    /// `Render/Exporter.swift`), not the preview's `AVPlayer`/`AVPlayerItemVideoOutput` one: opening
+    /// an `AVPlayer` on the SAME `screen.mov` a `PreviewView` already has open competes with its own
+    /// decode session for hardware-decoder resources (harmless with one editor window, but the
+    /// `menu-actions` selftest opens one, edits it a dozen times — each `model.edit` retriggers
+    /// `PreviewView.rebuildComposition()`, T-306, out of this task's file set — and stacking that many
+    /// concurrent `AVPlayerItem`s against a second one starved it for minutes). The reader path is
+    /// self-contained (no shared player, no completion handler to wait on) and pixel-identical to
+    /// export as a bonus. `pasteboard` defaults to `.general`; the `menu-actions` selftest injects a
+    /// private one so it never touches the user's real clipboard.
+    @objc func copyFrameAsImage(_ sender: Any?) {
+        Task { @MainActor in await copyFrameAsImage(to: .general) }
+    }
+
+    /// Awaitable core of the action above, factored out so the `menu-actions` selftest can `await` it
+    /// directly (with an injected, throwaway `NSPasteboard`) instead of racing a fire-and-forget `Task`.
+    @MainActor func copyFrameAsImage(to pasteboard: NSPasteboard) async {
+        do {
+            let png = try await Self.renderCurrentFramePNG(model: model)
+            pasteboard.clearContents()
+            pasteboard.setData(png, forType: .png)
+        } catch {
+            NSLog("Copy Frame as Image failed: \(error)")
+        }
+    }
+
+    @MainActor static func renderCurrentFramePNG(model: EditorModel) async throws -> Data {
+        struct RenderFail: Error, CustomStringConvertible { let description: String }
+        let project = model.project
+        let packageURL = model.packageURL
+        let outputTime = model.playhead
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw RenderFail(description: "no Metal device") }
+        let compositor = try Compositor(device: device, package: packageURL)
+        let textureCache = TextureCache(device: device)
+
+        // "Project's output size" = the native cropped resolution (no export quality preset is
+        // involved here) — the same `croppedSource` maths `Compositor.outputSize` uses internally.
+        let croppedW = Double(project.source.pixelWidth) * project.crop.w
+        let croppedH = Double(project.source.pixelHeight) * project.crop.h
+        let longEdge = max(2, Int(max(croppedW, croppedH).rounded()))
+        let outputSize = compositor.outputSize(for: project, longEdge: longEdge)
+        let width = Int(outputSize.width), height = Int(outputSize.height)
+
+        let (composition, _) = try await makeComposition(package: packageURL, project: project)
+        guard let screenTrack = composition.tracks(withMediaType: .video).first else {
+            throw RenderFail(description: "no video track")
+        }
+        let reader = try AVAssetReader(asset: composition)
+        let readerOutput = AVAssetReaderTrackOutput(track: screenTrack, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+        ])
+        reader.add(readerOutput)
+        guard reader.startReading() else {
+            throw RenderFail(description: "reader failed to start: \(String(describing: reader.error))")
+        }
+
+        // Sequential decode up to `outputTime` (`AVAssetReader` has no random access) — the same
+        // "hold the last sample at/before the target, peek one ahead" scan `FrameHold` in
+        // `Render/Exporter.swift` uses for the export loop.
+        var current: CVPixelBuffer?
+        while let sample = readerOutput.copyNextSampleBuffer() {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            guard pts <= outputTime else { break }
+            current = CMSampleBufferGetImageBuffer(sample)
+        }
+        let screenTexture = current.flatMap { textureCache.texture(from: $0) }
+
+        let state = await makeFrameState(model: model, outputTime: outputTime, screen: screenTexture, camera: nil, size: outputSize)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+        guard let target = device.makeTexture(descriptor: descriptor),
+              let queue = device.makeCommandQueue(), let commandBuffer = queue.makeCommandBuffer() else {
+            throw RenderFail(description: "failed to set up Metal resources")
+        }
+        compositor.render(state, to: target, commandBuffer: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+
+        // BGRA8 bytes (as rendered by `Compositor`) -> PNG, same layout `Exporter.gifFrame` uses.
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let cgImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                                     bytesPerRow: width * 4, space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                                     provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
+            throw RenderFail(description: "CGImage creation failed")
+        }
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
+            throw RenderFail(description: "PNG destination creation failed")
+        }
+        CGImageDestinationAddImage(dest, cgImage, nil)
+        guard CGImageDestinationFinalize(dest) else { throw RenderFail(description: "PNG encode failed") }
+        return data as Data
     }
 
     /// T-309: the `Auto ▾` popup edits `project.output.aspect` through `model.edit` (one undo step);
@@ -406,6 +537,22 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     private var isTextEditing: Bool { window?.firstResponder is NSText }
+}
+
+/// The top bar's project title (SPEC §6.1: "`My Recording ▾` (click = rename)"). A plain
+/// `NSTextField` only reports a real `intrinsicContentSize` while non-editable (see the root-cause
+/// comment in `EditorWindowController.buildTopBarStack`), so this starts as a label and switches
+/// itself into edit mode on click, handing focus to the field editor with the text pre-selected.
+private final class TitleField: NSTextField {
+    override func mouseDown(with event: NSEvent) {
+        guard isEditable else {
+            isEditable = true
+            window?.makeFirstResponder(self)
+            currentEditor()?.selectAll(nil)
+            return
+        }
+        super.mouseDown(with: event)
+    }
 }
 
 /// SPEC §7.1: the timeline's 32 pt toolbar row sits above the ruler/lanes. Manual layout (like
