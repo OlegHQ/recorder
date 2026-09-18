@@ -647,15 +647,14 @@ private func synthFlags(_ modifiers: NSEvent.ModifierFlags) -> NSEvent {
                       context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 0)!
 }
 
-/// Drives a `TimelineView` + `EditorModel` over a synthetic project, headless: builds the view at
-/// a known `pxPerSecond` (so pixel math in the test is exact), then fires real `NSEvent`s at it
-/// exactly as AppKit would, asserting the invariants named in CLAUDE.md / the plan's Verify step.
+/// A fresh `TimelineView` + `EditorModel`, at a known `pxPerSecond` (so pixel math in a test is
+/// exact): a 20 s single clip and one click event at source t=5. Each section below gets its own,
+/// so the sections are independent of each other's end state.
 @MainActor
-private func runTimelineOpsSelfTest() async throws {
+private func makeTimelineOpsFixture() throws -> (model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat, cleanup: () -> Void) {
     let fm = FileManager.default
     let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-timeline-ops-\(UUID().uuidString)")
     try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
-    defer { try? fm.removeItem(at: tmp) }
 
     var project = Project(title: "Ops Fixture", source: Source(duration: 20))
     project.clips = [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)]
@@ -669,8 +668,28 @@ private func runTimelineOpsSelfTest() async throws {
     let gutter = TimelineView.gutter
 
     func px(_ outputSeconds: Double) -> CGFloat { gutter + CGFloat(outputSeconds * view.geometry.pxPerSecond) }
+    // `TimelineView` is flipped; a windowless `convert(_:from: nil)` (what `mouseDown`/etc. use to
+    // read `event.locationInWindow`) still applies that flip, so a synthetic event's `y` must be
+    // pre-flipped to land at the intended *view-local* y that `hitTest`/lane rows are defined in.
+    func py(_ localY: CGFloat) -> CGFloat { view.bounds.height - localY }
+    return (model, view, px, py, { try? fm.removeItem(at: tmp) })
+}
 
-    try await runSplitSelfTest(model: model, view: view, px: px)
+/// Drives a `TimelineView` + `EditorModel` over synthetic projects, headless: fires real
+/// `NSEvent`s at the view exactly as AppKit would, asserting the invariants named in CLAUDE.md /
+/// the plan's Verify step.
+@MainActor
+private func runTimelineOpsSelfTest() async throws {
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        try runSplitSelfTest(model: model, view: view, px: px, py: py)
+    }
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        try runTrimRemoveRestoreSpeedSelfTest(model: model, view: view, px: px, py: py)
+    }
     try runFitOnFirstLayoutSelfTest()
 }
 
@@ -679,15 +698,10 @@ private func runTimelineOpsSelfTest() async throws {
 /// re-fits, whether or not the user has zoomed manually in between.
 @MainActor
 private func runFitOnFirstLayoutSelfTest() throws {
-    let fm = FileManager.default
-
     func shortProject() throws -> (model: EditorModel, cleanup: () -> Void) {
-        let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-timeline-fit-\(UUID().uuidString)")
-        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
-        var project = Project(title: "Fit Fixture", source: Source(duration: 3)) // a short, 3 s project
-        project.clips = [Clip(sourceStart: 0, sourceEnd: 3, speed: 1)]
-        let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
-        return (model, { try? fm.removeItem(at: tmp) })
+        let (model, _, _, _, cleanup) = try makeTimelineOpsFixture()
+        model.edit("shrink") { $0.clips = [Clip(sourceStart: 0, sourceEnd: 3, speed: 1)] } // a short, 3 s project
+        return (model, cleanup)
     }
 
     // model attached, then the first layout.
@@ -740,7 +754,7 @@ private func runFitOnFirstLayoutSelfTest() throws {
 /// split mode via `S`/toolbar, momentary split mode via `⌥`, snapping onto/off the playhead
 /// candidate, `Esc` exiting split mode, and exactly one undo step per successful split.
 @MainActor
-private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat) throws {
+private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
     // `C` splits the single clip at the playhead.
     model.playhead = 10
     let beforeC = model.project
@@ -772,9 +786,9 @@ private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Doubl
     let undoBeforeSnap = model.undoStepCount
     view.keyDown(with: synthKey("s", keyCode: 1))
     let hoverX = px(10.08) // well within the 6 pt / 40 px-per-s = 0.15 s snap threshold of the playhead
-    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: hoverX, y: 60)))
-    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: hoverX, y: 60)))
-    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: hoverX, y: 60)))
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: hoverX, y: py(60))))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: hoverX, y: py(60))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: hoverX, y: py(60))))
     guard model.project.clips.count == beforeSnap.clips.count + 1 else {
         throw TimelineOpsFail(description: "split-mode click didn't split")
     }
@@ -788,17 +802,17 @@ private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Doubl
     // `Esc` exits sticky split mode: the next click goes back to plain hit-testing (selects, no split).
     view.cancelOperation(nil)
     let beforeEsc = model.project
-    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: 60)))
-    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: 60)))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: py(40))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: py(40))))
     guard model.project == beforeEsc else { throw TimelineOpsFail(description: "Esc didn't exit split mode — click still split") }
 
     // Unsnapped: far from every candidate (playhead 10, clip edges 0/10/20), the split lands at
     // the raw (unsnapped) hover time, not clamped to a candidate.
     let farX = px(15.5)
-    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: farX, y: 60)))
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: farX, y: py(60))))
     view.keyDown(with: synthKey("s", keyCode: 1)) // re-enter sticky mode (Esc above exited it)
-    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: farX, y: 60)))
-    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: farX, y: 60)))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: farX, y: py(60))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: farX, y: py(60))))
     guard let farClip = model.project.clips.first(where: { abs($0.sourceEnd - 15.5) < 0.05 }) else {
         throw TimelineOpsFail(description: "unsnapped split didn't land near 15.5: \(model.project.clips.map(\.sourceEnd))")
     }
@@ -810,13 +824,89 @@ private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Doubl
     guard model.project.clips.count == 1 else { throw TimelineOpsFail(description: "setup: expected a single clip before the ⌥ test") }
     view.flagsChanged(with: synthFlags(.option))
     let optionX = px(10)
-    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: optionX, y: 60), modifiers: .option))
-    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: optionX, y: 60), modifiers: .option))
-    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: optionX, y: 60), modifiers: .option))
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: optionX, y: py(60)), modifiers: .option))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: optionX, y: py(60)), modifiers: .option))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: optionX, y: py(60)), modifiers: .option))
     guard model.project.clips.count == 2 else { throw TimelineOpsFail(description: "⌥-held click should split") }
     view.flagsChanged(with: synthFlags([]))
     let beforeReleased = model.project
-    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: 60)))
-    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: 60)))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: py(40))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: py(40))))
     guard model.project == beforeReleased else { throw TimelineOpsFail(description: "click after releasing ⌥ should not split") }
+}
+
+/// T-408 "Trim, remove, restore, speed, ripple animation": a trailing-edge trim drag (commits as
+/// one undo step), `Esc` mid-drag restoring the pre-drag project (AC-TL-6), `restoreCut` (the ✂
+/// bubble popover's action), `⌫` removing a clip, the Speed context-menu item, and a post-edit
+/// render (ripple's new code path) not crashing.
+@MainActor
+private func runTrimRemoveRestoreSpeedSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
+    // Trailing-edge trim: drag clip 0's right edge from output 20 to output 15.
+    let beforeTrim = model.project
+    let undoBeforeTrim = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(20) - 3, y: py(40))))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(15), y: py(40))))
+    guard model.project.clips[0].sourceEnd == 15 else {
+        throw TimelineOpsFail(description: "trim didn't track the mouse: sourceEnd \(model.project.clips[0].sourceEnd)")
+    }
+    guard model.undoStepCount == undoBeforeTrim else { throw TimelineOpsFail(description: "an in-progress trim shouldn't push an undo step yet") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(15), y: py(40))))
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after trim") }
+    guard model.undoStepCount == undoBeforeTrim + 1 else { throw TimelineOpsFail(description: "trim should push exactly one undo step") }
+    model.undo()
+    guard model.project == beforeTrim else { throw TimelineOpsFail(description: "undo after trim didn't restore the pre-trim project") }
+    model.redo() // back to sourceEnd 15 (a tail cut) for the restore test below
+
+    // Restore (the ✂ bubble popover's action): the tail cut (15...20) comes back.
+    let beforeRestore = model.project
+    let undoBeforeRestore = model.undoStepCount
+    view.restoreCut(afterClip: 0)
+    guard model.project.clips[0].sourceEnd == 20 else { throw TimelineOpsFail(description: "restoreCut didn't restore the tail") }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after restore") }
+    guard model.undoStepCount == undoBeforeRestore + 1 else { throw TimelineOpsFail(description: "restore should push exactly one undo step") }
+    model.undo()
+    guard model.project == beforeRestore else { throw TimelineOpsFail(description: "undo after restore didn't revert it") }
+    model.redo() // back to the whole, uncut [0, 20] clip
+
+    // AC-TL-6: `Esc` mid-drag (leading-edge trim this time) restores the pre-drag project exactly,
+    // and pushes no undo step at all (it was never completed).
+    let beforeEscDrag = model.project
+    let undoBeforeEscDrag = model.undoStepCount
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(0) + 3, y: py(40))))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5), y: py(40))))
+    guard model.project.clips[0].sourceStart == 5 else { throw TimelineOpsFail(description: "mid-drag trim didn't apply live") }
+    view.cancelOperation(nil)
+    guard model.project == beforeEscDrag else { throw TimelineOpsFail(description: "Esc mid-drag didn't restore the pre-drag project") }
+    guard model.undoStepCount == undoBeforeEscDrag else { throw TimelineOpsFail(description: "a cancelled drag pushed an undo step") }
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5), y: py(40)))) // the real mouse-up AppKit would still deliver; must be a no-op
+
+    // Remove: split into two clips first (direct setup, not part of what's under test here), then
+    // select + `⌫` removes one — the last remaining clip can never be removed (SPEC §7.4).
+    model.edit("setup") { $0.clips = [Clip(sourceStart: 0, sourceEnd: 10, speed: 1), Clip(sourceStart: 10, sourceEnd: 20, speed: 1)] }
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: py(40))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: py(40))))
+    let undoBeforeRemove = model.undoStepCount
+    view.keyDown(with: synthKey("", keyCode: 51)) // ⌫
+    guard model.project.clips.count == 1 else { throw TimelineOpsFail(description: "⌫ didn't remove the selected clip") }
+    guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after remove") }
+    guard model.undoStepCount == undoBeforeRemove + 1 else { throw TimelineOpsFail(description: "remove should push exactly one undo step") }
+
+    // Speed: the real context menu (right-click on the clip), invoking the "2×" item's actual
+    // target/action — not a shortcut around it.
+    guard let menu = view.menu(for: synthMouse(.rightMouseDown, CGPoint(x: px(5), y: py(40)))),
+          let speedItem = menu.items.first(where: { $0.title == "Speed" })?.submenu,
+          let twoX = speedItem.items.first(where: { $0.title.hasPrefix("2") }) else {
+        throw TimelineOpsFail(description: "no clip context menu / Speed submenu / 2× item")
+    }
+    let undoBeforeSpeed = model.undoStepCount
+    guard let speedAction = twoX.action else { throw TimelineOpsFail(description: "2× item has no action") }
+    _ = twoX.target?.perform(speedAction, with: twoX)
+    guard model.project.clips[0].speed == 2 else { throw TimelineOpsFail(description: "Speed ▸ 2× menu item didn't set speed") }
+    guard model.undoStepCount == undoBeforeSpeed + 1 else { throw TimelineOpsFail(description: "speed change should push exactly one undo step") }
+
+    // Ripple's new code path (interpolating from the pre-change geometry) must not crash a render.
+    view.needsDisplay = true
+    guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
+        throw TimelineOpsFail(description: "no bitmap rep after a clip-changing edit")
+    }
 }
