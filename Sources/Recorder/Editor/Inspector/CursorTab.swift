@@ -1,10 +1,10 @@
 import SwiftUI
 import RecorderCore
 
-/// SPEC §6.6 Cursor tab — basic controls only (T-414 scope, per the plan): Hide, Size, Movement,
-/// Hide when idle. Loop and the Advanced fold (Always use arrow / Rotate while moving / Remove
-/// cursor shakes) are shown disabled and tagged "M6" — their `CursorStyle` fields already exist,
-/// but wiring them up (and the `CursorPath` behaviour they drive) is later work.
+/// SPEC §6.6 Cursor tab: Hide, Size, Movement, Hide when idle, Loop cursor position, and the
+/// Advanced fold (Always use arrow / Rotate while moving / Remove cursor shakes) — all backed by
+/// `CursorStyle` fields, all wired through `EditorModel.edit` (T-604 UI half; the `CursorPath`
+/// behaviour they drive is core work already merged, see plan Log).
 struct CursorTab: View {
     let model: EditorModel
 
@@ -37,12 +37,13 @@ struct CursorTab: View {
 
             Divider().overlay(Theme.strokeColor)
 
-            futureToggle("Loop cursor position")
+            checkbox("Loop cursor position", loopBinding)
+
             DisclosureGroup("Advanced") {
                 VStack(alignment: .leading, spacing: 8) {
-                    futureToggle("Always use arrow")
-                    futureToggle("Rotate while moving")
-                    futureToggle("Remove cursor shakes")
+                    checkbox("Always use arrow", alwaysArrowBinding)
+                    checkbox("Rotate while moving", rotateBinding)
+                    checkbox("Remove cursor shakes", removeShakesBinding)
                 }
                 .padding(.top, 4)
             }
@@ -51,23 +52,11 @@ struct CursorTab: View {
         }
     }
 
-    /// A disabled checkbox row tagged "M6" — SPEC's Advanced fold controls, not in this task's scope.
-    private func futureToggle(_ title: String) -> some View {
-        HStack {
-            Toggle(title, isOn: .constant(false))
-                .toggleStyle(.checkbox)
-            Spacer()
-            Text("M6")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Theme.textSecondaryColor)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(Theme.bgControlColor)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-        }
-        .disabled(true)
-        .font(.system(size: 13))
-        .foregroundStyle(Theme.textSecondaryColor)
+    private func checkbox(_ title: String, _ isOn: Binding<Bool>) -> some View {
+        Toggle(title, isOn: isOn)
+            .toggleStyle(.checkbox)
+            .font(.system(size: 13))
+            .foregroundStyle(Theme.textPrimaryColor)
     }
 
     // MARK: - Bindings
@@ -92,5 +81,23 @@ struct CursorTab: View {
 
     private var styleBinding: Binding<CursorStyle.Style> {
         Binding(get: { cursor.style }, set: { newValue in model.edit("Cursor movement") { $0.cursor.style = newValue } })
+    }
+
+    private var loopBinding: Binding<Bool> {
+        Binding(get: { cursor.loop }, set: { newValue in model.edit("Loop cursor position") { $0.cursor.loop = newValue } })
+    }
+
+    private var alwaysArrowBinding: Binding<Bool> {
+        Binding(get: { cursor.alwaysArrow },
+                set: { newValue in model.edit("Always use arrow") { $0.cursor.alwaysArrow = newValue } })
+    }
+
+    private var rotateBinding: Binding<Bool> {
+        Binding(get: { cursor.rotate }, set: { newValue in model.edit("Rotate while moving") { $0.cursor.rotate = newValue } })
+    }
+
+    private var removeShakesBinding: Binding<Bool> {
+        Binding(get: { cursor.removeShakes },
+                set: { newValue in model.edit("Remove cursor shakes") { $0.cursor.removeShakes = newValue } })
     }
 }

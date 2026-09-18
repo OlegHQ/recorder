@@ -646,6 +646,21 @@ enum SelfTest {
             guard onDisk.cursor.size == 3, onDisk.cursor.style == .rapid else {
                 throw Fail(description: "autosave didn't persist cursor edits: \(onDisk.cursor)")
             }
+
+            // --- Cursor tab (T-604 advanced): Loop toggle == one undo step, autosaved. ---
+            let beforeLoop = await model.project
+            await model.edit("Loop cursor position") { $0.cursor.loop = true }
+            let afterLoop = await model.project
+            guard afterLoop.cursor.loop, !beforeLoop.cursor.loop else {
+                throw Fail(description: "loop toggle didn't change cursor.loop")
+            }
+            await model.undo()
+            guard await model.project == beforeLoop else { throw Fail(description: "loop toggle should be one undo step") }
+            await model.redo()
+            try await Task.sleep(nanoseconds: 700_000_000)
+            guard try Project.load(from: projectURL).cursor.loop else {
+                throw Fail(description: "autosave didn't persist the loop toggle")
+            }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
         // front — `EditorWindowController.makeOffscreen`) for a fixture package and caches its
