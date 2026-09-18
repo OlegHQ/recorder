@@ -400,13 +400,15 @@ Update the "Done" column whenever you tick a task.
   - Do: composition tracks: video[0]=screen, video[1]=camera, audio[0]=mic, audio[1]=system; volumes/mutes → `AVMutableAudioMixInputParameters`; `audioTimePitchAlgorithm = .spectral`.
   - Verify: used by T-306; selftest `composition <package>` prints composition duration == `TimeMap.outputDuration` ± 1/60.
 
-- [ ] **T-306 PreviewView + transport** · SPEC §6.1, §6.2 "Preview"
+- [~] **T-306 PreviewView + transport** · SPEC §6.1, §6.2 "Preview"
+  - WAITING ON HUMAN: merged; `--selftest preview-frame` OK and PNG reviewed (real 420v frame, correct colours, rounded/shadowed). Human: AC-ED-1, AC-ED-3 in the editor (`Recorder --open <package>`).
   - File: `Sources/Recorder/Editor/PreviewView.swift` (`MTKView`, `isPaused = true`, `enableSetNeedsDisplay = true`).
   - Do: `AVPlayer` + `AVPlayerItemVideoOutput` (one per video track via `AVPlayerItem.add`; request `kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`). `CADisplayLink` (from `NSView.displayLink(target:selector:)`) while playing → `model.playhead = player.currentTime` → `needsDisplay`. `draw`: `copyPixelBuffer(forItemTime:)` (keep last buffer if nil) → `FrameState` → `Compositor.render` to `currentDrawable`. Observe `model.project` → redraw. Seek: coalesce (`isSeeking` flag + `pendingTime`), `toleranceBefore/After: .zero`. Clip edits → rebuild composition, `replaceCurrentItem`, restore playhead. Letterbox with `Theme.bgWindow`.
     Transport bar (SwiftUI under the preview) + keys `Space ← → ⇧← ⇧→ Home End J K L`.
   - HUMAN: AC-ED-1, AC-ED-3.
 
-- [ ] **T-307 Editor window** · SPEC §6.1 mockup — File `Editor/EditorWindowController.swift`: `NSSplitView`-free manual layout (preview | 300 pt inspector) over a timeline placeholder (`NSView`, 220 pt, height draggable 160–420). Top bar in the titlebar (`NSTitlebarAccessoryViewController`): `‹ Projects`, title (click = rename), aspect `NSPopUpButton`, Crop, Export (disabled until M5). `RecordingController.finish` and the library now open this window instead of Finder.
+- [~] **T-307 Editor window** · SPEC §6.1 mockup — File `Editor/EditorWindowController.swift`: `NSSplitView`-free manual layout (preview | 300 pt inspector) over a timeline placeholder (`NSView`, 220 pt, height draggable 160–420). Top bar in the titlebar (`NSTitlebarAccessoryViewController`): `‹ Projects`, title (click = rename), aspect `NSPopUpButton`, Crop, Export (disabled until M5). `RecordingController.finish` and the library now open this window instead of Finder.
+  - WAITING ON HUMAN: merged; layout vs §6.1 mockup, AC-REC-4. Inspector/timeline/library/finish hand-offs wired by the integration pass.
   - HUMAN: layout matches the mockup; AC-REC-4 (editor visible < 2 s after Finish).
 
 - [~] **T-308 Inspector shell + Background tab** · SPEC §6.6 — Files `Editor/Inspector/InspectorView.swift`, `Inspector/BackgroundTab.swift`, `Inspector/LabeledSlider.swift`.
@@ -655,3 +657,4 @@ T-111/T-112/T-113 · 2026-09-18 · verified on master: `make app`, 38 tests, `--
 T-308 · 2026-09-18 · verified on master: `--selftest inspector` OK, PNG reviewed · deviations: `LabeledSlider` gained `onEditingChanged`; 12 generated wallpapers in Resources/Wallpapers (Makefile copies them); gradient angle has no control
 T-404/T-405/T-406 · 2026-09-18 · verified on master: TimelineGeometry tests (3) green, `timeline-png` with hit-test assertions OK, PNG reviewed · deviations: minimal TimelineToolbar (Fit + zoom slider); cut-bubble hit box sits in an 8 pt sliver above the clip lane
 T-604 (core) / T-309 (core) · 2026-09-18 · verified: core-lane merged, `make test` 43/43 on master · deviations: shake threshold assumes a 1920 px reference width (`// ponytail:`); rotation = clamp(vx·12°, ±12°); always-arrow = `imageID nil` (renderer draws the default arrow)
+T-306/T-307 · 2026-09-18 · verified on master: `make app`, 43 tests, `preview-frame` OK (PNG reviewed), `--open` smoke by agent · deviations: shader mode 4 (BT.709 video range) + two-plane TextureCache; `Compositor.render(viewport:)` letterboxes; camera decode and CameraPath/CursorPath sampling deferred to T-502/T-413; aspect popup + Crop button unwired until T-309/T-310
