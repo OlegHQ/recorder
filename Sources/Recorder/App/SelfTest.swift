@@ -839,6 +839,90 @@ enum SelfTest {
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
+        // T-607: `AppDelegate.buildMainMenu` is `private`, so this builds its own small fixture menu
+        // (nested submenu, a separator, a disabled item, an item with no action) to exercise
+        // `CommandMenu.flatten` end to end: the flattened list's paths/exclusions, `Command.matches`
+        // against a couple of queries, and that `CommandMenu.perform` invokes the item's action on
+        // its target exactly once.
+        "command-menu": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+
+            final class Target: NSObject {
+                var pingCount = 0
+                @objc func ping() { pingCount += 1 }
+                @objc func other() {}
+            }
+            let target = Target()
+
+            let main = NSMenu()
+
+            let file = NSMenu(title: "File")
+            let newRecording = NSMenuItem(title: "New Recording", action: #selector(Target.ping), keyEquivalent: "n")
+            newRecording.target = target
+            file.addItem(newRecording)
+            file.addItem(.separator())
+            let disabled = NSMenuItem(title: "Disabled Thing", action: #selector(Target.other), keyEquivalent: "")
+            disabled.target = target
+            disabled.isEnabled = false
+            file.addItem(disabled)
+            file.addItem(NSMenuItem(title: "No Action Item", action: nil, keyEquivalent: ""))
+            let fileItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+            fileItem.submenu = file
+            main.addItem(fileItem)
+
+            let edit = NSMenu(title: "Edit")
+            let undo = NSMenuItem(title: "Undo", action: #selector(Target.ping), keyEquivalent: "z")
+            undo.target = target
+            edit.addItem(undo)
+            let nested = NSMenu(title: "Nested")
+            let deepAction = NSMenuItem(title: "Deep Action", action: #selector(Target.ping), keyEquivalent: "d")
+            deepAction.target = target
+            deepAction.keyEquivalentModifierMask = [.command, .shift]
+            nested.addItem(deepAction)
+            let nestedItem = NSMenuItem(title: "Nested", action: nil, keyEquivalent: "")
+            nestedItem.submenu = nested
+            edit.addItem(nestedItem)
+            let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+            editItem.submenu = edit
+            main.addItem(editItem)
+
+            let commands = CommandMenu.flatten(main)
+            let titles = commands.map(\.title)
+
+            guard !titles.contains("Disabled Thing") else { throw Fail(description: "disabled item leaked into the flattened list") }
+            guard !titles.contains("No Action Item") else { throw Fail(description: "nil-action item leaked into the flattened list") }
+            guard !titles.contains("File"), !titles.contains("Edit"), !titles.contains("Nested") else {
+                throw Fail(description: "a submenu-parent item leaked in as a command: \(titles)")
+            }
+            guard commands.count == 3 else { throw Fail(description: "expected 3 commands, got \(commands.count): \(titles)") }
+
+            guard let newRecordingCmd = commands.first(where: { $0.title == "New Recording" }), newRecordingCmd.path == ["File"],
+                  newRecordingCmd.keyEquivalent == "⌘N" else {
+                throw Fail(description: "New Recording path/key wrong: \(String(describing: commands.first(where: { $0.title == "New Recording" })))")
+            }
+            guard let deepActionCmd = commands.first(where: { $0.title == "Deep Action" }), deepActionCmd.path == ["Edit", "Nested"],
+                  deepActionCmd.keyEquivalent == "⇧⌘D" else {
+                throw Fail(description: "Deep Action path/key wrong: \(String(describing: commands.first(where: { $0.title == "Deep Action" })))")
+            }
+
+            // Filtering: substring, subsequence, and no-match queries.
+            let byDeep = commands.filter { $0.matches("deep") }
+            guard byDeep.count == 1, byDeep[0].title == "Deep Action" else {
+                throw Fail(description: "query 'deep' matched \(byDeep.map(\.title)), want just Deep Action")
+            }
+            let bySubsequence = commands.filter { $0.matches("nwrec") } // subsequence of "File New Recording"
+            guard bySubsequence.contains(where: { $0.title == "New Recording" }) else {
+                throw Fail(description: "subsequence query 'nwrec' should match New Recording, matched \(bySubsequence.map(\.title))")
+            }
+            let byNothing = commands.filter { $0.matches("zzz-nope") }
+            guard byNothing.isEmpty else { throw Fail(description: "query 'zzz-nope' should match nothing, got \(byNothing.map(\.title))") }
+
+            // Perform: invokes the item's action on its target exactly once.
+            guard let toPerform = commands.first(where: { $0.title == "Undo" }) else { throw Fail(description: "Undo missing from flattened list") }
+            target.pingCount = 0
+            guard CommandMenu.perform(toPerform) else { throw Fail(description: "CommandMenu.perform returned false") }
+            guard target.pingCount == 1 else { throw Fail(description: "expected pingCount == 1, got \(target.pingCount)") }
+        },
         // Offscreen render of `CheatSheetView` (SPEC §7.3's table, static SwiftUI grid) to a PNG for
         // visual comparison against the spec table — not part of the automated pass/fail contract.
         "cheatsheet-png": { args in
@@ -856,6 +940,48 @@ enum SelfTest {
                 let fitted = hosting.fittingSize
                 hosting.frame = NSRect(origin: .zero, size: fitted)
                 window.setContentSize(fitted)
+                hosting.layoutSubtreeIfNeeded()
+
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
+                try data.write(to: URL(fileURLWithPath: outPath))
+                print("wrote \(outPath)")
+            }
+        },
+        // Offscreen render of `CommandMenuView` with a small fixture command list (mixed path depths,
+        // with/without key equivalents) to a PNG for visual comparison — not part of the automated
+        // pass/fail contract (that's the `command-menu` case).
+        "command-menu-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let outPath = args.first else { throw Fail(description: "usage: command-menu-png <out.png>") }
+            try await MainActor.run {
+                func fixture(_ title: String, _ path: [String], _ key: String) -> Command {
+                    Command(title: title, path: path, keyEquivalent: key,
+                            item: NSMenuItem(title: title, action: nil, keyEquivalent: ""))
+                }
+                let commands = [
+                    fixture("New Recording", ["File"], "⌘N"),
+                    fixture("Open…", ["File"], "⌘O"),
+                    fixture("Undo", ["Edit"], "⌘Z"),
+                    fixture("Split", ["Edit"], ""),
+                    fixture("Deep Action", ["Edit", "Nested"], "⇧⌘D"),
+                    fixture("Export…", ["Export"], "⌘E"),
+                ]
+
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+                                       styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: .darkAqua) // forced before the hosting view exists
+                let hosting = NSHostingView(rootView: CommandMenuView(commands: commands, onClose: {}))
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 480, height: 420)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                let fitted = hosting.fittingSize
+                hosting.frame = NSRect(origin: .zero, size: NSSize(width: 480, height: fitted.height))
+                window.setContentSize(hosting.frame.size)
                 hosting.layoutSubtreeIfNeeded()
 
                 guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
