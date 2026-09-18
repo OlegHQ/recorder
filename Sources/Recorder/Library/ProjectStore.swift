@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Dispatch
 import Observation
 import RecorderCore
@@ -114,6 +115,64 @@ import RecorderCore
     func trash(_ url: URL) throws {
         try FileManager.default.trashItem(at: url, resultingItemURL: nil)
         reload()
+    }
+
+    enum ImportError: Error { case noVideoTrack }
+
+    /// T-606, SPEC §5.1 "drag a video file in: import (M6)". Media is never modified after recording
+    /// (SPEC §5), so `movieURL` is COPIED in verbatim as `screen.mov`; the package gets an empty
+    /// `events.json`, a `thumbnail.jpg`, and a `project.json` with one clip spanning the whole asset
+    /// and no zooms. Staged then moved, same as every other package-producing op here.
+    func importMovie(_ movieURL: URL) async throws -> URL {
+        let asset = AVURLAsset(url: movieURL)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+            throw ImportError.noVideoTrack
+        }
+        let size = try await track.load(.naturalSize)
+        let duration = try await asset.load(.duration).seconds
+        guard duration.isFinite, duration > 0 else { throw ImportError.noVideoTrack }
+
+        let fm = FileManager.default
+        let base = movieURL.deletingPathExtension().lastPathComponent
+        var name = "\(base).recorder"
+        var n = 2
+        while fm.fileExists(atPath: folder.appendingPathComponent(name).path) {
+            name = "\(base) \(n).recorder"
+            n += 1
+        }
+
+        let finalURL = try stageThenMove(named: name) { staged in
+            try fm.createDirectory(at: staged, withIntermediateDirectories: true)
+            // ponytail: copies the source container as-is (any container AVFoundation can read plays
+            // fine as `screen.mov` regardless of extension); re-encode only if a format shows up that
+            // AVFoundation can't open.
+            try fm.copyItem(at: movieURL, to: staged.appendingPathComponent("screen.mov"))
+            try JSONEncoder().encode(EventLog()).write(to: staged.appendingPathComponent("events.json"), options: .atomic)
+
+            let project = Project(
+                title: base,
+                source: Source(kind: .display, pixelWidth: Int(size.width), pixelHeight: Int(size.height),
+                                scale: 1, duration: duration, hasCamera: false, hasMic: false, hasSystemAudio: false),
+                clips: [Clip(sourceStart: 0, sourceEnd: duration, speed: 1)]
+            )
+            try project.save(to: staged.appendingPathComponent("project.json"))
+
+            // Thumbnail (SPEC §5): 640 px wide, frame at 1 s (0 for shorter clips) — same recipe as
+            // `RecordingController.writeThumbnail`, using the synchronous generator since `build` here
+            // isn't async.
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 640, height: 0)
+            let time = CMTime(seconds: duration > 1 ? 1 : 0, preferredTimescale: 600)
+            if let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) {
+                let rep = NSBitmapImageRep(cgImage: cgImage)
+                if let data = rep.representation(using: .jpeg, properties: [:]) {
+                    try? data.write(to: staged.appendingPathComponent("thumbnail.jpg"))
+                }
+            }
+        }
+        reload()
+        return finalURL
     }
 
     private func watch() {

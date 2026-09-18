@@ -65,6 +65,13 @@ struct InspectorView: View {
     var body: some View {
         VStack(spacing: 0) {
             if selection == nil {
+                HStack {
+                    Spacer()
+                    PresetsMenu(model: model)
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 6)
+
                 HStack(spacing: 4) {
                     ForEach(Tab.allCases, id: \.rawValue) { t in
                         Button { tab = t } label: {

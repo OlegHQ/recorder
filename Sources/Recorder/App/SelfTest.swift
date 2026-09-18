@@ -681,6 +681,75 @@ enum SelfTest {
                 print("wrote \(outURL.path)")
             }
         },
+        // T-605 (non-Core half): `PresetStore` file storage + applying a saved preset through a real
+        // `EditorModel`, so "one undo step" and "clips/zooms untouched" are exercised end-to-end
+        // (the styling-subset value + `apply` themselves are covered by RecorderCoreTests/PresetTests).
+        "presets": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-presets-\(UUID().uuidString)")
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let savedDirectory = PresetStore.directory
+            PresetStore.directory = tmp.appendingPathComponent("Presets")
+            defer { PresetStore.directory = savedDirectory }
+
+            // Save from a styled project.
+            var styled = Project(title: "Styled")
+            styled.background = Background(kind: .color, color: "#123456", blur: 0.4)
+            styled.frame = Frame(padding: 0.2, cornerRadius: 0.1, shadow: 0.9)
+            styled.cursor = CursorStyle(size: 2.5, style: .rapid, loop: true)
+            styled.animation = Animation(screen: .smooth, motionBlur: 0.9)
+            styled.camera = Camera(size: 0.4, corner: .topLeft, roundness: 0.9)
+            let preset = Preset(name: "My Preset", from: styled)
+            _ = try PresetStore.save(preset)
+
+            let listed = PresetStore.list()
+            guard listed.count == 1, listed[0] == preset else {
+                throw Fail(description: "list() didn't round-trip the saved preset")
+            }
+
+            // Apply to an unrelated project through a real EditorModel.
+            let targetPackage = tmp.appendingPathComponent("Target")
+            try fm.createDirectory(at: targetPackage, withIntermediateDirectories: true)
+            var target = Project(title: "Target")
+            target.clips = [Clip(sourceStart: 0, sourceEnd: 10, speed: 1)]
+            target.zooms = [Zoom(start: 4, end: 6, scale: 1.2)]
+            try target.save(to: targetPackage.appendingPathComponent("project.json"))
+
+            let model = await EditorModel(packageURL: targetPackage, project: target, events: EventLog())
+            await model.edit("Apply Preset") { project in listed[0].apply(to: &project) }
+            let applied = await model.project
+            guard applied.background == preset.background, applied.frame == preset.frame,
+                  applied.cursor == preset.cursor, applied.animation == preset.animation,
+                  applied.camera == preset.camera else {
+                throw Fail(description: "apply didn't set the styling subset")
+            }
+            guard applied.clips == target.clips, applied.zooms == target.zooms else {
+                throw Fail(description: "apply touched clips/zooms")
+            }
+
+            // Exactly one undo step.
+            await model.undo()
+            guard await model.project == target else { throw Fail(description: "apply wasn't exactly one undo step") }
+            await model.redo()
+
+            // Export/import round-trip (the menu just encodes/decodes `Preset` JSON to/from a
+            // user-chosen file via NSSavePanel/NSOpenPanel; exercise the same encode/decode here).
+            let exportURL = tmp.appendingPathComponent("exported.json")
+            try JSONEncoder().encode(preset).write(to: exportURL, options: .atomic)
+            let imported = try JSONDecoder().decode(Preset.self, from: Data(contentsOf: exportURL))
+            guard imported == preset else { throw Fail(description: "export/import round-trip changed the preset") }
+            _ = try PresetStore.save(imported)
+            guard PresetStore.list().count == 1 else {
+                throw Fail(description: "re-importing a same-named preset should overwrite, not duplicate")
+            }
+
+            // Delete.
+            try PresetStore.delete(preset)
+            guard PresetStore.list().isEmpty else { throw Fail(description: "delete didn't remove the preset file") }
+        },
         "recover": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
@@ -691,35 +760,9 @@ enum SelfTest {
 
             // Synthesize a small, playable screen.mov with no capture/TCC involved, matching what
             // fragmented writing (T-110) leaves behind after a crash mid-recording.
-            let width = 64, height = 48, fps: Int32 = 30, frameCount = 30
+            let width = 64, height = 48
             let movURL = package.appendingPathComponent("screen.mov")
-            let writer = try AVAssetWriter(outputURL: movURL, fileType: .mov)
-            let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-                AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
-            ])
-            let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
-                kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
-            ])
-            writer.add(input)
-            writer.startWriting()
-            writer.startSession(atSourceTime: .zero)
-
-            var frame = 0
-            while frame < frameCount {
-                guard input.isReadyForMoreMediaData else {
-                    try await Task.sleep(nanoseconds: 5_000_000)
-                    continue
-                }
-                var pixelBuffer: CVPixelBuffer?
-                CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
-                guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
-                adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
-                frame += 1
-            }
-            input.markAsFinished()
-            await writer.finishWriting()
-            guard writer.status == .completed else { throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")") }
+            try await synthesizeMovie(at: movURL, width: width, height: height)
 
             let projectURL = package.appendingPathComponent("project.json")
             guard !fm.fileExists(atPath: projectURL.path) else { throw Fail(description: "test setup: project.json already exists") }
@@ -736,6 +779,53 @@ enum SelfTest {
             }
             guard project.clips.first?.sourceEnd == project.source.duration else {
                 throw Fail(description: "clip doesn't span the recovered duration")
+            }
+        },
+        // T-606: `ProjectStore.importMovie` on a synthesized movie living outside the library folder,
+        // like one dragged in from Finder.
+        "import": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-import-\(UUID().uuidString)")
+            let libraryFolder = tmp.appendingPathComponent("Library")
+            try fm.createDirectory(at: libraryFolder, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmp) }
+
+            let sourceMovie = tmp.appendingPathComponent("My Clip.mov")
+            let width = 64, height = 48
+            try await synthesizeMovie(at: sourceMovie, width: width, height: height)
+            let originalData = try Data(contentsOf: sourceMovie)
+
+            let store = ProjectStore(folder: libraryFolder)
+            let packageURL = try await store.importMovie(sourceMovie)
+
+            guard packageURL.lastPathComponent == "My Clip.recorder" else {
+                throw Fail(description: "unexpected package name \(packageURL.lastPathComponent)")
+            }
+            guard fm.fileExists(atPath: packageURL.appendingPathComponent("screen.mov").path) else {
+                throw Fail(description: "screen.mov missing")
+            }
+            guard fm.fileExists(atPath: packageURL.appendingPathComponent("thumbnail.jpg").path) else {
+                throw Fail(description: "thumbnail.jpg missing")
+            }
+            let events = try JSONDecoder().decode(EventLog.self, from: Data(contentsOf: packageURL.appendingPathComponent("events.json")))
+            guard events.events.isEmpty else { throw Fail(description: "events.json not empty") }
+
+            let project = try Project.load(from: packageURL.appendingPathComponent("project.json"))
+            guard project.source.pixelWidth == width, project.source.pixelHeight == height else {
+                throw Fail(description: "size \(project.source.pixelWidth)x\(project.source.pixelHeight) != \(width)x\(height)")
+            }
+            guard (0.5...2.0).contains(project.source.duration) else {
+                throw Fail(description: "duration \(project.source.duration) out of range 0.5...2.0")
+            }
+            guard project.clips.count == 1, project.clips[0].sourceStart == 0, project.clips[0].sourceEnd == project.source.duration else {
+                throw Fail(description: "expected one full-length clip, got \(project.clips)")
+            }
+            guard project.zooms.isEmpty else { throw Fail(description: "expected no zooms") }
+
+            // Media is never modified after recording (SPEC §5) — including on import.
+            guard try Data(contentsOf: sourceMovie) == originalData else {
+                throw Fail(description: "original movie file was modified")
             }
         },
         "events": { args in
@@ -874,6 +964,41 @@ enum SelfTest {
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
     ]
+
+    /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and
+    /// `import` cases so the `AVAssetWriter` boilerplate lives in one place.
+    private static func synthesizeMovie(at url: URL, width: Int, height: Int, fps: Int32 = 30, frameCount: Int = 30) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
+        ])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+            kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+        ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        var frame = 0
+        while frame < frameCount {
+            guard input.isReadyForMoreMediaData else {
+                try await Task.sleep(nanoseconds: 5_000_000)
+                continue
+            }
+            var pixelBuffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
+            guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
+            adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
+            frame += 1
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
+        }
+    }
 
     static func runIfRequested() {
         guard let i = CommandLine.arguments.firstIndex(of: "--selftest") else { return }
