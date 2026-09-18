@@ -52,7 +52,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | M3 Editor shell | T-301…T-313 | 5/13 |
 | M4 Timeline | T-401…T-418 | 5/18 |
 | M5 Ship | T-501…T-509 | 0/9 |
-| M6 Polish | T-601…T-609 | 0/9 |
+| M6 Polish | T-601…T-609 | 2/9 |
 
 Update the "Done" column whenever you tick a task.
 
@@ -603,9 +603,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
   - PARTIAL: Core `typingRanges(events:)` + tests merged; Edit ▸ Speed Up Typing wiring remains (needs editor menus, M3/M4).
 - [~] **T-604 Cursor advanced** — loop position, rotate, remove shakes, always-arrow, hide-cursor ranges via Edit ▸ Hide Cursor in Selected Clip (adds the clip's source range to `cursorHidden`). Tests per stage in `CursorPath`.
   - PARTIAL: Core pipeline stages (shake removal, loop, rotation, always-arrow) + 4 tests merged; Cursor-tab controls and Edit ▸ Hide Cursor in Selected Clip remain.
-- [~] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
-  - PARTIAL: Core `Preset` + test merged; storage/UI in progress (lane).
-- [ ] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
+- [x] **T-605 Presets** — save/apply = the styling subset of `Project` (`background, frame, cursor, animation, camera`) as JSON in `~/Library/Application Support/Recorder/Presets/`; export/import via file panels.
+- [x] **T-606 Import video** — drag a movie into the library → package with the file copied as `screen.mov`, empty `events.json`.
 - [ ] **T-607 Command menu (⌘K)** — a searchable list over the existing `NSMenu` items (walk `NSApp.mainMenu`), performs the item's action. No separate command registry.
 - [ ] **T-608 Cheat sheet (⌘/)** — static SwiftUI grid of SPEC §7.3.
 - [ ] **T-609 Shortcut settings + Copy frame (⇧⌘C)** — rebind the global hotkeys (the T-204 table); copy current composed frame to the pasteboard as PNG.
@@ -667,3 +666,5 @@ T-110 · 2026-09-18 · VERIFIED with real TCC (`open -n … --args --selftest re
 T-312 · 2026-09-18 · verified: `--selftest library-perf` 108–182 ms for 200 packages (< 300 ms, AC-LIB-1); no ProjectStore change needed
 T-310 / T-414 / core halves of T-503, T-602, T-605 · 2026-09-18 · merged; see task notes
 NOTE · agents can run TCC-gated checks through LaunchServices: `open -n --stdout OUT --stderr ERR build/Recorder.app --args --selftest <name> …` (shell-launched binaries inherit the terminal's missing grants).
+T-606 · 2026-09-18 · verified on master: `--selftest import` OK (package contents, measured source, single full clip, original untouched), staged via `stageThenMove` · deviations: no fps on `Source` (not in SPEC §5); imports get kind `.display`, no audio/camera flags
+T-605 · 2026-09-18 · verified on master: Core `presetRoundTripAndApply` + `--selftest presets` OK (save/list/apply through EditorModel = 1 undo step, export/import round-trip, delete) · deviations: "Presets ▾" menu sits above the inspector tab bar (SPEC gives no location)
