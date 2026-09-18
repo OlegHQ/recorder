@@ -11,11 +11,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.mainMenu = Self.buildMainMenu()
         statusItem = Self.buildStatusItem()
+        wireNewRecording()
 
         if !Permissions.allGranted {
             showOnboarding()
+        } else {
+            ToolbarController.shared.show()
         }
-        // else: nothing yet — the toolbar (T-104) takes over here.
 
         NSApp.activate()
     }
@@ -27,12 +29,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: OnboardingView { [weak self] in
             self?.window.close()
+            ToolbarController.shared.show()
         })
         window.center()
         window.makeKeyAndOrderFront(nil)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { false }
+
+    /// Dock-icon click (SPEC §4.2: toolbar opens "on dock-icon click").
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        ToolbarController.shared.show()
+        return true
+    }
+
+    @objc private func newRecording() {
+        ToolbarController.shared.show()
+    }
+
+    /// Wires the "New Recording" items built by `buildMainMenu`/`buildStatusItem` to `ToolbarController` (T-104).
+    private func wireNewRecording() {
+        for item in [NSApp.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "New Recording"),
+                     statusItem.menu?.item(withTitle: "New Recording")] {
+            item?.target = self
+            item?.action = #selector(newRecording)
+        }
+    }
 
     // MARK: - Main menu (SPEC §8, titles/order/key equivalents normative)
 
