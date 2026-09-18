@@ -90,6 +90,52 @@ enum SelfTest {
         "export-gif": { args in try await ExporterSelfTest.runExportGIFSelfTest(args) },
         "export-sheet": { args in try await ExportSheetSelfTest.run(args) },
         "export-sheet-png": { args in try await ExportSheetSelfTest.runPNG(args) },
+        "camera-drag": { args in
+            // T-502: dragging the camera bubble in the preview snaps to the nearest corner, one
+            // `model.edit`. Synthetic mouse events, same technique as the `pickers` case below
+            // (`SelectionRectView`'s drag tests) — `PreviewView` isn't in a real window here, so
+            // `convert(_:from:)` treats the event location as already being in view-local coords.
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let packagePath = args.first else { throw Fail(description: "usage: camera-drag <package>") }
+            let packageURL = URL(fileURLWithPath: packagePath)
+            try await MainActor.run {
+                let model = try loadEditorModel(package: packageURL)
+                guard model.project.source.hasCamera else { throw Fail(description: "fixture must have source.hasCamera = true") }
+
+                let view = PreviewView(model: model)
+                view.setFrameSize(NSSize(width: 960, height: 540))
+
+                func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
+                    NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                }
+
+                // Default corner is bottomRight (bottom-left/y-up bounds ⇒ small x, small y). Drag
+                // from inside the bubble to the opposite (top-left) corner of the viewport.
+                guard model.project.camera.corner == .bottomRight else {
+                    throw Fail(description: "fixture must start with camera.corner = bottomRight (got \(model.project.camera.corner))")
+                }
+
+                let from = CGPoint(x: view.bounds.width - 40, y: 40)     // inside the bottomRight bubble
+                let to = CGPoint(x: 40, y: view.bounds.height - 40)      // near the topLeft corner
+                view.mouseDown(with: synthEvent(.leftMouseDown, from))
+                view.mouseDragged(with: synthEvent(.leftMouseDragged, to))
+                view.mouseUp(with: synthEvent(.leftMouseUp, to))
+
+                guard model.project.camera.corner == .topLeft else {
+                    throw Fail(description: "drag to top-left corner didn't snap: got \(model.project.camera.corner)")
+                }
+
+                // A click that starts OUTSIDE the bubble must not move it (one `model.edit` only for
+                // an actual bubble drag).
+                view.mouseDown(with: synthEvent(.leftMouseDown, CGPoint(x: view.bounds.midX, y: view.bounds.midY)))
+                view.mouseUp(with: synthEvent(.leftMouseUp, CGPoint(x: view.bounds.midX, y: view.bounds.midY)))
+                guard model.project.camera.corner == .topLeft else {
+                    throw Fail(description: "a click outside the bubble moved it: \(model.project.camera.corner)")
+                }
+                print("camera-drag OK: snapped bottomRight -> topLeft, outside-click ignored")
+            }
+        },
         "library": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             func waitUntil(timeout: Double = 3, _ predicate: () -> Bool) async throws {

@@ -23,6 +23,8 @@ struct FrameState {
     var view: ViewTransform = .identity
     var prevView: ViewTransform = .identity
     var cursor: CursorSample?              // nil until T-413
+    var layoutKind: Layout.Kind?           // T-503: the active layout block, if any
+    var layoutAmount: Double = 0           // T-503: its 0…1 cross-fade amount at this instant
     var project: Project
 }
 
@@ -42,7 +44,9 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
     let view = model.cameraPath.sample(atSource: sourceTime)
     let prevView = model.cameraPath.sample(atSource: sourceTime - 1.0 / 60)
     let cursor = model.cursorPath.sample(atSource: sourceTime)
-    return FrameState(outputSize: size, screen: screen, camera: camera, view: view, prevView: prevView, cursor: cursor, project: model.project)
+    let (layoutKind, layoutAmount) = layoutMix(layouts: model.project.layouts, atSource: sourceTime)
+    return FrameState(outputSize: size, screen: screen, camera: camera, view: view, prevView: prevView, cursor: cursor,
+                       layoutKind: layoutKind, layoutAmount: layoutAmount, project: model.project)
 }
 
 /// `project.json` + `events.json` (if present — a fresh/recovered package may not have one yet) →
