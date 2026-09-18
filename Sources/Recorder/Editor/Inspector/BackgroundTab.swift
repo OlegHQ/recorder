@@ -149,12 +149,15 @@ private struct WallpaperGrid: View {
         }
     }
 
-    private var systemWallpapers: [URL] {
+    // Static: `body` re-runs on every project change, and listing the folder + decoding every
+    // full-size HEIC each time froze the inspector on every click.
+    private var systemWallpapers: [URL] { Self.systemWallpaperURLs }
+    private static let systemWallpaperURLs: [URL] = {
         let dir = URL(fileURLWithPath: "/System/Library/Desktop Pictures")
         return ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension.lowercased() == "heic" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
-    }
+    }()
 
     private func swatch(id: String) -> some View {
         let selected = model.project.background.kind == .wallpaper && model.project.background.wallpaper == id
@@ -184,9 +187,24 @@ private struct WallpaperGrid: View {
         .buttonStyle(.plain)
     }
 
+    // ponytail: first display still decodes every thumbnail synchronously on the main thread
+    // (ImageIO downscales while decoding, so it's ms each); move to a background load if the
+    // wallpaper folder ever gets big.
+    private static var thumbnails: [String: NSImage] = [:]
+
     private func loadThumbnail(_ id: String) -> NSImage? {
-        if id.hasPrefix("/") { return NSImage(contentsOfFile: id) }
-        guard let url = Bundle.main.url(forResource: id, withExtension: "jpg", subdirectory: "Wallpapers") else { return nil }
-        return NSImage(contentsOf: url)
+        if let cached = Self.thumbnails[id] { return cached }
+        let url = id.hasPrefix("/") ? URL(fileURLWithPath: id)
+            : Bundle.main.url(forResource: id, withExtension: "jpg", subdirectory: "Wallpapers")
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 160,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let url, let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let image = NSImage(cgImage: cg, size: .zero)
+        Self.thumbnails[id] = image
+        return image
     }
 }

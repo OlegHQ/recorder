@@ -680,6 +680,7 @@ The x-axis is **output time** (what the viewer sees) — removed segments take n
 |---|---|---|---|
 | `Space` | play/pause | `C` | split at playhead |
 | `←` `→` | ±1 frame | `⌥` hold / `S` | split mode |
+| | | `V` | pointer tool (exit split mode) |
 | `⇧←` `⇧→` | ±1 s | `⌫` | remove selection |
 | `J` `K` `L` | reverse/stop/forward shuttle | `Z` | add zoom at playhead |
 | `Home` `End` | start/end | `⌘Z` `⇧⌘Z` | undo/redo |

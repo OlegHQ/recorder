@@ -570,6 +570,24 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     private var isTextEditing: Bool { window?.firstResponder is NSText }
+
+    // Editor shortcuts (SPEC §7.3) work wherever focus is (e.g. after an inspector click): a key
+    // nobody handled ends up here, the end of the responder chain, and gets offered to the preview
+    // (transport) then the timeline (tools). Their own unhandled keys bubble back here, hence the flag.
+    private var isRoutingKey = false
+    override func keyDown(with event: NSEvent) {
+        guard !isRoutingKey else { return super.keyDown(with: event) }
+        isRoutingKey = true
+        defer { isRoutingKey = false }
+        let transportKeys: Set<UInt16> = [49, 123, 124, 115, 119, 38, 40, 37]
+        if transportKeys.contains(event.keyCode), window?.firstResponder !== previewView {
+            previewView.keyDown(with: event)
+        } else if window?.firstResponder !== coreTimelineView {
+            coreTimelineView.keyDown(with: event)
+        } else {
+            super.keyDown(with: event)
+        }
+    }
 }
 
 /// The top bar's project title (SPEC §6.1: "`My Recording ▾` (click = rename)"). A plain

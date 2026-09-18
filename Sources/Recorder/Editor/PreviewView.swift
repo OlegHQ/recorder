@@ -114,6 +114,7 @@ final class PreviewView: MTKView {
         rebuildComposition()
         observeProject()
         observeSelection()
+        observePlayhead()
     }
 
     @available(*, unavailable)
@@ -320,6 +321,20 @@ final class PreviewView: MTKView {
                 guard let self else { return }
                 self.updateZoomTargetOverlay()
                 self.observeSelection()
+            }
+        }
+    }
+
+    // Timeline clicks/scrubs (and anything else) only write `model.playhead`; while paused the
+    // player follows it here, so every writer gets the seek without calling `seek(toOutput:)`.
+    private func observePlayhead() {
+        withObservationTracking {
+            _ = model.playhead
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !self.model.isPlaying, self.hoverTime == nil { self.performSeek(to: self.model.playhead) }
+                self.observePlayhead()
             }
         }
     }

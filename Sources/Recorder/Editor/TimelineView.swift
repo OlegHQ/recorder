@@ -1190,6 +1190,8 @@ final class TimelineView: NSView {
             performSplit(atOutput: model.playhead)
         } else if !cmd, chars?.lowercased() == "s" { // `S` = sticky split mode
             toggleSplitModeSticky()
+        } else if !cmd, chars?.lowercased() == "v" { // `V` = back to the pointer (selection) tool
+            exitSplitMode()
         } else if !cmd, !shift, chars?.lowercased() == "z" { // `Z` = add a zoom at the playhead
             addZoom(atOutput: model?.playhead ?? 0)
         } else if cmd, chars?.lowercased() == "d" { // `⌘D` = duplicate the selected zoom/mask after itself
