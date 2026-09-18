@@ -1626,20 +1626,21 @@ enum SelfTest {
         // T-504: live AVAudioMix rebuild, export volume/mute/denoise/click (see
         // `Render/AudioMixSelfTest.swift`).
         "audio-mix": { args in try await AudioMixSelfTest.run(args) },
-        // T-602 (+ T-601): writes a persistent `/tmp/M6Fixture.recorder` (real screen.mov, a few
+        // T-602 + T-601: writes a persistent `/tmp/M6Fixture.recorder` (real screen.mov, a few
         // low-fps HEVC frames — same lesson as T-504's fixture: a from-scratch H.264 encode measured
         // ~1 s/frame to decode back in this sandboxed environment, HEVC doesn't) with `keys.show`
-        // on and two `.key` events, so `--selftest parity /tmp/M6Fixture.recorder` (which samples
-        // inside the chip's fade window whenever `project.keys.show` is set — see
-        // `ExporterSelfTest.runParitySelfTest`) exercises the renderer's key-chip pass end to end.
-        // Not cleaned up on exit — meant to be reused across runs, like `/tmp/CamFixture.recorder`.
+        // on, two `.key` events, a `mask` and a `highlight`, so `--selftest parity
+        // /tmp/M6Fixture.recorder` (which samples inside the chip's fade window and each mask's
+        // range whenever they're present — see `ExporterSelfTest.runParitySelfTest`) exercises both
+        // renderer passes end to end. Not cleaned up on exit — meant to be reused across runs, like
+        // `/tmp/CamFixture.recorder`.
         "make-m6-fixture": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let url = URL(fileURLWithPath: "/tmp/M6Fixture.recorder")
             try? FileManager.default.removeItem(at: url)
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
 
-            try await Self.synthesizeMovie(at: url.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 3, frameCount: 9)
+            try await Self.synthesizeGradientMovie(at: url.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 3, frameCount: 9)
 
             var project = Project(
                 title: "M6 Fixture",
@@ -1647,6 +1648,11 @@ enum SelfTest {
             )
             project.clips = [Clip(sourceStart: 0, sourceEnd: 3.0, speed: 1)]
             project.keys.show = true
+            // Non-overlapping in time, so a single sampled frame always shows exactly one of them.
+            project.masks = [
+                Mask(start: 0, end: 1.5, kind: .mask, rect: NormRect(x: 0.08, y: 0.12, w: 0.3, h: 0.3), opacity: 0.9),
+                Mask(start: 1.5, end: 3.0, kind: .highlight, rect: NormRect(x: 0.4, y: 0.4, w: 0.3, h: 0.3), opacity: 0.7),
+            ]
             try project.save(to: url.appendingPathComponent("project.json"))
 
             // ⌘K at t=0.5 (holds until 1.7), ⇧⌘S at t=2.0 (holds until 3.2, past the fixture's end
@@ -1685,6 +1691,59 @@ enum SelfTest {
             var pixelBuffer: CVPixelBuffer?
             CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
             guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
+            adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
+            frame += 1
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw Fail(description: "writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
+        }
+    }
+
+    /// Same shape as `synthesizeMovie` above, but each frame is a visible diagonal colour gradient
+    /// instead of `CVPixelBufferCreate`'s all-zero (black) default — `make-m6-fixture` needs this so
+    /// a mask/highlight's dimming is actually visible in a `preview-frame` PNG (a black fill over an
+    /// already-black source would be indistinguishable from no mask at all).
+    private static func synthesizeGradientMovie(at url: URL, width: Int, height: Int, fps: Int32, frameCount: Int) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height,
+        ])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+            kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+        ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        var frame = 0
+        while frame < frameCount {
+            guard input.isReadyForMoreMediaData else {
+                try await Task.sleep(nanoseconds: 5_000_000)
+                continue
+            }
+            var pixelBuffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &pixelBuffer)
+            guard let pixelBuffer else { throw Fail(description: "CVPixelBufferCreate failed") }
+            CVPixelBufferLockBaseAddress(pixelBuffer, [])
+            if let base = CVPixelBufferGetBaseAddress(pixelBuffer) {
+                let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+                let bytes = base.assumingMemoryBound(to: UInt8.self)
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let i = y * bytesPerRow + x * 4
+                        let fx = Double(x) / Double(width), fy = Double(y) / Double(height)
+                        bytes[i + 0] = 255                                         // A
+                        bytes[i + 1] = UInt8(clamping: Int(60 + 150 * fx))         // R
+                        bytes[i + 2] = UInt8(clamping: Int(180 + 60 * fy))         // G
+                        bytes[i + 3] = UInt8(clamping: Int(230 - 120 * fx))        // B
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
             adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps))
             frame += 1
         }

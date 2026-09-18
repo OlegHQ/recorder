@@ -589,6 +589,11 @@ enum ExporterSelfTest {
            let chipTime = timeMap.outputTime(atSource: keyEvent.t + 1.05) {
             times.insert(chipTime)
         }
+        // T-601: inside each mask/highlight's active range (SOURCE time — masks zoom/pan with the
+        // content, same as the cursor) — the middle of the range, well clear of its hard edges.
+        for mask in project.masks {
+            if let inside = timeMap.outputTime(atSource: (mask.start + mask.end) / 2) { times.insert(inside) }
+        }
         let orderedTimes = times.filter { $0 >= 0 && $0 < duration }.sorted()
 
         guard let device = MTLCreateSystemDefaultDevice() else { throw SelfTestArgError.usage("no Metal device") }

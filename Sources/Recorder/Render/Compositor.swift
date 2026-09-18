@@ -143,6 +143,15 @@ final class Compositor {
                 drawCursor(cursor, project: s.project, rectPx: rectPx, contentUV: contentUV,
                            alphaMultiplier: screenAlpha, outputSize: s.outputSize, encoder: encoder)
             }
+
+            // T-601: masks/highlights active at this frame's SOURCE time (SPEC §7.1 lane, §6.6 Mask
+            // panel) — same rectPx/contentUV as the cursor above, so a mask zooms/pans with the
+            // content instead of staying fixed to the canvas.
+            let activeMasks = s.project.masks.filter { s.sourceTime >= $0.start && s.sourceTime <= $0.end }
+            if !activeMasks.isEmpty {
+                drawMasks(activeMasks, rectPx: rectPx, contentUV: contentUV, alphaMultiplier: screenAlpha,
+                          outputSize: s.outputSize, encoder: encoder)
+            }
         }
 
         // Pass 4: camera (rounded-rect SDF quad, SPEC §6.2 pass 4, §6.6 Camera, T-502) — bubble in
@@ -361,6 +370,58 @@ final class Compositor {
         let amount = min(max(animation.motionBlur, 0), 1)
         let bx = currentCenter.0 + dx * amount, by = currentCenter.1 + dy * amount
         return SIMD2(Float(bx - outputSize.width / 2), Float(by - outputSize.height / 2))
+    }
+
+    // MARK: - Masks/highlights (SPEC §7.1 lane, §6.6 Mask panel, T-601)
+
+    /// `mask` = a flat, opaque-black quad at `opacity` over the rect. `highlight` = the SAME
+    /// dimming everywhere else INSIDE the screen content rect — four quads tiling the area outside
+    /// the rect (a "donut"; mode 0 flat colour, reused, so no new shader mode is needed). Both map
+    /// `mask.rect` (SPEC's "uncropped source coordinates", AC-CROP-2) through the exact
+    /// `contentUV`/`rectPx` the screen/cursor passes use, so a mask zooms and pans with the content
+    /// (`Compositor.drawCursor` maps `cursor.x/y` through the identical formula).
+    /// `// ponytail: hard edges, no fade-in/out — SPEC gives layouts (T-503) an explicit 0.3s
+    /// cross-fade but says nothing about masks; add one only if a mockup/AC calls for it.`
+    /// `// ponytail: not clipped to the screen's own rounded corners/shadow SDF — a mask can bleed a
+    /// hair past a heavily rounded corner; not worth a second SDF pass for a rare, subtle overlap.`
+    private func drawMasks(_ masks: [Mask], rectPx: CGRect, contentUV: SIMD4<Float>, alphaMultiplier: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        let u0 = Double(contentUV.x), v0 = Double(contentUV.y), u1 = Double(contentUV.z), v1 = Double(contentUV.w)
+        guard u1 > u0, v1 > v0 else { return }
+        func screenPoint(_ sx: Double, _ sy: Double) -> CGPoint {
+            CGPoint(x: rectPx.minX + (sx - u0) / (u1 - u0) * rectPx.width,
+                    y: rectPx.minY + (sy - v0) / (v1 - v0) * rectPx.height)
+        }
+        for mask in masks {
+            let alpha = mask.opacity * alphaMultiplier
+            guard alpha > 0 else { continue }
+            let color = SIMD4<Float>(0, 0, 0, Float(alpha))
+            let a = screenPoint(mask.rect.x, mask.rect.y)
+            let b = screenPoint(mask.rect.x + mask.rect.w, mask.rect.y + mask.rect.h)
+            let hole = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y)).intersection(rectPx)
+
+            switch mask.kind {
+            case .mask:
+                fillRect(hole, color: color, outputSize: outputSize, encoder: encoder)
+            case .highlight:
+                let bands = [
+                    CGRect(x: rectPx.minX, y: rectPx.minY, width: rectPx.width, height: hole.minY - rectPx.minY),             // top
+                    CGRect(x: rectPx.minX, y: hole.maxY, width: rectPx.width, height: rectPx.maxY - hole.maxY),               // bottom
+                    CGRect(x: rectPx.minX, y: hole.minY, width: hole.minX - rectPx.minX, height: hole.height),               // left
+                    CGRect(x: hole.maxX, y: hole.minY, width: rectPx.maxX - hole.maxX, height: hole.height),                 // right
+                ]
+                for band in bands { fillRect(band, color: color, outputSize: outputSize, encoder: encoder) }
+            }
+        }
+    }
+
+    /// A flat-colour (mode 0) quad at an arbitrary pixel rect — `drawMasks`' one shared draw call.
+    private func fillRect(_ rect: CGRect, color: SIMD4<Float>, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        var u = Uniforms()
+        u.rectNDC = ndcRect(rect, in: outputSize)
+        u.color = color
+        u.mode = 0
+        draw(u, encoder: encoder)
     }
 
     // MARK: - Pass 4: camera (SPEC §6.2 pass 4, §6.6 Camera, T-502)
