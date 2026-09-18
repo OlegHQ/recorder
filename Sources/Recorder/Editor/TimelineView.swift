@@ -1,6 +1,8 @@
 import AppKit
 import Observation
+import QuartzCore
 import RecorderCore
+import SwiftUI
 
 /// Which timed-block track a point/x-coordinate belongs to. Top-to-bottom draw/hit-test order
 /// matches this declaration order (SPEC §7.1): clip, zoom, layout (only if `source.hasCamera`),
@@ -13,10 +15,10 @@ enum Lane: CaseIterable, Sendable {
 /// exactly the table's order: playhead cap, block edge, block body, ✂ bubble, empty lane, ruler.
 enum TimelineHit: Equatable {
     case playhead
-    case clipEdge(Int, Edge)
+    case clipEdge(Int, RecorderCore.Edge)
     case clipBody(Int)
     case cutBubble(afterClip: Int)
-    case blockEdge(UUID, Edge)
+    case blockEdge(UUID, RecorderCore.Edge)
     case blockBody(UUID)
     case emptyLane(Lane, source: Double)
     case ruler
@@ -29,7 +31,12 @@ enum TimelineHit: Equatable {
 /// Navigation (T-405) and hit-testing/selection (T-406) are added on top of this file.
 final class TimelineView: NSView {
     weak var model: EditorModel? {
-        didSet { observeModel() }
+        didSet {
+            lastClips = model?.project.clips ?? [] // no ripple from the very first assignment
+            observeModel()
+            maybeFitOnFirstLayout()
+            loadWaveformIfNeeded()
+        }
     }
 
     var geometry = TimelineGeometry(pxPerSecond: 60, scrollX: 0, width: 0)
@@ -47,10 +54,78 @@ final class TimelineView: NSView {
 
     private var autoScrollEnabled = true
     private var wasPlaying = false
+    /// SPEC §7.2 "Navigation": the timeline opens fitted — see `maybeFitOnFirstLayout`.
+    private var didFitOnFirstLayout = false
+    private var userDidZoom = false
     private var dragKind: DragKind?
-    private enum DragKind { case scrub }
+    /// A clip trim's fixed references, captured once at `beginGesture` (SPEC §7.2 "Trim"): the
+    /// clip's pre-drag `sourceStart`/`speed` and the output-time position of its (unaffected)
+    /// leading edge — everything a drag needs to turn "mouse x" into a target source time for
+    /// *either* edge, since a clip's own leading edge is always at that fixed output position
+    /// regardless of how it's trimmed (only clips *before* it determine that).
+    private enum DragKind {
+        case scrub
+        case trimClip(index: Int, edge: RecorderCore.Edge, priorOutput: Double, beginSourceStart: Double, beginSourceEnd: Double, speed: Double)
+        // Zoom blocks are stored in *source* time and `clips` never changes under these two
+        // (unlike a clip trim), so `model.timeMap` — stable for the whole gesture — does the
+        // output→source conversion directly; no "begin" snapshot of the block itself is needed.
+        case moveZoom(id: UUID, grabOffset: Double) // grabOffset = (source under the mouse) − zoom.start, at mouseDown
+        case resizeZoom(id: UUID, edge: RecorderCore.Edge)
+    }
     private var hoverX: CGFloat?
+    private var hoverY: CGFloat?
     private var trackingArea: NSTrackingArea?
+
+    // MARK: - Waveform (T-416)
+
+    /// Loaded off the main thread once per open (`Waveform.peaks(for:)` itself also caches by
+    /// URL, but this avoids re-dispatching the load / racing a second `model` assignment).
+    private var waveformPeaks: [Float]?
+    private var waveformLoadedForPackage: URL?
+    /// For selftests: whether the async load (`loadWaveformIfNeeded`) has landed.
+    var hasWaveform: Bool { waveformPeaks != nil }
+
+    // MARK: - Trim (T-408)
+
+    /// `(x, text)` for the "new duration (Δ ±0:01.20)" chip drawn next to the dragged edge.
+    private var trimChip: (x: CGFloat, text: String)?
+
+    // MARK: - Ripple animation (T-408)
+
+    /// The clips as of the last draw — compared each time `model.project` changes to detect an
+    /// edit that isn't this view's own live drag (SPEC §7.2 "Feel": "nothing animates while the
+    /// user is dragging that block").
+    private var lastClips: [Clip] = []
+    /// The pre-change clips being animated *from*, while a ripple is in flight.
+    private var rippleFromClips: [Clip]?
+    private var rippleStart: CFTimeInterval?
+    private static let rippleDuration: CFTimeInterval = 0.18
+
+    // MARK: - Split mode (T-407)
+
+    /// `S` / the ✂ toolbar button = sticky, until `Esc`. `⌥` held = momentary. Either makes
+    /// `isSplitMode` true (SPEC §7.2 "Split").
+    private var splitModeSticky = false
+    private var splitOptionHeld = false
+    private var isSplitMode: Bool { splitModeSticky || splitOptionHeld }
+
+    /// AC-TL-7: while in split mode, the preview shows the blade's (hover) frame instead of the
+    /// playhead. `PreviewView`/`EditorModel` aren't merged into this lane yet — a coordinator wires
+    /// this callback once they are, per the plan's integration note. `nil` = show the playhead again.
+    var onHoverTime: ((Double?) -> Void)?
+
+    /// Set by `snappedOutput` whenever the last computed value snapped, for the 1 px accent guide
+    /// line (SPEC §7.2 "Snapping"). Cleared by whoever isn't currently snapping.
+    private var snapGuideX: CGFloat?
+
+    // MARK: - Lightweight animations (split flash/shake now; T-408 adds ripple) — one shared
+    // `CADisplayLink`, started on demand and stopped once nothing is left animating.
+
+    private static let cutFlashDuration: CFTimeInterval = 0.25
+    private static let bladeShakeDuration: CFTimeInterval = 0.3
+    private var cutFlash: (x: CGFloat, start: CFTimeInterval)?
+    private var bladeShakeStart: CFTimeInterval?
+    private var animationLink: CADisplayLink?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -66,7 +141,37 @@ final class TimelineView: NSView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         geometry.width = max(0, newSize.width - Self.gutter)
+        maybeFitOnFirstLayout()
         needsDisplay = true
+    }
+
+    // MARK: - Animation driver
+
+    private func ensureAnimating() {
+        guard animationLink == nil else { return }
+        let link = displayLink(target: self, selector: #selector(animationTick(_:)))
+        link.add(to: .main, forMode: .common)
+        animationLink = link
+        needsDisplay = true
+    }
+
+    @objc private func animationTick(_ link: CADisplayLink) {
+        let now = CACurrentMediaTime()
+        var active = false
+        if let start = cutFlash?.start {
+            if now - start < Self.cutFlashDuration { active = true } else { cutFlash = nil }
+        }
+        if let start = bladeShakeStart {
+            if now - start < Self.bladeShakeDuration { active = true } else { bladeShakeStart = nil }
+        }
+        if let start = rippleStart {
+            if now - start < Self.rippleDuration { active = true } else { rippleStart = nil; rippleFromClips = nil }
+        }
+        needsDisplay = true
+        if !active {
+            link.invalidate()
+            animationLink = nil
+        }
     }
 
     // MARK: - Observation (SPEC §7: "Observe model with withObservationTracking")
@@ -84,6 +189,14 @@ final class TimelineView: NSView {
                 if model.isPlaying, !self.wasPlaying { self.autoScrollEnabled = true }
                 self.wasPlaying = model.isPlaying
                 self.autoScrollIfNeeded()
+                self.maybeFitOnFirstLayout() // the project's duration may only just have become known
+                // T-408 "Ripple animation": clips changed from something other than a live drag
+                // of this view's own doing (remove/restore/speed/undo/redo/an edit from elsewhere)
+                // → animate from the old geometry. Nothing animates while a drag is active.
+                if self.dragKind == nil, model.project.clips != self.lastClips {
+                    self.beginRipple(from: self.lastClips)
+                }
+                self.lastClips = model.project.clips
                 self.needsDisplay = true
                 self.observeModel()
             }
@@ -142,12 +255,34 @@ final class TimelineView: NSView {
 
         drawGutterIcons()
         drawRuler()
-        drawClipLane(project)
+        drawClipLane(project, timeMap)
         drawZoomLane(project, timeMap)
+        drawClickTicks(project, timeMap)
+        drawZoomGhost()
         if hasLayoutLane { drawLayoutLane(project, timeMap) }
         drawLaneDividers()
         drawPlayhead(model.playhead)
+        // Drawn after the playhead/its timecode chip so a cut near the playhead is never hidden
+        // behind them — the ✂ bubble is an actionable affordance, the chip is informational.
+        drawCutBubbles(project)
         drawHover()
+        if isSplitMode { drawSplitBlade() }
+        drawCutFlash()
+        // SPEC §7.2 "Snapping": "a 1 px accent guide line spans all tracks while snapped" — applies
+        // to every drag that sets `snapGuideX` (the split blade draws its own, mid-blade, above).
+        if !isSplitMode, let snapGuideX { drawSnapGuide(at: snapGuideX) }
+        drawTrimChip()
+    }
+
+    private func drawTrimChip() {
+        guard let trimChip else { return }
+        let attrs: [NSAttributedString.Key: Any] = [.font: Theme.timecodeFont(11), .foregroundColor: Theme.textPrimary]
+        let label = trimChip.text as NSString
+        let size = label.size(withAttributes: attrs)
+        let chip = CGRect(x: trimChip.x - size.width / 2 - 4, y: Self.rulerHeight + 4, width: size.width + 8, height: size.height + 4)
+        Theme.bgControl.setFill()
+        NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4).fill()
+        label.draw(at: CGPoint(x: chip.minX + 4, y: chip.minY + 2), withAttributes: attrs)
     }
 
     private func drawLaneDividers() {
@@ -217,20 +352,103 @@ final class TimelineView: NSView {
 
     // MARK: - Clip lane
 
-    private func drawClipLane(_ project: Project) {
+    private func drawClipLane(_ project: Project, _ timeMap: TimeMap) {
         let row = laneRow(.clip)
+        let clips = project.clips
+        let targetRects = clipRects(clips, row: row)
+        // T-408 "Ripple animation": ease from the pre-change geometry, keyed by index —
+        // ponytail: animate by index; fine because ops change at most one seam.
+        let eased = dragKind == nil ? rippleEasedProgress() : nil
+        let fromRects = eased != nil ? clipRects(rippleFromClips ?? clips, row: row) : nil
+
         var outStart = 0.0
-        for (i, clip) in project.clips.enumerated() {
+        for (i, clip) in clips.enumerated() {
             let outEnd = outStart + clip.outputDuration
             defer { outStart = outEnd }
-            // A 1.5 pt gap on each side keeps neighbouring clips visually separate (their seam is
-            // where a cut/trim can later be restored, T-408) even though they're the same colour.
-            let rect = CGRect(x: x(forOutput: outStart) + 1.5, y: row.minY + 2,
-                               width: max(0, x(forOutput: outEnd) - x(forOutput: outStart) - 3), height: row.height - 4)
+            var rect = targetRects[i]
+            if let eased, let fromRects, i < fromRects.count { rect = lerp(fromRects[i], targetRects[i], eased) }
             guard rect.width > 0.5 else { continue }
             let label = clip.speed != 1 ? "\(formatSpeed(clip.speed))\u{00D7} \u{23E9}" : nil
             drawBlock(rect, fill: Theme.clip, tornLeft: false, tornRight: false, label: label, selected: model?.selectedClip == i)
+            drawWaveform(in: rect, outStart: outStart, outEnd: outEnd, timeMap: timeMap)
         }
+    }
+
+    /// SPEC §7.1 clip lane: "waveform" peaks drawn inside each clip block, mapped through
+    /// `TimeMap` — `px`'s fraction across `rect` maps to output time `[outStart, outEnd)`, so the
+    /// waveform tracks the block exactly, including mid-ripple.
+    private func drawWaveform(in rect: CGRect, outStart: Double, outEnd: Double, timeMap: TimeMap) {
+        guard let waveformPeaks, !waveformPeaks.isEmpty, outEnd > outStart else { return }
+        let inset = rect.insetBy(dx: 5, dy: 6)
+        guard inset.width > 1 else { return }
+        let midY = inset.midY
+        Theme.textPrimary.withAlphaComponent(0.45).setFill()
+        var px = inset.minX
+        while px < inset.maxX {
+            let fraction = (px - inset.minX) / inset.width
+            let outputT = outStart + fraction * (outEnd - outStart)
+            let sourceT = timeMap.sourceTime(atOutput: outputT)
+            let index = Int(sourceT * Double(Waveform.peaksPerSecond))
+            if waveformPeaks.indices.contains(index) {
+                let amplitude = max(1, CGFloat(min(1, waveformPeaks[index])) * inset.height / 2)
+                NSRect(x: px, y: midY - amplitude, width: 1, height: amplitude * 2).fill()
+            }
+            px += 1
+        }
+    }
+
+    // MARK: - Waveform loading (T-416)
+
+    /// `AVAssetReader`-backed, so off the main thread; `Waveform.peaks(for:)` also caches by URL
+    /// (`// ponytail: computed on open, not cached on disk`, per `Waveform.swift`).
+    private func loadWaveformIfNeeded() {
+        guard let model, waveformLoadedForPackage != model.packageURL else { return }
+        let packageURL = model.packageURL
+        waveformLoadedForPackage = packageURL
+        guard let audioURL = Waveform.audioURL(in: packageURL) else { return }
+        Task.detached { [weak self] in
+            let peaks = try? Waveform.peaks(for: audioURL)
+            await MainActor.run {
+                guard let self, self.waveformLoadedForPackage == packageURL else { return } // superseded by a later `model`
+                self.waveformPeaks = peaks
+                self.needsDisplay = true
+            }
+        }
+    }
+
+    /// Each clip's rect (SPEC §7.1 clip lane), for an arbitrary `clips` array — used both for the
+    /// live geometry and (during a ripple) the pre-change geometry it's animating from.
+    private func clipRects(_ clips: [Clip], row: CGRect) -> [CGRect] {
+        var outStart = 0.0
+        return clips.map { clip in
+            let outEnd = outStart + clip.outputDuration
+            defer { outStart = outEnd }
+            // A 1.5 pt gap on each side keeps neighbouring clips visually separate (their seam is
+            // where a cut/trim can be restored) even though they're the same colour.
+            return CGRect(x: x(forOutput: outStart) + 1.5, y: row.minY + 2,
+                           width: max(0, x(forOutput: outEnd) - x(forOutput: outStart) - 3), height: row.height - 4)
+        }
+    }
+
+    private func beginRipple(from oldClips: [Clip]) {
+        guard !oldClips.isEmpty else { return }
+        rippleFromClips = oldClips
+        rippleStart = CACurrentMediaTime()
+        ensureAnimating()
+    }
+
+    /// 0...1 ease-out progress, or `nil` once the 0.18 s ripple has finished.
+    private func rippleEasedProgress() -> Double? {
+        guard let rippleStart else { return nil }
+        let elapsed = CACurrentMediaTime() - rippleStart
+        guard elapsed < Self.rippleDuration else { return nil }
+        let t = elapsed / Self.rippleDuration
+        return 1 - pow(1 - t, 3) // ease-out cubic
+    }
+
+    private func lerp(_ a: CGRect, _ b: CGRect, _ t: Double) -> CGRect {
+        CGRect(x: a.minX + (b.minX - a.minX) * t, y: b.minY,
+               width: a.width + (b.width - a.width) * t, height: b.height)
     }
 
     // MARK: - Zoom / layout lanes (source-time blocks mapped through TimeMap; SPEC §7.1)
@@ -373,6 +591,156 @@ final class TimelineView: NSView {
         label.draw(at: CGPoint(x: chip.minX + 4, y: chip.minY + 2), withAttributes: attrs)
     }
 
+    // MARK: - Split mode (SPEC §7.2 "Split" — the headline interaction)
+
+    /// Full-height dashed accent blade at the snapped mouse x, with a timecode chip. `nil` when the
+    /// mouse hasn't hovered the view yet.
+    private func drawSplitBlade() {
+        guard let t = bladeOutputTime() else { return }
+        let px = x(forOutput: t) + bladeShakeOffset()
+
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: px, y: 0))
+        line.line(to: CGPoint(x: px, y: contentHeight))
+        line.lineWidth = 1.5
+        line.setLineDash([4, 3], count: 2, phase: 0)
+        Theme.accent.setStroke()
+        line.stroke()
+
+        let attrs: [NSAttributedString.Key: Any] = [.font: Theme.timecodeFont(11), .foregroundColor: Theme.textPrimary]
+        let label = playheadLabel(t) as NSString
+        let size = label.size(withAttributes: attrs)
+        let chip = CGRect(x: px + 6, y: Self.rulerHeight + 4, width: size.width + 8, height: size.height + 4)
+        Theme.accent.setFill()
+        NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4).fill()
+        label.draw(at: CGPoint(x: chip.minX + 4, y: chip.minY + 2), withAttributes: attrs)
+
+        if let snapGuideX { drawSnapGuide(at: snapGuideX) }
+    }
+
+    /// SPEC §7.2 "Snapping": "a 1 px accent guide line spans all tracks while snapped."
+    private func drawSnapGuide(at px: CGFloat) {
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: px, y: 0))
+        line.line(to: CGPoint(x: px, y: contentHeight))
+        line.lineWidth = 1
+        Theme.accent.withAlphaComponent(0.8).setStroke()
+        line.stroke()
+    }
+
+    /// A refused split (SPEC §7.2): "3-cycle 4 px horizontal shake of the blade, no alert."
+    private func bladeShakeOffset() -> CGFloat {
+        guard let bladeShakeStart else { return 0 }
+        let elapsed = CACurrentMediaTime() - bladeShakeStart
+        guard elapsed < Self.bladeShakeDuration else { return 0 }
+        let cycles = 3.0
+        return CGFloat(sin(elapsed / Self.bladeShakeDuration * cycles * 2 * .pi)) * 4
+    }
+
+    /// A successful split (SPEC §7.2): "a 0.25 s 'cut flash' (white line fading) confirms it."
+    private func drawCutFlash() {
+        guard let cutFlash else { return }
+        let elapsed = CACurrentMediaTime() - cutFlash.start
+        guard elapsed < Self.cutFlashDuration else { return }
+        let alpha = 1 - CGFloat(elapsed / Self.cutFlashDuration)
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: cutFlash.x, y: 0))
+        line.line(to: CGPoint(x: cutFlash.x, y: contentHeight))
+        line.lineWidth = 2
+        Theme.textPrimary.withAlphaComponent(alpha).setStroke()
+        line.stroke()
+    }
+
+    /// The blade's current (snapped) output time, from the last hover position. `nil` before the
+    /// mouse has ever entered the view.
+    private func bladeOutputTime() -> Double? {
+        guard let hoverX, hoverX > Self.gutter, let model else { return nil }
+        let raw = geometry.output(forX: geometryX(NSPoint(x: hoverX, y: 0)))
+        let (value, snapped) = snappedOutput(raw, disabled: NSEvent.modifierFlags.contains(.command))
+        snapGuideX = snapped ? x(forOutput: value) : nil
+        return min(max(0, value), model.timeMap.outputDuration)
+    }
+
+    /// `Esc` exits split mode; the ✂ toolbar button and `S` toggle the sticky half of it.
+    func toggleSplitModeSticky() {
+        if splitModeSticky { exitSplitMode() } else { splitModeSticky = true; needsDisplay = true; updateHoverCallback() }
+    }
+
+    private func exitSplitMode() {
+        guard isSplitMode else { return }
+        splitModeSticky = false
+        splitOptionHeld = false
+        snapGuideX = nil
+        onHoverTime?(nil)
+        needsDisplay = true
+    }
+
+    /// `C` (immediate, at the playhead) and a split-mode click (at the blade) both land here.
+    /// Refused (SPEC: within 2 frames of an edge, or a piece would be too short) → shake, no undo
+    /// step. Success → exactly one `model.edit` (one undo step) + the cut flash.
+    private func performSplit(atOutput t: Double) {
+        guard let model else { return }
+        var trial = model.project
+        guard trial.split(atOutput: t) else {
+            bladeShakeStart = CACurrentMediaTime()
+            ensureAnimating()
+            return
+        }
+        let px = x(forOutput: t)
+        model.edit("Split") { _ = $0.split(atOutput: t) }
+        cutFlash = (x: px, start: CACurrentMediaTime())
+        ensureAnimating()
+    }
+
+    private func updateHoverCallback() {
+        guard isSplitMode, let t = bladeOutputTime() else { onHoverTime?(nil); return }
+        onHoverTime?(t)
+    }
+
+    // MARK: - Snapping (SPEC §7.2 "Snapping" — shared by the split blade, trims (T-408) and
+
+    // block move/resize (T-409): one routine, not three.
+
+    /// Candidate output-time snap points: the playhead, every clip edge, every visible zoom/layout/
+    /// mask block edge (excluding one being dragged), and click events from the event log.
+    private func snapCandidates(excludingBlock: UUID? = nil) -> [Double] {
+        guard let model else { return [] }
+        var candidates: [Double] = [model.playhead]
+        var outStart = 0.0
+        for clip in model.project.clips {
+            candidates.append(outStart)
+            outStart += clip.outputDuration
+            candidates.append(outStart)
+        }
+        let timeMap = model.timeMap
+        let project = model.project
+        let laneBlocks: [[(id: String, start: Double, end: Double)]] = [
+            project.zooms.map { ($0.id, $0.start, $0.end) },
+            project.layouts.map { ($0.id, $0.start, $0.end) },
+            project.masks.map { ($0.id, $0.start, $0.end) },
+        ]
+        for blocks in laneBlocks {
+            for b in blocks where UUID(uuidString: b.id) != excludingBlock {
+                for segment in visibleSegments(start: b.start, end: b.end, project: project, timeMap: timeMap) {
+                    candidates.append(segment.outStart)
+                    candidates.append(segment.outEnd)
+                }
+            }
+        }
+        for click in model.events.clicks() {
+            if let out = timeMap.outputTime(atSource: click.t) { candidates.append(out) }
+        }
+        return candidates
+    }
+
+    /// `raw` (an output time under the mouse) snapped to the nearest candidate within 6 pt,
+    /// converted to seconds at the current zoom. `disabled` (⌘ held) skips snapping entirely.
+    private func snappedOutput(_ raw: Double, excludingBlock: UUID? = nil, disabled: Bool) -> (value: Double, snapped: Bool) {
+        guard !disabled else { return (raw, false) }
+        let threshold = 6 / max(geometry.pxPerSecond, 1)
+        return snap(raw, candidates: snapCandidates(excludingBlock: excludingBlock), threshold: threshold)
+    }
+
     // MARK: - Timecode formatting
 
     private func rulerLabel(_ t: Double, interval: Double) -> String {
@@ -452,32 +820,50 @@ final class TimelineView: NSView {
         return nil
     }
 
-    /// A small hit box at every seam with a cut/trim to restore (drawn as the ✂ bubble by T-408,
-    /// straddling the ruler/clip-lane divider so it never competes with a clip edge's hit zone):
-    /// between two clips whose source ranges don't meet, and at the head/tail when trimmed.
-    private func hitCutBubble(_ p: CGPoint, _ model: EditorModel) -> TimelineHit? {
-        let row = laneRow(.clip)
-        let bandTop = row.minY - 8
-        guard p.y >= bandTop, p.y <= row.minY else { return nil }
-        let clips = model.project.clips
-        guard !clips.isEmpty else { return nil }
+    /// Every seam with a cut/trim to restore, as (which clip it follows, `-1` = the head, its
+    /// output x): between two clips whose source ranges don't meet, and at the head/tail when
+    /// trimmed. Shared by hit-testing and drawing the ✂ bubble (SPEC §7.2 "Restore").
+    private func cutBubbleSeams(_ project: Project) -> [(afterClip: Int, outputX: CGFloat)] {
+        let clips = project.clips
+        guard !clips.isEmpty else { return [] }
         let eps = 1e-6
-
-        func box(at seamX: CGFloat) -> CGRect { CGRect(x: seamX - 6, y: bandTop, width: 12, height: 8) }
-
-        if clips[0].sourceStart > eps, box(at: x(forOutput: 0)).contains(p) { return .cutBubble(afterClip: -1) }
-
+        var seams: [(Int, CGFloat)] = []
+        if clips[0].sourceStart > eps { seams.append((-1, x(forOutput: 0))) }
         var outEnd = 0.0
         for i in clips.indices {
             outEnd += clips[i].outputDuration
-            if i < clips.count - 1, clips[i + 1].sourceStart - clips[i].sourceEnd > eps, box(at: x(forOutput: outEnd)).contains(p) {
-                return .cutBubble(afterClip: i)
+            if i < clips.count - 1, clips[i + 1].sourceStart - clips[i].sourceEnd > eps {
+                seams.append((i, x(forOutput: outEnd)))
             }
         }
-        if model.project.source.duration - clips[clips.count - 1].sourceEnd > eps, box(at: x(forOutput: outEnd)).contains(p) {
-            return .cutBubble(afterClip: clips.count - 1)
+        if project.source.duration - clips[clips.count - 1].sourceEnd > eps { seams.append((clips.count - 1, x(forOutput: outEnd))) }
+        return seams
+    }
+
+    /// A small hit box at every seam with a cut/trim (straddling the ruler/clip-lane divider so it
+    /// never competes with a clip edge's hit zone).
+    private func hitCutBubble(_ p: CGPoint, _ model: EditorModel) -> TimelineHit? {
+        let bandTop = laneRow(.clip).minY - 8
+        guard p.y >= bandTop, p.y <= bandTop + 8 else { return nil }
+        for seam in cutBubbleSeams(model.project) where CGRect(x: seam.outputX - 6, y: bandTop, width: 12, height: 8).contains(p) {
+            return .cutBubble(afterClip: seam.afterClip)
         }
         return nil
+    }
+
+    /// Draws the ✂ bubble at every seam (SPEC §7.1: "✂ bubble = a cut/trim exists here; click it
+    /// to restore").
+    private func drawCutBubbles(_ project: Project) {
+        let bandTop = laneRow(.clip).minY - 8
+        let attrs: [NSAttributedString.Key: Any] = [.font: Theme.captionFont, .foregroundColor: Theme.textPrimary]
+        let glyph = "\u{2702}" as NSString
+        let size = glyph.size(withAttributes: attrs)
+        for seam in cutBubbleSeams(project) {
+            let rect = CGRect(x: seam.outputX - 6, y: bandTop, width: 12, height: 8)
+            Theme.bgControl.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            glyph.draw(at: CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2 - 1), withAttributes: attrs)
+        }
     }
 
     private func hitEmptyLane(_ p: CGPoint, _ model: EditorModel) -> TimelineHit? {
@@ -547,6 +933,136 @@ final class TimelineView: NSView {
         }
     }
 
+    // MARK: - Context menus (SPEC §7.2 "Context menus")
+
+    private func isInClipLane(_ p: CGPoint) -> Bool {
+        let row = laneRow(.clip)
+        return p.y >= row.minY && p.y <= row.maxY
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let p = convert(event.locationInWindow, from: nil)
+        switch hitTest(at: p) {
+        case .clipBody(let i), .clipEdge(let i, _):
+            return clipContextMenu(index: i)
+        case .blockBody(let id), .blockEdge(let id, _):
+            return lane(ofBlock: id) == .zoom ? zoomContextMenu(id: id) : nil
+        case .ruler:
+            return rulerContextMenu()
+        default:
+            // `hitTest`'s `.emptyLane` is only defined for the zoom/layout/mask lanes (SPEC §7.2
+            // table); an empty spot in the clip lane itself (past the last clip) falls through to
+            // `.none` there, so it's recognised here instead.
+            return isInClipLane(p) ? emptyClipAreaMenu() : nil
+        }
+    }
+
+    private func actionItem(_ title: String, action: Selector?, represented: Any? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = represented
+        return item
+    }
+
+    /// SPEC §7.2 "Context menus": `Clip: Split at Playhead (C) · Speed ▸ · Mute Audio · Remove (⌫)`.
+    private func clipContextMenu(index: Int) -> NSMenu {
+        selectClip(index)
+        let menu = NSMenu()
+        menu.addItem(actionItem("Split at Playhead (C)", action: #selector(menuSplitAtPlayhead)))
+        let speed = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
+        speed.submenu = speedSubmenu(index: index)
+        menu.addItem(speed)
+        // ponytail: `Clip` has no per-clip mute field yet (adding one is a `Project.swift` change,
+        // out of this lane's scope while other agents are editing it) — shown, but disabled.
+        menu.addItem(actionItem("Mute Audio", action: nil))
+        menu.items.last?.isEnabled = false
+        menu.addItem(.separator())
+        menu.addItem(actionItem("Remove (\u{232B})", action: #selector(menuRemoveClip(_:)), represented: index))
+        return menu
+    }
+
+    private struct SpeedTarget { let index: Int; let speed: Double }
+
+    private func speedSubmenu(index: Int) -> NSMenu {
+        let menu = NSMenu()
+        let current = model?.project.clips[index].speed
+        for preset in [0.5, 1, 1.5, 2, 4, 8] {
+            let item = actionItem("\(formatSpeed(preset))\u{00D7}", action: #selector(menuSetSpeed(_:)),
+                                   represented: SpeedTarget(index: index, speed: preset))
+            item.state = current == preset ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(actionItem("Custom\u{2026}", action: #selector(menuCustomSpeed(_:)), represented: SpeedTarget(index: index, speed: 0)))
+        return menu
+    }
+
+    @objc private func menuSplitAtPlayhead() {
+        guard let model else { return }
+        performSplit(atOutput: model.playhead)
+    }
+
+    @objc private func menuRemoveClip(_ sender: NSMenuItem) {
+        guard let i = sender.representedObject as? Int else { return }
+        model?.edit("Remove Clip") { _ = $0.removeClip(i) }
+    }
+
+    @objc private func menuSetSpeed(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? SpeedTarget else { return }
+        model?.edit("Speed") { $0.setSpeed(target.index, target.speed) }
+    }
+
+    /// `Speed ▸ Custom…`: an `NSAlert` with a text field (0.25...16), mirroring the "Custom Size"
+    /// pattern already used for the area-selection overlay.
+    @objc private func menuCustomSpeed(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? SpeedTarget, let model,
+              model.project.clips.indices.contains(target.index) else { return }
+        let field = NSTextField(string: String(format: "%.2f", model.project.clips[target.index].speed))
+        field.frame = NSRect(x: 0, y: 0, width: 80, height: 24)
+        let alert = NSAlert()
+        alert.messageText = "Custom Speed"
+        alert.informativeText = "0.25\u{2013}16\u{00D7}"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn, let value = Double(field.stringValue) else { return }
+        model.edit("Speed") { $0.setSpeed(target.index, value) }
+    }
+
+    /// SPEC §7.2 "Context menus": `Empty clip-track area: Restore All Cuts`.
+    private func emptyClipAreaMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(actionItem("Restore All Cuts", action: #selector(menuRestoreAllCuts)))
+        return menu
+    }
+
+    @objc private func menuRestoreAllCuts() {
+        model?.edit("Restore All Cuts") { $0.restoreAllCuts() }
+    }
+
+    /// SPEC §7.2 "Context menus": `Ruler: Fit (⇧Z) · Zoom to Selection`.
+    private func rulerContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(actionItem("Fit (\u{21E7}Z)", action: #selector(menuFit)))
+        let zoomToSelection = actionItem("Zoom to Selection", action: #selector(menuZoomToSelection))
+        zoomToSelection.isEnabled = model?.selectedClip != nil
+        menu.addItem(zoomToSelection)
+        return menu
+    }
+
+    @objc private func menuFit() { fit() }
+
+    @objc private func menuZoomToSelection() {
+        guard let model, let i = model.selectedClip, model.project.clips.indices.contains(i) else { return }
+        var outStart = 0.0
+        for c in model.project.clips[0..<i] { outStart += c.outputDuration }
+        let outEnd = outStart + model.project.clips[i].outputDuration
+        guard outEnd > outStart, geometry.width > 0 else { return }
+        geometry.pxPerSecond = min(Self.maxPxPerSecond, geometry.width / (outEnd - outStart))
+        geometry.scrollX = clampScrollX(outStart * geometry.pxPerSecond)
+        needsDisplay = true
+    }
+
     // MARK: - Zoom range + fit (SPEC §7.2 "Navigation")
 
     /// The px/s that fits the whole project's output duration in the current view width — the
@@ -570,9 +1086,20 @@ final class TimelineView: NSView {
     }
 
     private func zoom(by factor: Double, anchorX: Double) {
+        userDidZoom = true // don't auto-fit again once the user has manually zoomed (T-405 fix)
         geometry.zoom(by: factor, anchorX: anchorX, minPxPerSecond: minPxPerSecond(), maxPxPerSecond: Self.maxPxPerSecond)
         geometry.scrollX = clampScrollX(geometry.scrollX)
         needsDisplay = true
+    }
+
+    /// SPEC §7.2 "Navigation": the timeline opens fitted. `setFrameSize`/`model`'s `didSet`/an
+    /// observed project change all call this; it only ever fires once (on whichever of those
+    /// happens last — first non-zero width *and* a known duration), and never once the user has
+    /// manually zoomed.
+    private func maybeFitOnFirstLayout() {
+        guard !didFitOnFirstLayout, !userDidZoom, geometry.width > 0, let model, model.timeMap.outputDuration > 0 else { return }
+        fit()
+        didFitOnFirstLayout = true
     }
 
     /// 0...1 position for a "slider in the timeline toolbar" (linear over the zoom range).
@@ -610,7 +1137,7 @@ final class TimelineView: NSView {
         zoom(by: 1 + Double(event.magnification), anchorX: geometryX(p))
     }
 
-    // MARK: - Keyboard (⌘=/⌘- anchored at the playhead, ⇧Z = fit)
+    // MARK: - Keyboard (⌘=/⌘- anchored at the playhead, ⇧Z = fit, C/S = split — SPEC §7.3)
 
     override func keyDown(with event: NSEvent) {
         let cmd = event.modifierFlags.contains(.command)
@@ -624,9 +1151,28 @@ final class TimelineView: NSView {
             fit()
         } else if event.keyCode == 51 || event.keyCode == 117 { // delete / forward-delete: ⌫ removes the selection
             removeSelection()
+        } else if !cmd, chars?.lowercased() == "c", let model { // `C` = split at the playhead, immediately
+            performSplit(atOutput: model.playhead)
+        } else if !cmd, chars?.lowercased() == "s" { // `S` = sticky split mode
+            toggleSplitModeSticky()
+        } else if !cmd, !shift, chars?.lowercased() == "z" { // `Z` = add a zoom at the playhead
+            addZoom(atOutput: model?.playhead ?? 0)
+        } else if cmd, chars?.lowercased() == "d" { // `⌘D` = duplicate the selected zoom/mask after itself
+            duplicateSelection()
         } else {
             super.keyDown(with: event)
         }
+    }
+
+    /// `⌥` held = momentary split mode (SPEC §7.2 "Split").
+    override func flagsChanged(with event: NSEvent) {
+        let optionHeld = event.modifierFlags.contains(.option)
+        if optionHeld != splitOptionHeld {
+            splitOptionHeld = optionHeld
+            needsDisplay = true
+            updateHoverCallback()
+        }
+        super.flagsChanged(with: event)
     }
 
     // MARK: - Ruler scrub (click/drag on the ruler moves the playhead; SPEC §7.2 "Navigation")
@@ -634,34 +1180,337 @@ final class TimelineView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let p = convert(event.locationInWindow, from: nil)
+        // SPEC §7.2 hit-test table: "Anything, in Split mode | blade ✂ line | click = split" — this
+        // overrides the normal per-lane hit-test dispatch below.
+        if isSplitMode {
+            hoverX = p.x
+            if let t = bladeOutputTime() { performSplit(atOutput: t) }
+            return
+        }
         let hit = hitTest(at: p)
         switch hit {
         case .playhead, .ruler:
             dragKind = .scrub
             scrub(toViewX: p.x)
-        case .clipBody(let i), .clipEdge(let i, _):
-            // T-406 is hit-testing + selection only; the edge drag itself (trim) is T-408's job.
+        case .clipEdge(let i, let edge):
+            beginTrim(index: i, edge: edge)
+        case .clipBody(let i):
             selectClip(i)
-        case .blockBody(let id), .blockEdge(let id, _):
-            // The body/edge drag itself (move/resize) is T-409's job.
-            selectBlock(id, addToSelection: event.modifierFlags.contains(.shift))
-        case .cutBubble, .emptyLane:
-            // Restoring a cut (T-408) and adding a block (T-409) aren't wired yet; a click here
-            // still counts as "empty space" for deselection purposes.
-            deselect()
+        case .blockBody(let id):
+            // SPEC §7.2 "Zoom blocks": "Double-click = select + move playhead to its start."
+            if event.clickCount >= 2, lane(ofBlock: id) == .zoom {
+                doubleClickZoom(id: id)
+            } else if lane(ofBlock: id) == .zoom {
+                beginMoveZoom(id: id, atViewX: p.x)
+            } else {
+                selectBlock(id, addToSelection: event.modifierFlags.contains(.shift))
+            }
+        case .blockEdge(let id, let edge):
+            if lane(ofBlock: id) == .zoom {
+                beginResizeZoom(id: id, edge: edge)
+            } else {
+                selectBlock(id, addToSelection: event.modifierFlags.contains(.shift))
+            }
+        case .cutBubble(let afterClip):
+            showRestorePopover(afterClip: afterClip, at: p)
+        case .emptyLane(let lane, let source):
+            if lane == .zoom {
+                addZoom(atSource: source)
+            } else {
+                // Layout/mask lanes don't add-on-click yet (T-503/T-601); still "empty space".
+                deselect()
+            }
         case .none:
             deselect()
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard dragKind == .scrub else { return }
-        scrub(toViewX: convert(event.locationInWindow, from: nil).x)
+        let p = convert(event.locationInWindow, from: nil)
+        // The event in hand (not the live hardware state `NSEvent.modifierFlags` — that's for
+        // idle/draw-time checks like the split blade, which has no event) is what "⌘ held disables
+        // snapping" (SPEC §7.2 "Snapping") means during an actual drag.
+        let snapDisabled = event.modifierFlags.contains(.command)
+        switch dragKind {
+        case .scrub:
+            scrub(toViewX: p.x)
+        case .trimClip(let index, let edge, let priorOutput, let beginStart, let beginEnd, let speed):
+            updateTrim(index: index, edge: edge, priorOutput: priorOutput, beginSourceStart: beginStart,
+                       beginSourceEnd: beginEnd, speed: speed, viewX: p.x, snapDisabled: snapDisabled)
+        case .moveZoom(let id, let grabOffset):
+            updateMoveZoom(id: id, grabOffset: grabOffset, viewX: p.x, snapDisabled: snapDisabled)
+        case .resizeZoom(let id, let edge):
+            updateResizeZoom(id: id, edge: edge, viewX: p.x, snapDisabled: snapDisabled)
+        case nil:
+            break
+        }
     }
 
-    override func mouseUp(with event: NSEvent) { dragKind = nil }
+    override func mouseUp(with event: NSEvent) {
+        switch dragKind {
+        case .trimClip:
+            model?.commitGesture("Trim")
+        case .moveZoom:
+            model?.commitGesture("Move Zoom")
+        case .resizeZoom:
+            model?.commitGesture("Resize Zoom")
+        case .scrub, nil:
+            dragKind = nil
+            return
+        }
+        trimChip = nil
+        snapGuideX = nil
+        onHoverTime?(nil)
+        dragKind = nil
+        needsDisplay = true
+    }
 
-    override func cancelOperation(_ sender: Any?) { deselect() }
+    /// SPEC §7.3: "Esc: cancel drag → exit split mode → deselect", checked in that order.
+    /// AC-TL-6: `Esc` mid-drag restores the pre-drag project.
+    override func cancelOperation(_ sender: Any?) {
+        if dragKind != nil { cancelActiveDrag(); return }
+        if isSplitMode { exitSplitMode(); return }
+        deselect()
+    }
+
+    private func cancelActiveDrag() {
+        switch dragKind {
+        case .trimClip, .moveZoom, .resizeZoom:
+            model?.cancelGesture()
+        case .scrub, nil:
+            dragKind = nil
+            needsDisplay = true
+            return
+        }
+        trimChip = nil
+        snapGuideX = nil
+        onHoverTime?(nil)
+        dragKind = nil
+        needsDisplay = true
+    }
+
+    // MARK: - Trim (SPEC §7.2 "Trim")
+
+    private func beginTrim(index: Int, edge: RecorderCore.Edge) {
+        guard let model, model.project.clips.indices.contains(index) else { return }
+        let clip = model.project.clips[index]
+        var priorOutput = 0.0
+        for c in model.project.clips[0..<index] { priorOutput += c.outputDuration }
+        model.beginGesture()
+        dragKind = .trimClip(index: index, edge: edge, priorOutput: priorOutput,
+                              beginSourceStart: clip.sourceStart, beginSourceEnd: clip.sourceEnd, speed: clip.speed)
+        selectClip(index)
+    }
+
+    /// Maps the mouse's output-time position to a target source time via the clip's *pre-drag*
+    /// start/leading-edge/speed (fixed for the whole gesture — see `DragKind.trimClip`'s doc) and
+    /// calls `trimClip`, which itself clamps against the neighbour, `[0, source.duration]` and the
+    /// minimum length. One routine for either edge: `TimeMap`'s own per-clip formula, extrapolated.
+    private func updateTrim(index: Int, edge: RecorderCore.Edge, priorOutput: Double, beginSourceStart: Double,
+                             beginSourceEnd: Double, speed: Double, viewX: CGFloat, snapDisabled: Bool) {
+        guard let model else { return }
+        let raw = geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0)))
+        let (snapped, didSnap) = snappedOutput(raw, disabled: snapDisabled)
+        snapGuideX = didSnap ? x(forOutput: snapped) : nil
+        let target = beginSourceStart + (snapped - priorOutput) * speed
+        model.update { $0.trimClip(index, edge: edge, toSource: target) }
+
+        guard model.project.clips.indices.contains(index) else { return }
+        let newDuration = model.project.clips[index].outputDuration
+        let beginDuration = (beginSourceEnd - beginSourceStart) / speed
+        let edgeOutput = edge == .leading ? priorOutput : priorOutput + newDuration
+        trimChip = (x: x(forOutput: edgeOutput), text: trimChipText(duration: newDuration, delta: newDuration - beginDuration))
+        onHoverTime?(edgeOutput) // "preview shows the frame at the edge" (SPEC §7.2 "Trim")
+        needsDisplay = true
+    }
+
+    private func trimChipText(duration: Double, delta: Double) -> String {
+        let sign = delta < 0 ? "\u{2212}" : "+"
+        return "\(playheadLabel(duration)) (\u{0394} \(sign)\(playheadLabel(abs(delta))))"
+    }
+
+    // MARK: - Zoom blocks (SPEC §7.2 "Zoom blocks")
+
+    /// `.auto` if a left-click event lies within ±1 s of `s`, else `.manual`.
+    private func zoomMode(nearSource s: Double) -> Zoom.Mode {
+        (model?.events.clicks().contains { abs($0.t - s) <= 1 } ?? false) ? .auto : .manual
+    }
+
+    /// Empty-lane click / `Z`: adds a zoom and selects it. One undo step.
+    private func addZoom(atSource s: Double) {
+        guard let model else { return }
+        var newID: UUID?
+        model.edit("Add Zoom") { newID = $0.addZoom(atSource: s, mode: zoomMode(nearSource: s)) }
+        if let newID { selectBlock(newID, addToSelection: false) }
+    }
+
+    /// `Z` adds at the playhead (SPEC §7.3).
+    private func addZoom(atOutput t: Double) {
+        guard let model else { return }
+        addZoom(atSource: model.timeMap.sourceTime(atOutput: t))
+    }
+
+    /// `⌘D` duplicates the selected zoom/mask right after itself (SPEC §7.3).
+    private func duplicateSelection() {
+        guard let model, let id = model.selection.first else { return }
+        var newID: UUID?
+        model.edit("Duplicate") { newID = $0.duplicateBlock(id) }
+        if let newID { selectBlock(newID, addToSelection: false) }
+    }
+
+    /// "Double-click = select + move playhead to its start."
+    private func doubleClickZoom(id: UUID) {
+        guard let model, let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }),
+              let out = model.timeMap.outputTime(atSource: zoom.start) else { return }
+        selectBlock(id, addToSelection: false)
+        model.playhead = out
+    }
+
+    private func beginMoveZoom(id: UUID, atViewX viewX: CGFloat) {
+        guard let model, let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }) else { return }
+        let mouseSource = model.timeMap.sourceTime(atOutput: geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0))))
+        model.beginGesture()
+        dragKind = .moveZoom(id: id, grabOffset: mouseSource - zoom.start)
+        selectBlock(id, addToSelection: false)
+    }
+
+    /// Zoom blocks live in *source* time but `clips` never changes under this drag, so (unlike a
+    /// clip trim) `model.timeMap` is stable for its whole duration and can convert output→source
+    /// directly — no fixed-anchor extrapolation needed.
+    private func updateMoveZoom(id: UUID, grabOffset: Double, viewX: CGFloat, snapDisabled: Bool) {
+        guard let model else { return }
+        let raw = geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0)))
+        let (snapped, didSnap) = snappedOutput(raw, excludingBlock: id, disabled: snapDisabled)
+        snapGuideX = didSnap ? x(forOutput: snapped) : nil
+        let mouseSource = model.timeMap.sourceTime(atOutput: snapped)
+        model.update { $0.moveZoom(id, toStart: mouseSource - grabOffset) }
+        needsDisplay = true
+    }
+
+    private func beginResizeZoom(id: UUID, edge: RecorderCore.Edge) {
+        guard let model, model.project.zooms.contains(where: { $0.id == id.uuidString }) else { return }
+        model.beginGesture()
+        dragKind = .resizeZoom(id: id, edge: edge)
+        selectBlock(id, addToSelection: false)
+    }
+
+    private func updateResizeZoom(id: UUID, edge: RecorderCore.Edge, viewX: CGFloat, snapDisabled: Bool) {
+        guard let model else { return }
+        let raw = geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0)))
+        let (snapped, didSnap) = snappedOutput(raw, excludingBlock: id, disabled: snapDisabled)
+        snapGuideX = didSnap ? x(forOutput: snapped) : nil
+        let source = model.timeMap.sourceTime(atOutput: snapped) // read before `update`'s exclusive `inout` access to `project`
+        model.update { $0.resizeZoom(id, edge: edge, to: source) }
+        needsDisplay = true
+    }
+
+    /// "Empty zoom lane: ghost block under pointer" (SPEC §7.1/§7.2) — the exact placement
+    /// `addZoom` would use, via the non-mutating preview so the two never disagree.
+    private func drawZoomGhost() {
+        guard dragKind == nil, !isSplitMode, let model, let hoverX, let hoverY, hoverX > Self.gutter else { return }
+        let row = laneRow(.zoom)
+        guard hoverY >= row.minY, hoverY <= row.maxY else { return }
+        let s = model.timeMap.sourceTime(atOutput: geometry.output(forX: geometryX(NSPoint(x: hoverX, y: 0))))
+        guard model.timeMap.outputTime(atSource: s) != nil else { return } // hovering a removed segment: no gap to add into
+        guard let placement = model.project.previewZoomPlacement(atSource: s),
+              let outStart = model.timeMap.outputTime(atSource: placement.start),
+              let outEnd = model.timeMap.outputTime(atSource: placement.end) else { return }
+        let rect = CGRect(x: x(forOutput: outStart), y: row.minY + 2, width: max(0, x(forOutput: outEnd) - x(forOutput: outStart)), height: row.height - 4)
+        guard rect.width > 0.5 else { return }
+        let path = NSBezierPath(roundedRect: rect, xRadius: Self.blockRadius, yRadius: Self.blockRadius)
+        Theme.accent.withAlphaComponent(0.4).setFill() // "hatched 40% opacity" (SPEC §7.1)
+        path.fill()
+        let dashed = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: Self.blockRadius, yRadius: Self.blockRadius)
+        dashed.setLineDash([3, 2], count: 2, phase: 0)
+        Theme.accent.setStroke()
+        dashed.stroke()
+
+        guard rect.width > 24 else { return }
+        let label = "\u{1F50D} + add" as NSString // SPEC §7.1: "🔍 + add ← ghost on hover"
+        let attrs: [NSAttributedString.Key: Any] = [.font: Theme.captionFont, .foregroundColor: Theme.textPrimary.withAlphaComponent(0.8)]
+        let size = label.size(withAttributes: attrs)
+        label.draw(at: CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attrs)
+    }
+
+    /// "left-click times from `events` (draw them as 1×4 pt ticks in the zoom lane)" (SPEC §7.2 "Snapping").
+    private func drawClickTicks(_ project: Project, _ timeMap: TimeMap) {
+        guard let model else { return }
+        let row = laneRow(.zoom)
+        Theme.textPrimary.withAlphaComponent(0.4).setFill()
+        for click in model.events.clicks() {
+            guard let out = timeMap.outputTime(atSource: click.t) else { continue }
+            let px = x(forOutput: out)
+            NSRect(x: px - 0.5, y: row.maxY - 4, width: 1, height: 4).fill()
+        }
+    }
+
+    // MARK: - Zoom context menu (SPEC §7.2 "Zoom blocks": "Right-click ▸ Disable/Enable · Instant · Remove")
+
+    private func zoomContextMenu(id: UUID) -> NSMenu? {
+        guard let model, let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }) else { return nil }
+        selectBlock(id, addToSelection: false)
+        let menu = NSMenu()
+        menu.addItem(actionItem(zoom.enabled ? "Disable" : "Enable", action: #selector(menuToggleZoomEnabled(_:)), represented: id))
+        let instant = actionItem("Instant", action: #selector(menuToggleZoomInstant(_:)), represented: id)
+        instant.state = zoom.instant ? .on : .off
+        menu.addItem(instant)
+        menu.addItem(.separator())
+        menu.addItem(actionItem("Remove", action: #selector(menuRemoveBlock(_:)), represented: id))
+        return menu
+    }
+
+    @objc private func menuToggleZoomEnabled(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        model?.edit("Toggle Zoom") { project in
+            if let i = project.zooms.firstIndex(where: { $0.id == id.uuidString }) { project.zooms[i].enabled.toggle() }
+        }
+    }
+
+    @objc private func menuToggleZoomInstant(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        model?.edit("Toggle Instant") { project in
+            if let i = project.zooms.firstIndex(where: { $0.id == id.uuidString }) { project.zooms[i].instant.toggle() }
+        }
+    }
+
+    @objc private func menuRemoveBlock(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        model?.edit("Remove") { $0.removeBlock(id) }
+    }
+
+    // MARK: - Restore (SPEC §7.2 "Restore")
+
+    /// The removed source duration at seam `afterClip` (`-1` = the head), for the popover's text.
+    private func removedDuration(afterClip i: Int, project: Project) -> Double {
+        let clips = project.clips
+        guard !clips.isEmpty else { return 0 }
+        if i == -1 { return clips[0].sourceStart }
+        if i == clips.count - 1 { return project.source.duration - clips[i].sourceEnd }
+        guard clips.indices.contains(i), clips.indices.contains(i + 1) else { return 0 }
+        return clips[i + 1].sourceStart - clips[i].sourceEnd
+    }
+
+    /// One undo step (SPEC §7.4 `restoreCut`, already clamped/merging there).
+    func restoreCut(afterClip i: Int) {
+        model?.edit("Restore") { $0.restoreCut(afterClip: i) }
+    }
+
+    /// `NSPopover` "Restore 00:05.80 removed here [Restore]" (SPEC §7.2).
+    private func showRestorePopover(afterClip i: Int, at p: NSPoint) {
+        guard let model else { return }
+        let removed = removedDuration(afterClip: i, project: model.project)
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: RestorePopoverView(
+            text: "Restore \(playheadLabel(removed)) removed here",
+            action: { [weak self, weak popover] in
+                self?.restoreCut(afterClip: i)
+                popover?.performClose(nil)
+            }))
+        let seamX = cutBubbleSeams(model.project).first { $0.afterClip == i }?.outputX ?? p.x
+        let bandTop = laneRow(.clip).minY - 8
+        popover.show(relativeTo: CGRect(x: seamX - 6, y: bandTop, width: 12, height: 8), of: self, preferredEdge: .maxY)
+    }
 
     private func scrub(toViewX viewX: CGFloat) {
         guard let model else { return }
@@ -682,37 +1531,58 @@ final class TimelineView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         hoverX = p.x
-        cursor(for: hitTest(at: p)).set()
+        hoverY = p.y
+        (isSplitMode ? NSCursor.crosshair : cursor(for: hitTest(at: p))).set()
+        updateHoverCallback()
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
         hoverX = nil
+        hoverY = nil
         NSCursor.arrow.set()
+        onHoverTime?(nil)
         needsDisplay = true
     }
 }
 
-/// SPEC §7.1's 32 pt toolbar row above the ruler: just the Fit button and zoom slider that T-405
-/// drives (`TimelineView.fit()`/`setZoom(sliderValue:)`). The split/zoom/undo/redo buttons belong
-/// to whichever task implements those actions (T-407, T-409, already-wired undo/redo menu items).
+/// SPEC §7.2 "Restore": `Restore 00:05.80 removed here [Restore]`.
+private struct RestorePopoverView: View {
+    let text: String
+    let action: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(text).font(.callout)
+            Button("Restore", action: action)
+        }
+        .padding(12)
+    }
+}
+
+/// SPEC §7.1's 32 pt toolbar row above the ruler: the ✂ Split button (T-407), Fit button and zoom
+/// slider (T-405) that drive `TimelineView`. The zoom/undo/redo buttons belong to whichever task
+/// implements those actions (T-409, already-wired undo/redo menu items).
 final class TimelineToolbar: NSView {
     weak var timelineView: TimelineView? {
         didSet { syncSlider() }
     }
 
+    private let splitButton = NSButton(title: "\u{2702} Split", target: nil, action: nil)
     private let fitButton = NSButton(title: "Fit", target: nil, action: nil)
     private let slider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        splitButton.bezelStyle = .rounded
+        splitButton.target = self
+        splitButton.action = #selector(splitTapped)
         fitButton.bezelStyle = .rounded
         fitButton.target = self
         fitButton.action = #selector(fitTapped)
         slider.target = self
         slider.action = #selector(sliderChanged)
 
-        let stack = NSStackView(views: [fitButton, slider])
+        let stack = NSStackView(views: [splitButton, fitButton, slider])
         stack.orientation = .horizontal
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -729,6 +1599,11 @@ final class TimelineToolbar: NSView {
     func syncSlider() {
         guard let timelineView else { return }
         slider.doubleValue = timelineView.zoomSliderValue
+    }
+
+    @objc private func splitTapped() {
+        timelineView?.toggleSplitModeSticky()
+        timelineView?.window?.makeFirstResponder(timelineView)
     }
 
     @objc private func fitTapped() {
