@@ -23,6 +23,7 @@ private struct Uniforms {
     var shadowAlpha: Float = 0
     var shadowBlur: Float = 1
     var gradientAngle: Float = 0
+    var globalAlpha: Float = 1
     var mode: Int32 = 0
     var rotation: Float = 0
 }
@@ -120,27 +121,46 @@ final class Compositor {
         // Pass 1: background.
         drawBackground(s.project.background, outputSize: s.outputSize, encoder: encoder)
 
+        // T-503: the active layout block (if any) and its 0…1 cross-fade amount at this instant —
+        // `cameraFull` fades the screen out as the camera grows to fill the canvas, `hidden` fades
+        // the camera bubble out (screen unaffected). Gaps between blocks ⇒ `kind == nil`, amount 0.
+        let (layoutKind, layoutAmount) = (s.layoutKind, s.layoutAmount)
+        let screenAlpha = layoutKind == .cameraFull ? 1 - layoutAmount : 1
+
         // Pass 2: screen (rounded rect + shadow + crop/zoom UV + motion blur, SPEC §6.2 pass 2,
         // T-501). Pass 3 (cursor) shares the same content rect + crop/zoom UV mapping so it lands
         // in "screen space" and zooms with the content (SPEC §6.2 pass 3, T-413).
-        if let screen = s.screen {
+        if let screen = s.screen, screenAlpha > 0 {
             let rectPx = screenRect(output: s.outputSize, cropAspect: cropAspect(s.project), padding: s.project.frame.padding)
             let contentUV = cropUV(s.project.crop, view: s.view)
             let prevContentUV = motionBlurContentUV(project: s.project, view: s.view, prevView: s.prevView, contentUV: contentUV, rectPx: rectPx)
-            drawScreen(screen, project: s.project, rectPx: rectPx, contentUV: contentUV, prevContentUV: prevContentUV, outputSize: s.outputSize, encoder: encoder)
+            drawScreen(screen, project: s.project, rectPx: rectPx, contentUV: contentUV, prevContentUV: prevContentUV,
+                       alpha: screenAlpha, outputSize: s.outputSize, encoder: encoder)
             if let cursor = s.cursor, cursor.alpha > 0 {
-                drawCursor(cursor, project: s.project, rectPx: rectPx, contentUV: contentUV, outputSize: s.outputSize, encoder: encoder)
+                drawCursor(cursor, project: s.project, rectPx: rectPx, contentUV: contentUV,
+                           alphaMultiplier: screenAlpha, outputSize: s.outputSize, encoder: encoder)
             }
         }
 
         // Pass 4: camera (rounded-rect SDF quad, SPEC §6.2 pass 4, §6.6 Camera, T-502) — bubble in
-        // its corner. Cross-fading it with a Layout block lands with T-503.
+        // its corner, or cross-faded into a full-canvas quad while a `cameraFull` layout is active.
         if let camera = s.camera {
-            let rectPx = Self.cameraBubbleRect(project: s.project, outputSize: s.outputSize, viewScale: s.view.scale)
-            drawCamera(camera, project: s.project, rectPx: rectPx, outputSize: s.outputSize, encoder: encoder)
+            let cameraAlpha = layoutKind == .hidden ? 1 - layoutAmount : 1
+            if cameraAlpha > 0 {
+                let bubble = Self.cameraBubbleRect(project: s.project, outputSize: s.outputSize, viewScale: s.view.scale)
+                let full = CGRect(origin: .zero, size: s.outputSize)
+                let t = layoutKind == .cameraFull ? layoutAmount : 0
+                let rectPx = Self.lerp(bubble, full, t)
+                drawCamera(camera, project: s.project, rectPx: rectPx, alpha: cameraAlpha, outputSize: s.outputSize, encoder: encoder)
+            }
         }
 
         encoder.endEncoding()
+    }
+
+    private static func lerp(_ a: CGRect, _ b: CGRect, _ t: Double) -> CGRect {
+        CGRect(x: a.minX + (b.minX - a.minX) * t, y: a.minY + (b.minY - a.minY) * t,
+               width: a.width + (b.width - a.width) * t, height: a.height + (b.height - a.height) * t)
     }
 
     // MARK: - Pass 1: background
@@ -201,7 +221,7 @@ final class Compositor {
     /// shadow — computed by the fragment shader's SDF, offset to the content rect — can bleed
     /// outward into the padding (SPEC §6.2 pass 2: "quad is enlarged by blurPx"; a full-canvas
     /// quad is the simplest way to give it room on every side without a second uniform set).
-    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, prevContentUV: SIMD4<Float>, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, prevContentUV: SIMD4<Float>, alpha: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         var u = Uniforms()
         u.rectNDC = SIMD4(-1, 1, 1, -1)
         u.uvRect = extrapolatedUV(contentUV, contentRect: rectPx, to: outputSize)
@@ -212,6 +232,7 @@ final class Compositor {
         u.radius = Float(project.frame.cornerRadius * min(rectPx.width, rectPx.height))
         u.shadowAlpha = Float(project.frame.shadow)
         u.shadowBlur = Float(0.04 * min(outputSize.width, outputSize.height))
+        u.globalAlpha = Float(alpha)
         u.mode = texture.chroma != nil ? 4 : 3   // biplanar YCbCr (real capture) vs already-RGB (fixtures)
         encoder.setFragmentTexture(texture.luma, index: 0)
         encoder.setFragmentTexture(texture.chroma ?? dummyTexture, index: 1)
@@ -248,7 +269,7 @@ final class Compositor {
     /// image's own point size (`hotX/hotY/scale` from `cursors/<id>.json`) × `cursor.size` ×
     /// output-pixels-per-source-pixel (crop + zoom combined) × `clickScale`; offset by the hotspot
     /// so the recorded point lands under the hotspot, not the image's centre.
-    private func drawCursor(_ cursor: CursorSample, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawCursor(_ cursor: CursorSample, project: Project, rectPx: CGRect, contentUV: SIMD4<Float>, alphaMultiplier: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         guard let image = cursorImage(id: cursor.imageID) else { return }
         let u0 = Double(contentUV.x), v0 = Double(contentUV.y), u1 = Double(contentUV.z), v1 = Double(contentUV.w)
         guard u1 > u0, v1 > v0 else { return }
@@ -288,7 +309,7 @@ final class Compositor {
         u.prevContentOffset = motionBlurCursorOffset(project: project, current: u.contentOffset,
                                                        currentCenter: (centerX, centerY), prevCenter: (prevCenterX, prevCenterY),
                                                        outputSize: outputSize)
-        u.color = SIMD4(0, 0, 0, Float(cursor.alpha))
+        u.color = SIMD4(0, 0, 0, Float(cursor.alpha * alphaMultiplier))
         u.rotation = Float(cursor.rotation * .pi / 180)
         u.mode = 5
         encoder.setFragmentTexture(image.texture, index: 0)
@@ -339,7 +360,7 @@ final class Compositor {
     /// pass) — square-cropped ("cover") from the camera's own aspect, mirrored when `camera.mirror`.
     /// No motion blur (SPEC §6.2 only asks for it on the screen/cursor passes): `prevUvRect ==
     /// uvRect` so the shared shader's tap loop is a no-op average.
-    private func drawCamera(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawCamera(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, alpha: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         var u = Uniforms()
         u.rectNDC = SIMD4(-1, 1, 1, -1)
         let contentUV = cameraContentUV(texture: texture, mirror: project.camera.mirror)
@@ -351,6 +372,7 @@ final class Compositor {
         u.radius = Float(project.camera.roundness * min(rectPx.width, rectPx.height) / 2)
         u.shadowAlpha = Float(project.camera.shadow)
         u.shadowBlur = Float(0.04 * min(outputSize.width, outputSize.height))
+        u.globalAlpha = Float(alpha)
         u.mode = texture.chroma != nil ? 4 : 3
         encoder.setFragmentTexture(texture.luma, index: 0)
         encoder.setFragmentTexture(texture.chroma ?? dummyTexture, index: 1)

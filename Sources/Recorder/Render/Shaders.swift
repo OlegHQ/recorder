@@ -8,17 +8,18 @@ import Foundation
 //   0 = flat colour
 //   1 = 2-stop linear gradient (`color` → `color2`, `gradientAngle` radians)
 //   2 = plain texture sample (wallpaper / image backgrounds)
-//   3 = rounded-rect texture with soft shadow (the "screen" quad, RGB source) — analytic SDF, no
-//       blur pass: `d = length(max(abs(p) - halfSize + r, 0)) - r`; fill alpha =
+//   3 = rounded-rect texture with soft shadow (the "screen"/"camera" quad, RGB source) — analytic
+//       SDF, no blur pass: `d = length(max(abs(p) - halfSize + r, 0)) - r`; fill alpha =
 //       `1 - smoothstep(-1, 1, d)`; shadow alpha = `shadowAlpha * (1 - smoothstep(0, shadowBlur, d))`.
 //       Motion blur (T-501, SPEC §6.2 pass 2): averages N=8 texture taps along `uv → prevUv`
 //       (`prevUvRect`, interpolated the same way `uvRect` is — an affine remap of the crop/zoom UV,
 //       so the per-fragment delta already varies correctly with a zoom's radial expansion); when
 //       there's no blur `prevUvRect == uvRect` so every tap samples the same point (a harmless
-//       no-op average, not worth branching around).
+//       no-op average, not worth branching around). Final alpha × `globalAlpha` (T-503: the active
+//       Layout block's 0…1 cross-fade amount — 1 outside any block).
 //   4 = same rounded-rect + shadow + blur as mode 3, but the source is biplanar 4:2:0 YCbCr (real
-//       capture output — `texture(0)` luma, `texture(1)` chroma) converted to RGB after blurring
-//       each plane (BT.709, video range).
+//       capture/camera output — `texture(0)` luma, `texture(1)` chroma) converted to RGB after
+//       blurring each plane (BT.709, video range).
 //   5 = the cursor quad (SPEC §6.2 pass 3, T-413): straight-alpha RGBA texture, rotated `rotation`
 //       radians about the quad centre (`contentOffset`/`contentSize`, same fields pass 3/4 use for
 //       their SDF) — sampled in the quad's own unrotated local space, alpha multiplied by `color.a`.
@@ -44,6 +45,7 @@ struct Uniforms {
     float shadowAlpha;
     float shadowBlur;      // pixels
     float gradientAngle;   // radians
+    float globalAlpha;     // mode 3/4: layout cross-fade (T-503), multiplies the final alpha
     int mode;
     float rotation;        // mode 5: radians, about the quad centre
 };
@@ -111,7 +113,9 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
             float2 uvTap = mix(in.prevUv, in.uv, float(i) / 7.0);
             sum += tex.sample(smp, uvTap);
         }
-        return roundedRectShadow(in.localPos, u, sum / 8.0);
+        float4 result = roundedRectShadow(in.localPos, u, sum / 8.0);
+        result.a *= u.globalAlpha;
+        return result;
     } else if (u.mode == 4) {
         float4 ySum = float4(0.0);
         float4 cSum = float4(0.0);
@@ -121,7 +125,9 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
             cSum += texChroma.sample(smp, uvTap);
         }
         float3 rgb = ycbcr709VideoToRGB((ySum / 8.0).r, (cSum / 8.0).rg);
-        return roundedRectShadow(in.localPos, u, float4(rgb, 1.0));
+        float4 result = roundedRectShadow(in.localPos, u, float4(rgb, 1.0));
+        result.a *= u.globalAlpha;
+        return result;
     } else {
         // Mode 5: cursor quad — N taps translated between prevContentOffset and contentOffset
         // (motion blur trail), each rotated back into its own local space and bounds-checked.
