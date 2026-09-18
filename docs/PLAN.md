@@ -137,10 +137,11 @@ Update the "Done" column whenever you tick a task.
   ```
   - Selftest `permissions`: prints both booleans, always OK. Verify: run it.
 
-- [ ] **T-102 Onboarding window** · SPEC §4.1 mockup
+- [~] **T-102 Onboarding window** · SPEC §4.1 mockup
   - File: `Sources/Recorder/App/OnboardingView.swift` (SwiftUI) — shown by AppDelegate in a 660×470 non-resizable `NSWindow` when `!Permissions.allGranted`.
   - Do: two rows + Continue, as the mockup. `Timer.publish(every: 1)` re-reads `Permissions`. Relaunch button (only if screen was just requested and still false after 5 s): `Process` launch `open -n <bundlePath>` then `NSApp.terminate`.
   - HUMAN: grant both permissions to `/Applications/Recorder.app` after `make install`; confirm AC-ONB-1/2/3.
+  - WAITING ON HUMAN: run `make install`, grant Screen Recording and Accessibility to `/Applications/Recorder.app` in System Settings, then confirm AC-ONB-1 (window appears fresh / doesn't when both granted), AC-ONB-2 (rows flip within 2 s, Relaunch button appears/works if needed), AC-ONB-3 (Continue disabled until both granted).
 
 - [ ] **T-103 Floating panel base**
   - File: `Sources/Recorder/Recording/FloatingPanel.swift`
@@ -585,3 +586,4 @@ T-001 · 2026-09-18 · verified: user clicked Always Allow; `codesign --sign "Re
 T-003 · 2026-09-18 · HUMAN confirmed: user ran the app, menu bar is fine · deviations: none
 T-006 · 2026-09-18 · verified: `make test FILTER=eventLog` passes 1/1 (`eventLogRoundTrip`, exercises encode/decode round trip plus `moves()` incl. drag and `clicks()` filtered to left `.down`); `make test` passes 5/5; `make build` succeeds · deviations: none
 T-101 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `build/Recorder.app/Contents/MacOS/Recorder --selftest permissions` prints `screen=false accessibility=false` then `SELFTEST permissions OK`, exit 0; `make test` passes 5/5 · deviations: registered the `permissions` case directly in `SelfTest.swift`'s `cases` dictionary literal (same place `metal` was registered by T-004) rather than adding a second registration mechanism
+T-102 · 2026-09-18 · verified: `make app` builds and signs with `Recorder Dev`; `make test` passes 5/5; launched `build/Recorder.app/Contents/MacOS/Recorder` in the background, alive after 3 s with no crash output, killed cleanly · deviations: AppDelegate's skeleton placeholder window replaced with a conditional show of `OnboardingView` only when `!Permissions.allGranted`; when all granted nothing is shown yet (toolbar arrives in T-104), per task instruction. HUMAN verification of AC-ONB-1/2/3 (needs real TCC grants via `make install`) not yet done — task marked `[~]`.

@@ -12,13 +12,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = Self.buildMainMenu()
         statusItem = Self.buildStatusItem()
 
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
-                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        if !Permissions.allGranted {
+            showOnboarding()
+        }
+        // else: nothing yet — the toolbar (T-104) takes over here.
+
+        NSApp.activate()
+    }
+
+    private func showOnboarding() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 470),
+                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Recorder"
-        window.contentView = NSHostingView(rootView: Text("Recorder").font(.largeTitle).frame(maxWidth: .infinity, maxHeight: .infinity))
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: OnboardingView { [weak self] in
+            self?.window.close()
+        })
         window.center()
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { false }
