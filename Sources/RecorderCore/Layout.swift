@@ -51,13 +51,13 @@ public func outputSize(aspect: Output.Aspect, croppedSource: CGSize, longEdge: I
 /// and its 0…1 blend amount, cross-fading over `fade` seconds at each block edge (gaps between
 /// blocks = the default layout, i.e. `nil`/`0`). `Spring.focused.value(at:)` shapes the ramp,
 /// normalised over the fade window so it lands exactly on 0 at the edge and 1 once `fade` seconds
-/// in. For blocks shorter than `2 · fade` the in/out ramps overlap (`min`), so the amount never
-/// reaches 1 but stays continuous and symmetric. Pure lookup: the result doesn't depend on
+/// in. For short blocks the fade is capped at half the duration, so the target is reached. Pure lookup: the result doesn't depend on
 /// `layouts`' array order.
-public func layoutMix(layouts: [Layout], atSource t: Double, fade: Double = 0.3) -> (kind: Layout.Kind?, amount: Double) {
+public func layoutMix(layouts: [Layout], atSource t: Double, fade: Double? = nil) -> (kind: Layout.Kind?, amount: Double) {
     guard let active = layouts.first(where: { t >= $0.start && t <= $0.end }) else { return (nil, 0) }
-    let rampIn = layoutFadeRamp(t - active.start, fade: fade)
-    let rampOut = layoutFadeRamp(active.end - t, fade: fade)
+    let duration = min(max(0, fade ?? active.transition), max(0, (active.end - active.start) / 2))
+    let rampIn = layoutFadeRamp(t - active.start, fade: duration)
+    let rampOut = layoutFadeRamp(active.end - t, fade: duration)
     return (active.kind, min(rampIn, rampOut))
 }
 
@@ -67,4 +67,74 @@ private func layoutFadeRamp(_ elapsed: Double, fade: Double) -> Double {
     guard elapsed > 0 else { return 0 }
     guard elapsed < fade else { return 1 }
     return Spring.focused.value(at: elapsed) / Spring.focused.value(at: fade)
+}
+
+/// Normalized position is the fraction of available travel, keeping the bubble inside the canvas.
+public func cameraOverlayRect(camera: Camera, output: CGSize, viewScale: Double = 1) -> CGRect {
+    let short = min(output.width, output.height)
+    let shrink = camera.shrinkWhenZoomed ? 1 - 0.3 * min(max(viewScale - 1, 0), 1) : 1
+    let side = min(max(camera.size, 0.1), 1) * short * shrink
+    let aspect = min(max(camera.aspect, 0.25), 4)
+    let width = aspect >= 1 ? side : side * aspect
+    let height = aspect >= 1 ? side / aspect : side
+    let margin = min(0.02 * short, max(0, (short - side) / 2))
+    let corner = camera.corner
+    let position = camera.position ?? NormPoint(
+        x: corner == .topLeft || corner == .bottomLeft ? 0 : 1,
+        y: corner == .topLeft || corner == .topRight ? 0 : 1)
+    return CGRect(x: margin + min(max(position.x, 0), 1) * max(0, output.width - 2 * margin - width),
+                  y: margin + min(max(position.y, 0), 1) * max(0, output.height - 2 * margin - height),
+                  width: width, height: height)
+}
+
+/// Shared by export, preview and mouse hit-testing; timeline blocks animate from/to the default bubble.
+public func cameraOverlayRect(project: Project, output: CGSize, atSource t: Double, viewScale: Double = 1) -> CGRect {
+    let base = cameraOverlayRect(camera: project.camera, output: output, viewScale: viewScale)
+    guard let block = project.layouts.first(where: { t >= $0.start && t <= $0.end }) else { return base }
+    let amount = layoutMix(layouts: project.layouts, atSource: t).amount
+    let target: CGRect
+    switch block.kind {
+    case .cameraFull: target = CGRect(origin: .zero, size: output)
+    case .hidden, .settings: target = base
+    case .bubble: target = cameraOverlayRect(camera: block.camera ?? project.camera, output: output, viewScale: viewScale)
+    }
+    return CGRect(x: base.minX + (target.minX - base.minX) * amount,
+                  y: base.minY + (target.minY - base.minY) * amount,
+                  width: base.width + (target.width - base.width) * amount,
+                  height: base.height + (target.height - base.height) * amount)
+}
+
+/// Centered cover crop, recalculated for the animated rectangle so faces never stretch.
+public func cameraCrop(source: CGSize, destination: CGSize) -> CGRect {
+    guard source.width > 0, source.height > 0, destination.width > 0, destination.height > 0 else {
+        return CGRect(x: 0, y: 0, width: 1, height: 1)
+    }
+    let ratio = (source.width / source.height) / (destination.width / destination.height)
+    let width = min(1, 1 / ratio), height = min(1, ratio)
+    return CGRect(x: (1 - width) / 2, y: (1 - height) / 2, width: width, height: height)
+}
+
+/// Settings clips use the same source-time ranges as camera layouts.
+public func overlayKeys(project: Project, atSource t: Double) -> (settings: Keys, opacity: Double) {
+    let base = project.keys
+    guard let block = project.layouts.first(where: { t >= $0.start && t <= $0.end }),
+          let target = block.keys else { return (base, base.show ? 1 : 0) }
+    let amount = layoutMix(layouts: project.layouts, atSource: t).amount
+    func mix(_ a: Double, _ b: Double) -> Double { a + (b - a) * amount }
+    var value = amount > 0 ? target : base
+    value.size = mix(base.size, target.size)
+    value.hold = mix(base.hold, target.hold)
+    value.position = NormPoint(x: mix(base.position.x, target.position.x), y: mix(base.position.y, target.position.y))
+    return (value, mix(base.show ? 1 : 0, target.show ? 1 : 0))
+}
+
+public func overlayCamera(project: Project, atSource t: Double) -> Camera {
+    var value = project.camera
+    guard let block = project.layouts.first(where: { t >= $0.start && t <= $0.end }),
+          block.kind == .bubble, let target = block.camera else { return value }
+    let amount = layoutMix(layouts: project.layouts, atSource: t).amount
+    value.roundness += (target.roundness - value.roundness) * amount
+    value.shadow += (target.shadow - value.shadow) * amount
+    if amount > 0 { value.mirror = target.mirror }
+    return value
 }

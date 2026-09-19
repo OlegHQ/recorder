@@ -31,6 +31,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     private let rootView: EditorRootView
     private var titleField: NSTextField!
     private var aspectPopUp: NSPopUpButton!
+    private var saveStatusButton: NSButton!
     // Typed handles onto the two swappable views above, kept alongside them so the menu actions
     // (T-311) below can reach real API (`InspectorView.init(initialTab:)`, `TimelineView.setZoom`)
     // instead of only the type-erased `NSView` the rest of the window plumbing needs.
@@ -129,8 +130,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     static func open(package: URL) -> EditorWindowController? {
         let key = package.standardizedFileURL
         if let existing = openWindows[key] {
-            existing.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate()
+            existing.focus()
             return existing
         }
         guard let project = try? Project.load(from: key.appendingPathComponent("project.json")) else { return nil }
@@ -138,8 +138,18 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let events = (try? JSONDecoder().decode(EventLog.self, from: Data(contentsOf: eventsURL))) ?? EventLog()
         let controller = EditorWindowController(packageURL: key, project: project, events: events)
         openWindows[key] = controller
-        NSApp.activate()
+        controller.focus()
         return controller
+    }
+
+    private func focus() {
+        // Activation-policy changes after Stop settle on the next run-loop turn.
+        DispatchQueue.main.async { [self] in
+            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            window?.deminiaturize(nil)
+            window?.makeKeyAndOrderFront(nil)
+            window?.makeFirstResponder(previewView)
+        }
     }
 
     /// Flushes every open editor's pending autosave (SPEC §5: "also on window close and
@@ -232,13 +242,37 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         // own control; the Export menu's items reach the same `exportTapped(_:)` through the
         // responder chain instead (`target = nil`, `AppDelegate.buildMainMenu`).
         let export = NSButton(title: "⬆ Export", target: self, action: #selector(exportTapped(_:)))
-        styleAsText(export)
+        export.bezelStyle = .rounded
+        export.controlSize = .large
+        export.isBordered = false
+        export.wantsLayer = true
+        export.layer?.backgroundColor = Theme.accent.cgColor
+        export.layer?.cornerRadius = 8
+        export.contentTintColor = .white
+        export.font = .systemFont(ofSize: 14, weight: .semibold)
+        export.widthAnchor.constraint(greaterThanOrEqualToConstant: 112).isActive = true
+        export.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
-        let stack = NSStackView(views: [back, title, aspect, crop, export])
+        let status = NSButton(title: model.saveStatus, target: self, action: #selector(saveDocument(_:)))
+        styleAsText(status)
+        status.font = .systemFont(ofSize: 11)
+        saveStatusButton = status
+        observeSaveStatus()
+        let stack = NSStackView(views: [back, title, status, aspect, crop, export])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 14
         return stack
+    }
+
+    private func observeSaveStatus() {
+        withObservationTracking {
+            saveStatusButton.title = model.saveStatus
+            saveStatusButton.contentTintColor = model.saveError == nil ? Theme.textSecondary : .systemRed
+            saveStatusButton.toolTip = model.saveError ?? "Changes save automatically. Click to save now."
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.observeSaveStatus() }
+        }
     }
 
     private func styleAsText(_ button: NSButton) {
@@ -406,7 +440,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     private static let aspectTitles: [(Output.Aspect, String)] = [
-        (.auto, "Auto"), (.r16x9, "16:9"), (.r9x16, "9:16"), (.r1x1, "1:1"), (.r4x3, "4:3"), (.r16x10, "16:10"),
+        (.auto, "Auto · Source"), (.r16x9, "16:9 · Full HD / YouTube"),
+        (.r9x16, "9:16 · Stories / Reels"), (.r1x1, "1:1 · Social / X (Twitter)"),
+        (.r4x3, "4:3 · Classic"), (.r16x10, "16:10 · Mac display"),
     ]
 
     // MARK: - Menu actions (T-311)

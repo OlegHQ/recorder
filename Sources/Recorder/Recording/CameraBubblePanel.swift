@@ -16,6 +16,11 @@ enum CameraBubblePanel {
         let view = BubbleView(previewLayer: previewLayer)
         view.onDragEnd = { snap() }
         let p = FloatingPanel(content: view, draggable: false)
+        // The camera supplies its own rounded shape; the HUD backing would fill its corners.
+        view.removeFromSuperview()
+        view.translatesAutoresizingMaskIntoConstraints = true
+        p.contentView = view
+        p.invalidateShadow()
         place(p, at: corner)
         p.orderFrontRegardless()
         panel = p
@@ -61,8 +66,10 @@ private let bubbleMargin: CGFloat = 24
 private final class BubbleView: NSView {
     var onDragEnd: (() -> Void)?
     private var dragStart: NSPoint?
+    private let previewLayer: AVCaptureVideoPreviewLayer
 
     init(previewLayer: AVCaptureVideoPreviewLayer) {
+        self.previewLayer = previewLayer
         super.init(frame: NSRect(x: 0, y: 0, width: bubbleSize, height: bubbleSize))
         wantsLayer = true
         previewLayer.frame = bounds
@@ -75,6 +82,11 @@ private final class BubbleView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        previewLayer.frame = bounds
+    }
 
     override var fittingSize: NSSize { NSSize(width: bubbleSize, height: bubbleSize) }
 

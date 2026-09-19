@@ -12,6 +12,7 @@ import RecorderCore
     var playhead: Double = 0            // OUTPUT seconds
     var isPlaying = false
     var selection: Set<UUID> = []       // zoom/layout/mask ids
+    var cameraInspectorRequested = false
     var selectedClip: Int?
     var timeMap: TimeMap { TimeMap(project.clips) }
 
@@ -38,6 +39,8 @@ import RecorderCore
 
     private var gestureSnapshot: Project?
     private var autosaveWork: DispatchWorkItem?
+    private(set) var saveStatus = "Saved"
+    private(set) var saveError: String?
 
     /// The name of the edit `undo()`/`redo()` would apply next, or `nil` if there is none.
     var undoName: String? { undoNames.last }
@@ -69,6 +72,8 @@ import RecorderCore
     /// For drags: begin → many `update` → commit | cancel. One undo step total. Paths rebuild once,
     /// at `commitGesture` — not per `update` call, which a drag can call dozens of times a second.
     func beginGesture() {
+        autosaveWork?.cancel()
+        autosaveWork = nil
         gestureSnapshot = project
     }
 
@@ -90,6 +95,7 @@ import RecorderCore
         guard let snapshot = gestureSnapshot else { return }
         project = snapshot
         gestureSnapshot = nil
+        scheduleAutosave()
     }
 
     func undo() {
@@ -115,7 +121,14 @@ import RecorderCore
     func saveNow() {
         autosaveWork?.cancel()
         autosaveWork = nil
-        try? project.save(to: packageURL.appendingPathComponent("project.json"))
+        do {
+            try project.save(to: packageURL.appendingPathComponent("project.json"))
+            saveStatus = "Saved"
+            saveError = nil
+        } catch {
+            saveStatus = "Save failed · Retry"
+            saveError = error.localizedDescription
+        }
     }
 
     /// Only `zooms`/`cursor`/`animation.screen`/`cursorHidden` feed `CursorPath`/`CameraPath`
@@ -142,6 +155,7 @@ import RecorderCore
     }
 
     private func scheduleAutosave() {
+        saveStatus = "Saving…"
         autosaveWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.saveNow() }
         autosaveWork = work

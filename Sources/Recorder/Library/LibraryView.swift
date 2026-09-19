@@ -169,7 +169,7 @@ struct LibraryView: View {
 /// Owns the library window and is the single chokepoint every project-open path routes through
 /// (double-click, Return, File ▸ Open…, `application(_:open:)`, ⇧⌘O).
 enum Library {
-    private static var window: NSWindow?
+    private(set) static var window: NSWindow?
 
     static func show() {
         if window == nil {

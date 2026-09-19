@@ -66,6 +66,7 @@ final class TimelineView: NSView {
     /// regardless of how it's trimmed (only clips *before* it determine that).
     private enum DragKind {
         case scrub
+        case createBlock(id: UUID, lane: Lane, anchor: Double)
         case trimClip(index: Int, edge: RecorderCore.Edge, priorOutput: Double, beginSourceStart: Double, beginSourceEnd: Double, speed: Double)
         // Zoom/layout/mask blocks are all stored in *source* time and `clips` never changes under
         // these two (unlike a clip trim), so `model.timeMap` — stable for the whole gesture — does
@@ -140,6 +141,7 @@ final class TimelineView: NSView {
         switch dragKind {
         case .none: return nil
         case .scrub: return "scrub"
+        case .createBlock: return "createBlock"
         case .trimClip: return "trimClip"
         case .moveBlock: return "moveBlock"
         case .resizeBlock: return "resizeBlock"
@@ -150,6 +152,7 @@ final class TimelineView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = Theme.bgPanel.cgColor
+        toolTip = "Drag across an empty lane to choose a zoom, mask, or layout range. Escape cancels."
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -229,7 +232,7 @@ final class TimelineView: NSView {
 
     // MARK: - Lane layout
 
-    private var hasLayoutLane: Bool { model?.project.source.hasCamera ?? false }
+    private var hasLayoutLane: Bool { model != nil }
 
     private func laneHeight(_ lane: Lane) -> CGFloat {
         switch lane {
@@ -489,7 +492,7 @@ final class TimelineView: NSView {
         let row = laneRow(.layout)
         let selection = model?.selection ?? []
         for layout in project.layouts {
-            let label = layout.kind == .cameraFull ? "\u{25C9} Camera full" : "\u{25CB} Hidden"
+            let label = layout.kind == .settings ? "Keystrokes" : layout.kind == .cameraFull ? "\u{25C9} Camera full" : layout.kind == .hidden ? "\u{25CB} Hidden" : "Camera · size / position"
             let selected = UUID(uuidString: layout.id).map(selection.contains) ?? false
             for segment in visibleSegments(start: layout.start, end: layout.end, project: project, timeMap: timeMap) {
                 let rect = CGRect(x: x(forOutput: segment.outStart), y: row.minY + 2,
@@ -506,7 +509,7 @@ final class TimelineView: NSView {
         let row = laneRow(.mask)
         let selection = model?.selection ?? []
         for mask in project.masks {
-            let kindLabel = mask.kind == .mask ? "\u{25A6} Mask" : "\u{25D0} Highlight"
+            let kindLabel = mask.kind == .highlight ? "\u{25D0} Highlight" : (mask.kind == .blur ? "Blur" : "Mask")
             let label = "\(kindLabel) \(Int((mask.opacity * 100).rounded()))%"
             let selected = UUID(uuidString: mask.id).map(selection.contains) ?? false
             for segment in visibleSegments(start: mask.start, end: mask.end, project: project, timeMap: timeMap) {
@@ -1249,7 +1252,20 @@ final class TimelineView: NSView {
         case .cutBubble(let afterClip):
             showRestorePopover(afterClip: afterClip, at: p)
         case .emptyLane(let lane, let source):
-            addBlock(lane: lane, atSource: source)
+            guard let model, lane != .clip else { return }
+            model.beginGesture()
+            var id: UUID?
+            model.update { project in
+                switch lane {
+                case .zoom: id = project.addZoom(atSource: source, length: 3, mode: zoomMode(nearSource: source))
+                case .mask: id = project.addMask(atSource: source, length: 3, kind: .blur, opacity: 1)
+                case .layout: id = project.addLayout(atSource: source, length: 3, kind: .bubble)
+                case .clip: break
+                }
+            }
+            guard let id else { model.cancelGesture(); return }
+            selectBlock(id, addToSelection: false)
+            dragKind = .createBlock(id: id, lane: lane, anchor: source)
         case .none:
             deselect()
         }
@@ -1262,6 +1278,31 @@ final class TimelineView: NSView {
         // snapping" (SPEC §7.2 "Snapping") means during an actual drag.
         let snapDisabled = event.modifierFlags.contains(.command)
         switch dragKind {
+        case .createBlock(let id, let lane, let anchor):
+            guard let model else { return }
+            let raw = geometry.output(forX: geometryX(p))
+            let (snapped, didSnap) = snappedOutput(raw, excludingBlock: id, disabled: snapDisabled)
+            snapGuideX = didSnap ? x(forOutput: snapped) : nil
+            let source = model.timeMap.sourceTime(atOutput: snapped)
+            model.update { project in
+                // Contract first, then expand: works in either direction and clamps at neighbours.
+                switch lane {
+                case .zoom:
+                    project.resizeZoom(id, edge: .leading, to: min(anchor, source))
+                    project.resizeZoom(id, edge: .trailing, to: max(anchor, source))
+                    project.resizeZoom(id, edge: .leading, to: min(anchor, source))
+                case .mask:
+                    project.resizeMask(id, edge: .leading, to: min(anchor, source))
+                    project.resizeMask(id, edge: .trailing, to: max(anchor, source))
+                    project.resizeMask(id, edge: .leading, to: min(anchor, source))
+                case .layout:
+                    project.resizeLayout(id, edge: .leading, to: min(anchor, source))
+                    project.resizeLayout(id, edge: .trailing, to: max(anchor, source))
+                    project.resizeLayout(id, edge: .leading, to: min(anchor, source))
+                case .clip: break
+                }
+            }
+            needsDisplay = true
         case .scrub:
             scrub(toViewX: p.x)
         case .trimClip(let index, let edge, let priorOutput, let beginStart, let beginEnd, let speed):
@@ -1278,6 +1319,8 @@ final class TimelineView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         switch dragKind {
+        case .createBlock(_, let lane, _):
+            model?.commitGesture("Add \(laneName(lane))")
         case .trimClip:
             model?.commitGesture("Trim")
         case .moveBlock(_, let lane, _):
@@ -1305,7 +1348,7 @@ final class TimelineView: NSView {
 
     private func cancelActiveDrag() {
         switch dragKind {
-        case .trimClip, .moveBlock, .resizeBlock:
+        case .trimClip, .moveBlock, .resizeBlock, .createBlock:
             model?.cancelGesture()
         case .scrub, nil:
             dragKind = nil
@@ -1386,7 +1429,7 @@ final class TimelineView: NSView {
         var newID: UUID?
         switch lane {
         case .zoom: model.edit("Add Zoom") { newID = $0.addZoom(atSource: s, mode: zoomMode(nearSource: s)) }
-        case .layout: model.edit("Add Layout") { newID = $0.addLayout(atSource: s, kind: .cameraFull) }
+        case .layout: model.edit("Add Layout") { newID = $0.addLayout(atSource: s, kind: .bubble) }
         case .mask: model.edit("Add Mask") { newID = $0.addMask(atSource: s, kind: .mask) }
         case .clip: break // clips are never added this way (SPEC's hit-test table only lists zoom/layout/mask)
         }
@@ -1669,13 +1712,13 @@ final class TimelineView: NSView {
         if hasLayoutLane {
             elements += axBlockElements(model.project.layouts, lane: .layout, model: model,
                                          id: { $0.id }, start: { $0.start }, end: { $0.end },
-                                         label: { "Layout, \($0.kind == .cameraFull ? "Camera full" : "Hidden")" },
+                                         label: { "Layout, \($0.kind == .cameraFull ? "Camera full" : $0.kind == .hidden ? "Hidden" : "Size / position")" },
                                          nudge: { [weak self] id, frames in self?.nudgeLayout(id, frames: frames) })
         }
         if laneHeight(.mask) > 0 {
             elements += axBlockElements(model.project.masks, lane: .mask, model: model,
                                          id: { $0.id }, start: { $0.start }, end: { $0.end },
-                                         label: { "\($0.kind == .mask ? "Mask" : "Highlight"), opacity \(Int(($0.opacity * 100).rounded()))%" },
+                                         label: { "\($0.kind == .highlight ? "Highlight" : ($0.kind == .blur ? "Blur" : "Mask")), opacity \(Int(($0.opacity * 100).rounded()))%" },
                                          nudge: { [weak self] id, frames in self?.nudgeMask(id, frames: frames) })
         }
         return elements

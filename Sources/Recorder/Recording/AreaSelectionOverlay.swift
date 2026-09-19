@@ -24,16 +24,18 @@ enum AreaSelectionOverlay {
         let state = AreaSelectionState(displayID: displayID, screenSize: screen.frame.size, rect: rect)
 
         let win = AreaSelectionWindow(screen: screen, state: state)
-        win.makeKeyAndOrderFront(nil)
         window = win
+        win.makeKeyAndOrderFront(nil)
+        guard window === win else { return }
 
         let panel = FloatingPanel(content: AreaFieldsHostingView(rootView: AreaFieldsView(state: state)), draggable: false)
         panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - panel.frame.width / 2,
                                       y: screen.visibleFrame.minY + 40 + 56 + 12)) // above the toolbar (SPEC §4.5 mockup)
-        panel.orderFrontRegardless()
         fieldsPanel = panel
+        panel.orderFrontRegardless()
 
         Task { @MainActor in
+            guard window === win else { return }
             guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return }
             state.displays = content.displays
         }
@@ -107,7 +109,7 @@ private final class AreaSelectionWindow: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
-        level = NSWindow.Level(NSWindow.Level.screenSaver.rawValue - 2) // one below FloatingPanel, matches SourcePickerWindow
+        level = NSWindow.Level(NSWindow.Level.floating.rawValue - 1)
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         setFrame(screen.frame, display: false)
 

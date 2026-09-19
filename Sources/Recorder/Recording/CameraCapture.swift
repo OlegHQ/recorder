@@ -10,6 +10,7 @@ import Foundation
 /// (AC-CAM-2). Buffers before `t0`, or captured while paused, are dropped.
 final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
+    let deviceID: String
     private let dataOutput = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "CameraCapture.output")
 
@@ -24,6 +25,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var clock: CaptureSession?
     private var packageURL: URL?
     private var writer: TrackWriter?
+    private(set) var hasRecording = false
+    private(set) var error: Error?
 
     /// Resolves camera TCC before opening the device: camera access is its own authorization (separate
     /// from `Permissions.swift`'s screen-recording/accessibility pair, gated per SPEC §4.1 before the
@@ -45,6 +48,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     private init?(deviceID: String) {
+        self.deviceID = deviceID
         guard let device = AVCaptureDevice(uniqueID: deviceID), let input = try? AVCaptureDeviceInput(device: device) else { return nil }
         previewLayer = AVCaptureVideoPreviewLayer(session: session)
         super.init()
@@ -54,11 +58,15 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         guard session.canAddInput(input) else { session.commitConfiguration(); return nil }
         session.addInput(input)
         dataOutput.setSampleBufferDelegate(self, queue: queue)
-        if session.canAddOutput(dataOutput) { session.addOutput(dataOutput) }
+        guard session.canAddOutput(dataOutput) else { session.commitConfiguration(); return nil }
+        session.addOutput(dataOutput)
         session.commitConfiguration()
 
-        dataOutput.connection(with: .video)?.isVideoMirrored = true
-        if let previewConnection = previewLayer.connection {
+        if let connection = dataOutput.connection(with: .video), connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = true
+        }
+        if let previewConnection = previewLayer.connection, previewConnection.isVideoMirroringSupported {
             previewConnection.automaticallyAdjustsVideoMirroring = false
             previewConnection.isVideoMirrored = true
         }
@@ -67,21 +75,46 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         CameraCapture.current = self
     }
 
+    deinit {
+        let session = session
+        queue.async { session.stopRunning() }
+    }
+
     /// Attaches the recording's shared clock: from here on, frames are retimed and written to
     /// `camera.mov` inside `packageURL`. Discards any writer left over from a previous recording (T-203
     /// restart reuses the same live `CameraCapture`/`AVCaptureSession` across recordings instead of
     /// reopening the device) so frames don't keep appending to the old, now-deleted package.
     func startWriting(packageURL: URL, clock: CaptureSession) {
-        writer?.cancel()
-        writer = nil
-        self.packageURL = packageURL
-        self.clock = clock
+        queue.sync {
+            writer?.cancel()
+            writer = nil
+            hasRecording = false
+            error = nil
+            self.packageURL = packageURL
+            self.clock = clock
+        }
     }
 
     /// Stops the session (preview and writing) and finishes or discards `camera.mov`.
     func stop(cancelled: Bool) async {
-        queue.async { [session] in session.stopRunning() }
+        await withCheckedContinuation { continuation in
+            queue.async { self.session.stopRunning(); continuation.resume() }
+        }
+        await finishWriting(cancelled: cancelled)
+    }
+
+    func finishWriting(cancelled: Bool) async {
+        let writer: TrackWriter? = await withCheckedContinuation { continuation in
+            queue.async {
+                self.clock = nil
+                let writer = self.writer
+                self.writer = nil
+                continuation.resume(returning: writer)
+            }
+        }
         if cancelled { writer?.cancel() } else { await writer?.finish() }
+        hasRecording = !cancelled && writer?.hasSamples == true
+        error = error ?? writer?.error
     }
 
     // ponytail: reads `clock.t0`/`isPaused`/`pausedSoFar` from this session's own queue, not
@@ -99,7 +132,13 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 AVVideoWidthKey: CVPixelBufferGetWidth(imageBuffer),
                 AVVideoHeightKey: CVPixelBufferGetHeight(imageBuffer),
             ]
-            writer = try? TrackWriter(url: packageURL.appendingPathComponent("camera.mov"), videoSettings: videoSettings)
+            guard error == nil else { return }
+            do {
+                writer = try TrackWriter(url: packageURL.appendingPathComponent("camera.mov"), videoSettings: videoSettings)
+            } catch {
+                self.error = error
+                return
+            }
         }
         writer?.append(sampleBuffer, offset: offset)
     }

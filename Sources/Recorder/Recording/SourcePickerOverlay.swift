@@ -31,6 +31,7 @@ enum SourcePickerOverlay {
         windows.forEach { $0.orderFrontRegardless() }
         state.activeScreen.flatMap { active in windows.first { $0.targetScreen === active } }?.makeKeyAndOrderFront(nil)
 
+        guard self.state === state else { return }
         refreshContent(into: state)
         // Windows open/close/move while the picker is up (SPEC AC-WIN-1 "tracks the front-most window");
         // a one-time fetch goes stale. A 1 s poll is simple and cheap next to a live window-list
@@ -57,6 +58,7 @@ enum SourcePickerOverlay {
     // 1 s poll (AC-WIN-1) so the list doesn't go stale while the picker is up.
     fileprivate static func refreshContent(into state: SourcePickerState) {
         Task { @MainActor in
+            guard self.state === state else { return }
             guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return }
             state.displays = content.displays
             state.windows = content.windows.filter {
@@ -124,7 +126,7 @@ private final class SourcePickerWindow: NSPanel {
         backgroundColor = .clear
         hasShadow = false
         acceptsMouseMovedEvents = true
-        level = NSWindow.Level(NSWindow.Level.screenSaver.rawValue - 2) // one below FloatingPanel
+        level = NSWindow.Level(NSWindow.Level.floating.rawValue - 1)
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         setFrame(screen.frame, display: false)
 
@@ -252,6 +254,7 @@ private final class SourcePickerWindow: NSPanel {
 
     @objc private func showCustomSizeAlert(_ sender: NSMenuItem) {
         guard let target = sender.representedObject as? ResizeTarget else { return }
+        ToolbarController.shared.close()
 
         let widthLabel = NSTextField(labelWithString: "Width:")
         widthLabel.frame = NSRect(x: 0, y: 28, width: 55, height: 24)
@@ -288,28 +291,28 @@ private struct ResizeTarget {
 /// SPEC §4.4 `[Resize]` menu contents (window content sizes, points).
 private enum ResizePresets {
     static let quick: [(String, CGSize)] = [
-        ("1280 × 720", CGSize(width: 1280, height: 720)),
-        ("1920 × 1080", CGSize(width: 1920, height: 1080)),
-        ("2560 × 1440", CGSize(width: 2560, height: 1440)),
+        ("1280 × 720 · HD", CGSize(width: 1280, height: 720)),
+        ("1920 × 1080 · Full HD", CGSize(width: 1920, height: 1080)),
+        ("2560 × 1440 · QHD", CGSize(width: 2560, height: 1440)),
     ]
 
     static let ratios: [(String, [(String, CGSize)])] = [
-        ("4:3", [("640 × 480", CGSize(width: 640, height: 480)),
+        ("4:3 · Classic", [("640 × 480", CGSize(width: 640, height: 480)),
                  ("800 × 600", CGSize(width: 800, height: 600)),
                  ("1024 × 768", CGSize(width: 1024, height: 768)),
                  ("1280 × 960", CGSize(width: 1280, height: 960)),
                  ("1600 × 1200", CGSize(width: 1600, height: 1200))]),
-        ("9:16", [("360 × 640", CGSize(width: 360, height: 640)),
+        ("9:16 · Stories / Reels", [("360 × 640", CGSize(width: 360, height: 640)),
                   ("540 × 960", CGSize(width: 540, height: 960)),
                   ("720 × 1280", CGSize(width: 720, height: 1280)),
                   ("810 × 1440", CGSize(width: 810, height: 1440)),
                   ("1080 × 1920", CGSize(width: 1080, height: 1920))]),
-        ("16:10", [("1280 × 800", CGSize(width: 1280, height: 800)),
+        ("16:10 · Mac display", [("1280 × 800", CGSize(width: 1280, height: 800)),
                    ("1440 × 900", CGSize(width: 1440, height: 900)),
                    ("1680 × 1050", CGSize(width: 1680, height: 1050)),
                    ("1920 × 1200", CGSize(width: 1920, height: 1200)),
                    ("2560 × 1600", CGSize(width: 2560, height: 1600))]),
-        ("Square", [("480 × 480", CGSize(width: 480, height: 480)),
+        ("1:1 · Social / X (Twitter)", [("480 × 480", CGSize(width: 480, height: 480)),
                     ("600 × 600", CGSize(width: 600, height: 600)),
                     ("800 × 800", CGSize(width: 800, height: 800)),
                     ("1000 × 1000", CGSize(width: 1000, height: 1000)),

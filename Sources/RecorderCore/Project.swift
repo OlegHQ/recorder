@@ -111,37 +111,53 @@ public struct Zoom: Codable, Equatable, Sendable {
 }
 
 public struct Layout: Codable, Equatable, Sendable {
-    public enum Kind: String, Codable, Sendable { case cameraFull, hidden }
+    public enum Kind: String, Codable, Sendable { case cameraFull, hidden, bubble, settings }
     public var id: String
     public var start: Double
     public var end: Double
     public var kind: Kind
-    public init(id: String = UUID().uuidString, start: Double = 0, end: Double = 0, kind: Kind = .cameraFull) {
-        self.id = id; self.start = start; self.end = end; self.kind = kind
+    public var camera: Camera?
+    public var keys: Keys?
+    public var transition: Double = 0.3
+    public init(id: String = UUID().uuidString, start: Double = 0, end: Double = 0, kind: Kind = .cameraFull, camera: Camera? = nil, keys: Keys? = nil) {
+        self.id = id; self.start = start; self.end = end; self.kind = kind; self.camera = camera; self.keys = keys
     }
-    enum CodingKeys: String, CodingKey { case id, start, end, kind }
+    enum CodingKeys: String, CodingKey { case id, start, end, kind, camera, keys, transition }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.value(.id, default: UUID().uuidString)
         start = try c.value(.start, default: 0)
         end = try c.value(.end, default: 0)
         kind = try c.value(.kind, default: .cameraFull)
+        camera = try c.decodeIfPresent(Camera.self, forKey: .camera)
+        keys = try c.decodeIfPresent(Keys.self, forKey: .keys)
+        transition = try c.value(.transition, default: 0.3)
     }
 }
 
 public struct Mask: Codable, Equatable, Sendable {
-    public enum Kind: String, Codable, Sendable { case mask, highlight }
+    public enum Kind: String, Codable, Sendable { case mask, highlight, blur }
     public var id: String
     public var start: Double
     public var end: Double
     public var kind: Kind
     public var rect: NormRect
     public var opacity: Double
-    public init(id: String = UUID().uuidString, start: Double = 0, end: Double = 0, kind: Kind = .mask,
-                rect: NormRect = NormRect(), opacity: Double = 0.8) {
-        self.id = id; self.start = start; self.end = end; self.kind = kind; self.rect = rect; self.opacity = opacity
+    public var transition: Double
+
+    public func strength(at time: Double) -> Double {
+        guard time >= start, time <= end else { return 0 }
+        let fade = min(max(0, transition), (end - start) / 2)
+        guard fade > 0 else { return opacity }
+        let t = min(1, max(0, min(time - start, end - time) / fade))
+        return opacity * t * t * (3 - 2 * t)
     }
-    enum CodingKeys: String, CodingKey { case id, start, end, kind, rect, opacity }
+
+    public init(id: String = UUID().uuidString, start: Double = 0, end: Double = 0, kind: Kind = .mask,
+                rect: NormRect = NormRect(), opacity: Double = 0.8, transition: Double = 0) {
+        self.id = id; self.start = start; self.end = end; self.kind = kind; self.rect = rect; self.opacity = opacity; self.transition = transition
+    }
+    enum CodingKeys: String, CodingKey { case id, start, end, kind, rect, opacity, transition }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.value(.id, default: UUID().uuidString)
@@ -150,6 +166,7 @@ public struct Mask: Codable, Equatable, Sendable {
         kind = try c.value(.kind, default: .mask)
         rect = try c.value(.rect, default: NormRect())
         opacity = try c.value(.opacity, default: 0.8)
+        transition = try c.value(.transition, default: 0)
     }
 }
 
@@ -262,19 +279,25 @@ public struct Animation: Codable, Equatable, Sendable {
 public struct Camera: Codable, Equatable, Sendable {
     public enum Corner: String, Codable, Sendable { case topLeft, topRight, bottomLeft, bottomRight }
     public var size: Double
+    public var aspect: Double
+    public var position: NormPoint?
     public var corner: Corner
     public var roundness: Double
     public var mirror: Bool
     public var shadow: Double
     public var shrinkWhenZoomed: Bool
     public init(size: Double = 0.2, corner: Corner = .bottomRight, roundness: Double = 0.5,
-                mirror: Bool = true, shadow: Double = 0.5, shrinkWhenZoomed: Bool = true) {
+                mirror: Bool = true, shadow: Double = 0.5, shrinkWhenZoomed: Bool = true, position: NormPoint? = nil, aspect: Double = 1) {
+        self.aspect = aspect
+        self.position = position
         self.size = size; self.corner = corner; self.roundness = roundness
         self.mirror = mirror; self.shadow = shadow; self.shrinkWhenZoomed = shrinkWhenZoomed
     }
-    enum CodingKeys: String, CodingKey { case size, corner, roundness, mirror, shadow, shrinkWhenZoomed }
+    enum CodingKeys: String, CodingKey { case size, corner, roundness, mirror, shadow, shrinkWhenZoomed, position, aspect }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        aspect = try c.value(.aspect, default: 1)
+        position = try c.decodeIfPresent(NormPoint.self, forKey: .position)
         size = try c.value(.size, default: 0.2)
         corner = try c.value(.corner, default: .bottomRight)
         roundness = try c.value(.roundness, default: 0.5)
@@ -308,11 +331,22 @@ public struct Audio: Codable, Equatable, Sendable {
 
 public struct Keys: Codable, Equatable, Sendable {
     public var show: Bool
-    public init(show: Bool = false) { self.show = show }
-    enum CodingKeys: String, CodingKey { case show }
+    public var allKeys: Bool
+    public var size: Double
+    public var position: NormPoint
+    public var hold: Double
+    public init(show: Bool = false, allKeys: Bool = false, size: Double = 1,
+                position: NormPoint = NormPoint(x: 0.5, y: 1), hold: Double = 1.2) {
+        self.show = show; self.allKeys = allKeys; self.size = size; self.position = position; self.hold = hold
+    }
+    enum CodingKeys: String, CodingKey { case show, allKeys, size, position, hold }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         show = try c.value(.show, default: false)
+        allKeys = try c.value(.allKeys, default: false)
+        size = try c.value(.size, default: 1)
+        position = try c.value(.position, default: NormPoint(x: 0.5, y: 1))
+        hold = try c.value(.hold, default: 1.2)
     }
 }
 

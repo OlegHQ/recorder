@@ -4,11 +4,6 @@ import RecorderCore
 /// SPEC §6.6 "Mask selected" / §7.1 — replaces the tabs in `InspectorView` while a mask block is
 /// selected: kind (Mask/Highlight) + Opacity + Remove, same pattern as `ZoomPanel`/`LayoutPanel`.
 /// The mask RECT is edited in the preview (`MaskRectOverlay`/`SelectionRectView`), not here.
-///
-/// `RecorderCore/Project.swift`'s `Mask` struct only has `id`/`start`/`end`/`kind`/`rect`/
-/// `opacity` — no colour or blur field — so, per the task, this panel shows a control for every
-/// field that exists (kind, opacity) and omits the SPEC mockup's aspirational "colour/blur"
-/// wording rather than inventing fields that aren't in the model.
 struct MaskPanel: View {
     let model: EditorModel
     let maskID: UUID
@@ -27,7 +22,8 @@ struct MaskPanel: View {
                         .foregroundStyle(Theme.textSecondaryColor)
                         .frame(width: 60, alignment: .leading)
                     Picker("", selection: kindBinding) {
-                        Text("Mask").tag(Mask.Kind.mask)
+                        Text("Cover").tag(Mask.Kind.mask)
+                        Text("Blur").tag(Mask.Kind.blur)
                         Text("Highlight").tag(Mask.Kind.highlight)
                     }
                     .pickerStyle(.segmented)
@@ -40,6 +36,18 @@ struct MaskPanel: View {
 
                 LabeledSlider(title: "Opacity", value: fieldBinding(\.opacity), range: 0...1, defaultValue: 0.8,
                               format: { String(format: "%.0f%%", $0 * 100) }, onEditingChanged: gesture("Mask opacity"))
+
+                Toggle("Smooth transition", isOn: Binding(
+                    get: { mask.transition > 0 },
+                    set: { enabled in edit { $0.transition = enabled ? 0.25 : 0 } }))
+                if mask.transition > 0 {
+                    LabeledSlider(title: "Fade", value: fieldBinding(\.transition), range: 0.05...1, defaultValue: 0.25,
+                                  format: { String(format: "%.2f s", $0) }, onEditingChanged: gesture("Mask transition"))
+                }
+                if mask.kind != .highlight {
+                    Text("For complete redaction, choose Cover at 100% opacity with transitions off.")
+                        .font(.system(size: 11)).foregroundStyle(Theme.textSecondaryColor)
+                }
 
                 Button("Remove", role: .destructive, action: remove)
             }

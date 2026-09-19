@@ -37,8 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if !Permissions.allGranted {
             showOnboarding()
         } else {
-            ToolbarController.shared.show()
             Library.show() // shown alongside the toolbar on launch, SPEC §5.1
+            ToolbarController.shared.show()
         }
 
         AppDelegate.applyShowInDockPolicy()
@@ -62,8 +62,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "Recorder"
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: OnboardingView { [weak self] in
-            self?.window.close()
-            ToolbarController.shared.show()
+            Task { @MainActor in
+                self?.window.close()
+                ToolbarController.shared.show()
+            }
         })
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -71,23 +73,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { false }
 
-    /// Dock-icon click (SPEC §4.2: toolbar opens "on dock-icon click").
+    /// Reopening returns to documents; recording setup requires an explicit New Recording action.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        ToolbarController.shared.show()
+        ToolbarController.shared.close()
+        guard Permissions.allGranted else { showOnboarding(); return true }
+        if let document = (sender.orderedWindows + sender.windows).first(where: {
+            ($0.windowController is EditorWindowController || $0 === Library.window)
+                && ($0.isVisible || $0.isMiniaturized)
+        }) {
+            document.deminiaturize(nil)
+            document.makeKeyAndOrderFront(nil)
+        } else {
+            Library.show()
+        }
         return true
     }
 
-    @objc private func newRecording() {
+    @MainActor @objc private func newRecording() {
         startRecordingFlow(mode: nil)
     }
 
-    @objc private func recordDisplay() { startRecordingFlow(mode: .display) }
-    @objc private func recordWindow() { startRecordingFlow(mode: .window) }
-    @objc private func recordArea() { startRecordingFlow(mode: .area) }
+    @MainActor @objc private func recordDisplay() { startRecordingFlow(mode: .display) }
+    @MainActor @objc private func recordWindow() { startRecordingFlow(mode: .window) }
+    @MainActor @objc private func recordArea() { startRecordingFlow(mode: .area) }
 
     /// SPEC §8 UX rule: "with permissions missing every recording item opens onboarding (§4.1) instead."
     /// `mode: nil` matches "New Recording…" — the toolbar opens in the last-used mode, unchanged.
-    private func startRecordingFlow(mode: RecordingSettings.Mode?) {
+    @MainActor private func startRecordingFlow(mode: RecordingSettings.Mode?) {
         guard Permissions.allGranted else { showOnboarding(); return }
         ToolbarController.shared.show()
         if let mode { ToolbarController.shared.selectMode(mode) }
@@ -114,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// "File ▸ Open…": picks a `.recorder` package and routes it through `Library.open`, same as a
     /// Finder double-click (AC-LIB-3).
     @objc private func openDocument() {
+        ToolbarController.shared.close()
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [UTType(exportedAs: "sh.nexo.recorder.project")]
         panel.allowsMultipleSelection = true

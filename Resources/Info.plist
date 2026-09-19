@@ -11,6 +11,7 @@
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSCameraUseContinuityCameraDeviceType</key><true/>
   <key>NSCameraUsageDescription</key><string>Recorder records your camera as an overlay when you enable it.</string>
   <key>NSMicrophoneUsageDescription</key><string>Recorder records your microphone when you enable it.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Recorder generates captions on-device.</string>

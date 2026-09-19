@@ -9,8 +9,9 @@ import ScreenCaptureKit
 
 /// Records mouse/keyboard/cursor activity during a recording (SPEC §4.8) into normalised source
 /// coordinates, on the same "seconds since first screen frame" clock as the media writers (T-110).
-/// Privacy: typed text is never logged — see `recordKey`. Do not relax that rule.
+/// Typed key codes are captured only when Record all keystrokes is explicitly enabled.
 final class EventRecorder {
+    private let recordAllKeys: Bool
     private let target: CaptureTarget
     private let cursorsDir: URL
 
@@ -32,7 +33,8 @@ final class EventRecorder {
     private var cursorTimer: DispatchSourceTimer?
     private var windowFrameTimer: DispatchSourceTimer?
 
-    init(target: CaptureTarget, cursorsDir: URL) {
+    init(target: CaptureTarget, cursorsDir: URL, recordAllKeys: Bool = false) {
+        self.recordAllKeys = recordAllKeys
         self.target = target
         self.cursorsDir = cursorsDir
         self.currentTargetFrame = target.frameInScreenPoints
@@ -149,8 +151,13 @@ final class EventRecorder {
         case .scrollWheel:
             let p = normalized(event.location)
             record(InputEvent(t: t, k: .scroll, x: p.x, y: p.y))
-        case .keyDown, .flagsChanged:
+        case .keyDown:
             recordKey(t: t, event: event)
+        case .flagsChanged:
+            let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+            let flags: [Int: CGEventFlags] = [54: .maskCommand, 55: .maskCommand, 56: .maskShift, 60: .maskShift,
+                58: .maskAlternate, 61: .maskAlternate, 59: .maskControl, 62: .maskControl, 57: .maskAlphaShift, 63: .maskSecondaryFn]
+            if let flag = flags[code], event.flags.contains(flag) { recordKey(t: t, event: event) }
         default:
             break
         }
@@ -164,17 +171,15 @@ final class EventRecorder {
         }
     }
 
-    /// Privacy rule (SPEC §4.8, CLAUDE.md): store `.key` (with `keyCode` + modifiers) only when a
-    /// ⌘/⌃/⌥ modifier is held or the key is non-printing (arrows, return, esc, tab, delete, F-keys).
-    /// Every other keystroke is logged as a timestamp-only `.typing` row with **no keyCode** — typed
-    /// text is never recoverable from `events.json`. Do not relax this.
+    /// Shortcuts-only by default; recording all keys is an explicit recording preference.
     private func recordKey(t: Double, event: CGEvent) {
         let flags = event.flags
         let hasModifier = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-        if hasModifier || EventRecorder.nonPrintingKeyCodes.contains(keyCode) {
+        if recordAllKeys || hasModifier || EventRecorder.nonPrintingKeyCodes.contains(keyCode) {
             record(InputEvent(t: t, k: .key, keyCode: keyCode, mods: UInt(flags.rawValue)))
-        } else {
+        }
+        if !hasModifier && !EventRecorder.nonPrintingKeyCodes.contains(keyCode) {
             record(InputEvent(t: t, k: .typing))
         }
     }

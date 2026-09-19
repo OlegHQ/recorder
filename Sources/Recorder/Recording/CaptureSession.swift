@@ -14,6 +14,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private let eventRecorder: EventRecorder
 
     private var stream: SCStream?
+    private var audioStream: SCStream?
     // ponytail: one queue for all three outputs; split if audio ever drops.
     private let outputQueue = DispatchQueue(label: "CaptureSession.output")
 
@@ -48,8 +49,15 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         self.target = target
         self.settings = settings
         self.packageURL = packageURL
-        self.eventRecorder = EventRecorder(target: target, cursorsDir: packageURL.appendingPathComponent("cursors"))
+        self.eventRecorder = EventRecorder(target: target, cursorsDir: packageURL.appendingPathComponent("cursors"), recordAllKeys: settings.recordAllKeys)
 
+        if let micID = settings.micID {
+            let allowed = await AVCaptureDevice.requestAccess(for: .audio)
+            guard allowed, AVCaptureDevice(uniqueID: micID) != nil else {
+                throw NSError(domain: "Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                    "The selected microphone is unavailable. Check Microphone access in System Settings and reconnect or select another microphone."])
+            }
+        }
         try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
 
         let size = target.pixelSize
@@ -77,18 +85,46 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
 
         super.init()
 
-        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         let filter = target.filter(content: content, settings: settings)
         let config = target.configuration(settings: settings)
+        // Audio scope is independent of the recorded window/display. A second stream keeps
+        // selected-app filtering from changing the video, and “all apps” works in window mode.
+        if settings.systemAudio != .off, let display = content.displays.first {
+            let audioFilter: SCContentFilter
+            if case .apps(let ids) = settings.systemAudio {
+                audioFilter = SCContentFilter(display: display,
+                    including: content.applications.filter { ids.contains($0.bundleIdentifier) }, exceptingWindows: [])
+            } else {
+                audioFilter = SCContentFilter(display: display, excludingWindows: [])
+            }
+            let audioConfig = SCStreamConfiguration()
+            audioConfig.width = 2
+            audioConfig.height = 2
+            audioConfig.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+            audioConfig.capturesAudio = true
+            audioConfig.excludesCurrentProcessAudio = true
+            audioConfig.sampleRate = 48_000
+            audioConfig.channelCount = 2
+            let audioStream = SCStream(filter: audioFilter, configuration: audioConfig, delegate: self)
+            try audioStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: outputQueue)
+            self.audioStream = audioStream
+        }
+        config.capturesAudio = false
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
-        if config.capturesAudio { try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: outputQueue) }
         if config.captureMicrophone { try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: outputQueue) }
         self.stream = stream
     }
 
     func start() async throws {
-        try await stream?.startCapture()
+        do {
+            try await audioStream?.startCapture()
+            try await stream?.startCapture()
+        } catch {
+            try? await audioStream?.stopCapture()
+            throw error
+        }
     }
 
     /// Stop appending samples; `resume` adds the gap to `pausedSoFar` so every subsequent
@@ -111,28 +147,41 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Stops the stream, finishes every writer, writes `events.json`, and returns the measured
     /// `Source` (duration read back from the finished `screen.mov`, not the wall clock).
     func finish() async throws -> Source {
+        let endTime = CMTime(seconds: elapsed, preferredTimescale: 60000)
         try? await stream?.stopCapture()
+        try? await audioStream?.stopCapture()
         stream = nil
+        audioStream = nil
+        // Drain callbacks before closing their inputs.
+        await withCheckedContinuation { continuation in
+            outputQueue.async { continuation.resume() }
+        }
 
-        await screenWriter.finish()
+        await screenWriter.finish(at: endTime)
         await systemWriter?.finish()
         await micWriter?.finish()
 
         let log = eventRecorder.stop()
         try JSONEncoder().encode(log).write(to: packageURL.appendingPathComponent("events.json"), options: .atomic)
 
+        if let error = screenWriter.error ?? systemWriter?.error ?? micWriter?.error { throw error }
         let asset = AVURLAsset(url: packageURL.appendingPathComponent("screen.mov"))
         let duration = try await asset.load(.duration).seconds
 
         return Source(kind: sourceKind, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
                                scale: Double(target.scale), duration: duration, hasCamera: hasCamera,
-                               hasMic: settings.micID != nil, hasSystemAudio: settings.systemAudio != .off)
+                               hasMic: micWriter?.hasSamples == true, hasSystemAudio: systemWriter?.hasSamples == true)
     }
 
     /// Stops capture, discards every writer, and deletes `packageURL` (no project should be left behind).
     func cancel() async {
         try? await stream?.stopCapture()
+        try? await audioStream?.stopCapture()
         stream = nil
+        audioStream = nil
+        await withCheckedContinuation { continuation in
+            outputQueue.async { continuation.resume() }
+        }
         screenWriter.cancel()
         systemWriter?.cancel()
         micWriter?.cancel()
@@ -200,6 +249,10 @@ final class TrackWriter {
     private let writer: AVAssetWriter
     private let input: AVAssetWriterInput
     private var sessionStarted = false
+    private var lastVideoSample: CMSampleBuffer?
+    private var lastVideoTime: CMTime = .zero
+    var error: Error? { writer.error }
+    private(set) var hasSamples = false
 
     init(url: URL, videoSettings: [String: Any]) throws {
         writer = try AVAssetWriter(outputURL: url, fileType: .mov)
@@ -225,11 +278,26 @@ final class TrackWriter {
             sessionStarted = true
         }
         guard input.isReadyForMoreMediaData else { return }
-        input.append(retimed)
+        if input.append(retimed) {
+            hasSamples = true
+            if input.mediaType == .video {
+                lastVideoSample = sb
+                lastVideoTime = offset
+            }
+        }
     }
 
-    func finish() async {
+    func finish(at endTime: CMTime? = nil) async {
         guard sessionStarted else { writer.cancelWriting(); return }
+        // SCK emits no complete frames for an idle screen. Hold its last image through Stop.
+        if let endTime, let sample = lastVideoSample, endTime > lastVideoTime {
+            for _ in 0..<200 where !input.isReadyForMoreMediaData && writer.status == .writing {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            append(sample, offset: endTime)
+            writer.endSession(atSourceTime: endTime)
+        }
+        lastVideoSample = nil
         input.markAsFinished()
         await writer.finishWriting()
     }

@@ -79,3 +79,20 @@ import Testing
     // clicks = left .down only (the right .down at t=0.5 is excluded)
     #expect(decoded.clicks().map(\.t) == [0.2])
 }
+
+@Test func maskTransitionsAndCompatibility() throws {
+    let old = try JSONDecoder().decode(Mask.self, from: Data("{\"start\":1,\"end\":5}".utf8))
+    #expect(old.transition == 0)
+    #expect(old.strength(at: 1) == 0.8)
+    let mask = Mask(start: 1, end: 5, kind: .blur, opacity: 1, transition: 0.5)
+    #expect(mask.strength(at: 0) == 0)
+    #expect(mask.strength(at: 1) == 0)
+    #expect(mask.strength(at: 1.25) == 0.5)
+    #expect(mask.strength(at: 3) == 1)
+    #expect(mask.strength(at: 4.75) == 0.5)
+    #expect(mask.strength(at: 5) == 0)
+    #expect(try JSONDecoder().decode(Mask.self, from: JSONEncoder().encode(mask)) == mask)
+    var project = Project(source: Source(duration: 10), clips: [Clip(sourceStart: 0, sourceEnd: 10)], masks: [mask])
+    let duplicate = project.duplicateBlock(UUID(uuidString: mask.id)!)!
+    #expect(project.masks.first { $0.id == duplicate.uuidString }?.transition == 0.5)
+}

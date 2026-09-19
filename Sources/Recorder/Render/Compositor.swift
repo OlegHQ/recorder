@@ -153,7 +153,7 @@ final class Compositor {
             // content instead of staying fixed to the canvas.
             let activeMasks = s.project.masks.filter { s.sourceTime >= $0.start && s.sourceTime <= $0.end }
             if !activeMasks.isEmpty {
-                drawMasks(activeMasks, rectPx: frameRect, contentUV: frameUV, alphaMultiplier: screenAlpha,
+                drawMasks(activeMasks, texture: screen, sourceTime: s.sourceTime, rectPx: frameRect, contentUV: frameUV, alphaMultiplier: screenAlpha,
                           outputSize: s.outputSize, encoder: encoder)
             }
         }
@@ -163,11 +163,11 @@ final class Compositor {
         if let camera = s.camera {
             let cameraAlpha = layoutKind == .hidden ? 1 - layoutAmount : 1
             if cameraAlpha > 0 {
-                let bubble = Self.cameraBubbleRect(project: s.project, outputSize: s.outputSize, viewScale: s.view.scale)
-                let full = CGRect(origin: .zero, size: s.outputSize)
-                let t = layoutKind == .cameraFull ? layoutAmount : 0
-                let rectPx = Self.lerp(bubble, full, t)
-                drawCamera(camera, project: s.project, rectPx: rectPx, alpha: cameraAlpha, outputSize: s.outputSize, encoder: encoder)
+                let rectPx = cameraOverlayRect(project: s.project, output: s.outputSize,
+                                               atSource: s.sourceTime, viewScale: s.view.scale)
+                var cameraProject = s.project
+                cameraProject.camera = overlayCamera(project: s.project, atSource: s.sourceTime)
+                drawCamera(camera, project: cameraProject, rectPx: rectPx, alpha: cameraAlpha, outputSize: s.outputSize, encoder: encoder)
             }
         }
 
@@ -175,15 +175,10 @@ final class Compositor {
         // bottom-centre of the whole canvas (not "screen space": like the camera bubble, it doesn't
         // zoom/pan with the content).
         if let chip = s.keyChip {
-            drawKeyChip(chip, outputSize: s.outputSize, encoder: encoder)
+            drawKeyChip(chip, keys: overlayKeys(project: s.project, atSource: s.sourceTime), outputSize: s.outputSize, encoder: encoder)
         }
 
         encoder.endEncoding()
-    }
-
-    private static func lerp(_ a: CGRect, _ b: CGRect, _ t: Double) -> CGRect {
-        CGRect(x: a.minX + (b.minX - a.minX) * t, y: a.minY + (b.minY - a.minY) * t,
-               width: a.width + (b.width - a.width) * t, height: a.height + (b.height - a.height) * t)
     }
 
     // MARK: - Pass 1: background
@@ -385,11 +380,10 @@ final class Compositor {
     /// `mask.rect` (SPEC's "uncropped source coordinates", AC-CROP-2) through the exact
     /// `contentUV`/`rectPx` the screen/cursor passes use, so a mask zooms and pans with the content
     /// (`Compositor.drawCursor` maps `cursor.x/y` through the identical formula).
-    /// `// ponytail: hard edges, no fade-in/out — SPEC gives layouts (T-503) an explicit 0.3s
-    /// cross-fade but says nothing about masks; add one only if a mockup/AC calls for it.`
+    /// Masks optionally use a smoothstep opacity envelope at both ends.
     /// `// ponytail: not clipped to the screen's own rounded corners/shadow SDF — a mask can bleed a
     /// hair past a heavily rounded corner; not worth a second SDF pass for a rare, subtle overlap.`
-    private func drawMasks(_ masks: [Mask], rectPx: CGRect, contentUV: SIMD4<Float>, alphaMultiplier: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawMasks(_ masks: [Mask], texture: FrameState.Texture, sourceTime: Double, rectPx: CGRect, contentUV: SIMD4<Float>, alphaMultiplier: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         let u0 = Double(contentUV.x), v0 = Double(contentUV.y), u1 = Double(contentUV.z), v1 = Double(contentUV.w)
         guard u1 > u0, v1 > v0 else { return }
         func screenPoint(_ sx: Double, _ sy: Double) -> CGPoint {
@@ -397,14 +391,31 @@ final class Compositor {
                     y: rectPx.minY + (sy - v0) / (v1 - v0) * rectPx.height)
         }
         for mask in masks {
-            let alpha = mask.opacity * alphaMultiplier
+            let alpha = mask.strength(at: sourceTime) * alphaMultiplier
             guard alpha > 0 else { continue }
             let color = SIMD4<Float>(0, 0, 0, Float(alpha))
             let a = screenPoint(mask.rect.x, mask.rect.y)
             let b = screenPoint(mask.rect.x + mask.rect.w, mask.rect.y + mask.rect.h)
             let hole = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y)).intersection(rectPx)
 
+            guard !hole.isNull, !hole.isEmpty else { continue }
             switch mask.kind {
+            case .blur:
+                var u = Uniforms()
+                u.rectNDC = ndcRect(hole, in: outputSize)
+                func uv(_ x: CGFloat, _ y: CGFloat) -> SIMD2<Float> {
+                    SIMD2(Float(u0 + (x - rectPx.minX) / rectPx.width * (u1 - u0)),
+                          Float(v0 + (y - rectPx.minY) / rectPx.height * (v1 - v0)))
+                }
+                let lo = uv(hole.minX, hole.minY), hi = uv(hole.maxX, hole.maxY)
+                u.uvRect = SIMD4(lo.x, lo.y, hi.x, hi.y)
+                u.globalAlpha = Float(alpha)
+                u.mode = texture.chroma == nil ? 6 : 7
+                encoder.setFragmentTexture(texture.luma, index: 0)
+                encoder.setFragmentTexture(texture.chroma ?? dummyTexture, index: 1)
+                draw(u, encoder: encoder)
+                encoder.setFragmentTexture(dummyTexture, index: 0)
+                encoder.setFragmentTexture(dummyTexture, index: 1)
             case .mask:
                 fillRect(hole, color: color, outputSize: outputSize, encoder: encoder)
             case .highlight:
@@ -431,37 +442,14 @@ final class Compositor {
 
     // MARK: - Pass 4: camera (SPEC §6.2 pass 4, §6.6 Camera, T-502)
 
-    /// Camera bubble placement — reused by both `render` (with the live zoom `viewScale`, for
-    /// `shrinkWhenZoomed`) and `PreviewView`'s drag hit-testing (which only needs the un-zoomed
-    /// rect, `viewScale: 1`), so the margin/size formula lives exactly once.
-    static let cameraMarginFraction = 0.02
-
-    static func cameraBubbleRect(project: Project, outputSize: CGSize, viewScale: Double = 1) -> CGRect {
-        let short = min(outputSize.width, outputSize.height)
-        var side = project.camera.size * short
-        if project.camera.shrinkWhenZoomed {
-            let t = min(max((viewScale - 1) / (2 - 1), 0), 1)
-            side *= 1 + (0.7 - 1) * t   // lerp(1, 0.7, t) — SPEC §6.2 pass 4 formula
-        }
-        let margin = cameraMarginFraction * short
-        let x: Double, y: Double
-        switch project.camera.corner {
-        case .topLeft: x = margin; y = margin
-        case .topRight: x = outputSize.width - margin - side; y = margin
-        case .bottomLeft: x = margin; y = outputSize.height - margin - side
-        case .bottomRight: x = outputSize.width - margin - side; y = outputSize.height - margin - side
-        }
-        return CGRect(x: x, y: y, width: side, height: side)
-    }
-
     /// Draws the camera texture in a rounded-rect SDF quad (reusing modes 3/4, same as the screen
-    /// pass) — square-cropped ("cover") from the camera's own aspect, mirrored when `camera.mirror`.
+    /// pass) — cover-cropped to the animated destination, mirrored when `camera.mirror`.
     /// No motion blur (SPEC §6.2 only asks for it on the screen/cursor passes): `prevUvRect ==
     /// uvRect` so the shared shader's tap loop is a no-op average.
     private func drawCamera(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, alpha: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         var u = Uniforms()
         u.rectNDC = SIMD4(-1, 1, 1, -1)
-        let contentUV = cameraContentUV(texture: texture, mirror: project.camera.mirror)
+        let contentUV = cameraContentUV(texture: texture, destination: rectPx.size, mirror: project.camera.mirror)
         u.uvRect = extrapolatedUV(contentUV, contentRect: rectPx, to: outputSize)
         u.prevUvRect = u.uvRect
         u.pixelSize = SIMD2(Float(outputSize.width), Float(outputSize.height))
@@ -479,20 +467,10 @@ final class Compositor {
         encoder.setFragmentTexture(dummyTexture, index: 1)
     }
 
-    /// Centre-crops the camera texture's own aspect to a square ("cover" fit — the bubble is always
-    /// square), mirrored horizontally when set.
-    private func cameraContentUV(texture: FrameState.Texture, mirror: Bool) -> SIMD4<Float> {
-        let w = Double(texture.luma.width), h = Double(texture.luma.height)
-        guard w > 0, h > 0 else { return SIMD4(0, 0, 1, 1) }
-        let aspect = w / h
-        var u0 = 0.0, v0 = 0.0, u1 = 1.0, v1 = 1.0
-        if aspect > 1 {
-            u0 = (1 - 1 / aspect) / 2; u1 = 1 - u0
-        } else if aspect < 1 {
-            v0 = (1 - aspect) / 2; v1 = 1 - v0
-        }
-        if mirror { swap(&u0, &u1) }
-        return SIMD4(Float(u0), Float(v0), Float(u1), Float(v1))
+    private func cameraContentUV(texture: FrameState.Texture, destination: CGSize, mirror: Bool) -> SIMD4<Float> {
+        let crop = cameraCrop(source: CGSize(width: texture.luma.width, height: texture.luma.height), destination: destination)
+        return SIMD4(Float(mirror ? crop.maxX : crop.minX), Float(crop.minY),
+                     Float(mirror ? crop.minX : crop.maxX), Float(crop.maxY))
     }
 
     /// `id == nil` (or a load failure) falls back to the plain system arrow — AppKit already ships
@@ -557,25 +535,26 @@ final class Compositor {
     /// 1.2 s ("for 1.2 s") but no fade curve, so a straightforward linear fade over the last 0.3 s
     /// of that hold is used here — `// ponytail: no eased fade curve; revisit only if a mockup asks
     /// for one.`
-    private func drawKeyChip(_ chip: FrameState.KeyChipState, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawKeyChip(_ chip: FrameState.KeyChipState, keys: (settings: Keys, opacity: Double), outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
         guard let texture = chipTexture(label: chip.label) else { return }
-        let hold = 1.2, fadeOut = 0.3
+        let hold = keys.settings.hold, fadeOut = min(0.3, hold)
         let alpha = chip.age > hold - fadeOut ? max(0, (hold - chip.age) / fadeOut) : 1.0
         guard alpha > 0 else { return }
 
         let shortEdge = min(outputSize.width, outputSize.height)
         let textureAspect = Double(texture.width) / Double(max(texture.height, 1))
-        let height = 0.07 * shortEdge
+        let height = min(0.07 * shortEdge * min(max(keys.settings.size, 0.5), 3), (outputSize.width - 0.1 * shortEdge) / textureAspect)
         let width = height * textureAspect
         let marginBottom = 0.05 * shortEdge
-        let rectPx = CGRect(x: (outputSize.width - width) / 2, y: outputSize.height - marginBottom - height,
+        let rectPx = CGRect(x: marginBottom + max(0, outputSize.width - 2 * marginBottom - width) * min(max(keys.settings.position.x, 0), 1),
+                             y: marginBottom + max(0, outputSize.height - 2 * marginBottom - height) * min(max(keys.settings.position.y, 0), 1),
                              width: width, height: height)
 
         var u = Uniforms()
         u.rectNDC = ndcRect(rectPx, in: outputSize)
         u.uvRect = SIMD4(0, 0, 1, 1)
         u.mode = 2
-        u.globalAlpha = Float(alpha)
+        u.globalAlpha = Float(alpha * keys.opacity)
         encoder.setFragmentTexture(texture, index: 0)
         draw(u, encoder: encoder)
         encoder.setFragmentTexture(dummyTexture, index: 0)

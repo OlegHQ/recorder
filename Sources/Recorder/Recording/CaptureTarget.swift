@@ -11,12 +11,13 @@ enum CaptureTarget {
 }
 
 extension CaptureTarget {
-    /// `SCContentFilter` for this target: excludes every recording-flow window (`FloatingPanel.allWindowIDs`)
+    /// Exclude the whole Recorder application, including panels created after capture starts,
     /// and, when requested, the Finder desktop-icons window (SPEC open question 3).
     func filter(content: SCShareableContent, settings: RecordingSettings) -> SCContentFilter {
         switch self {
         case .display(let display), .area(let display, _):
-            var excluded = content.windows.filter { FloatingPanel.allWindowIDs.contains($0.windowID) }
+            let ownApps = content.applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier }
+            var excluded: [SCWindow] = []
             if settings.hideDesktopIcons {
                 // ponytail: SPEC §9 open question 3 ("which Finder windows must be excluded to hide desktop
                 // icons on macOS 26?") isn't verifiable without Screen Recording permission on this machine.
@@ -28,7 +29,7 @@ extension CaptureTarget {
                     $0.owningApplication?.bundleIdentifier == "com.apple.finder" && $0.windowLayer == desktopIconLevel
                 }
             }
-            return SCContentFilter(display: display, excludingWindows: excluded)
+            return SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: excluded)
         case .window(let window):
             return SCContentFilter(desktopIndependentWindow: window)
         }
@@ -38,6 +39,7 @@ extension CaptureTarget {
     func configuration(settings: RecordingSettings) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.showsCursor = false
+        config.ignoreShadowsSingleWindow = true // The compositor supplies the window shadow.
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.queueDepth = 6

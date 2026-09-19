@@ -52,10 +52,11 @@ final class PreviewView: MTKView {
     /// Bounds the "no frame yet" redraw retry below (SPEC §6.2: "paused always shows a frame").
     private var pendingFrameRetries = 0
     private static let maxFrameRetries = 30
-    // T-502: drag-to-reposition the camera bubble — `nil` unless the drag started inside it.
-    // `Camera.corner` is the only stored position (four discrete corners, SPEC §6.6), so there's no
-    // continuous position to follow live; the bubble snaps to the nearest corner on mouse-up.
     private var cameraDragActive = false
+    private var cameraDragStart = CGPoint.zero
+    private var cameraDragPosition = NormPoint(x: 0, y: 0)
+    private var cameraDragLayoutID: String?
+    private var cameraDidDrag = false
 
     // T-415: manual-zoom-target overlay — a `SelectionRectView` subview covering the whole preview,
     // shown only while a `.manual` zoom is selected (SPEC §6.6 "with a manual zoom selected, a
@@ -586,15 +587,15 @@ final class PreviewView: MTKView {
         return screenRect(output: bounds.size, cropAspect: aspect, padding: 0)
     }
 
-    /// `Compositor.cameraBubbleRect` is top-left/y-down (canvas pixel space); flip it into this
-    /// view's bottom-left/y-up bounds space instead of duplicating the margin/size formula.
-    /// Ignores `shrinkWhenZoomed` (uses `viewScale: 1`) — a reasonable hit-test simplification, the
-    /// bubble only shrinks a little and dragging mid-zoom is a rare edge case.
     private func cameraBubbleRectInBounds() -> CGRect {
         let viewport = viewportRectInBounds()
-        let local = Compositor.cameraBubbleRect(project: model.project, outputSize: viewport.size)
-        return CGRect(x: viewport.minX + local.minX, y: viewport.minY + (viewport.height - local.maxY),
-                       width: local.width, height: local.height)
+        let time = model.timeMap.sourceTime(atOutput: model.playhead)
+        let mix = layoutMix(layouts: model.project.layouts, atSource: time)
+        if mix.kind == .hidden && mix.amount >= 0.99 { return .zero }
+        let local = cameraOverlayRect(project: model.project, output: viewport.size, atSource: time,
+                                      viewScale: model.cameraPath.sample(atSource: time).scale)
+        return CGRect(x: viewport.minX + local.minX, y: viewport.minY + viewport.height - local.maxY,
+                      width: local.width, height: local.height)
     }
 
     // T-415: never let AppKit's default hit-testing hand events straight to `zoomTargetView` (it
@@ -605,59 +606,80 @@ final class PreviewView: MTKView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard zoomTargetView.isHidden else {
-            zoomTargetView.mouseDown(with: event)
-            window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
-            return
-        }
-        if let maskOverlayView, !maskOverlayView.isHidden {
-            maskOverlayView.mouseDown(with: event)
-            window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
-            return
-        }
         let p = convert(event.locationInWindow, from: nil)
         if model.project.source.hasCamera, cameraBubbleRectInBounds().contains(p) {
             cameraDragActive = true
+            cameraDidDrag = false
+            cameraDragStart = p
+            let time = model.timeMap.sourceTime(atOutput: model.playhead)
+            let block = model.project.layouts.first { time >= $0.start && time <= $0.end }
+            cameraDragLayoutID = block?.kind == .bubble ? block?.id : nil
+            let camera = block?.kind == .bubble ? (block?.camera ?? model.project.camera) : model.project.camera
+            cameraDragPosition = camera.position ?? NormPoint(
+                x: camera.corner == .topLeft || camera.corner == .bottomLeft ? 0 : 1,
+                y: camera.corner == .topLeft || camera.corner == .topRight ? 0 : 1)
+            model.selectedClip = nil
+            model.selection = block.flatMap { UUID(uuidString: $0.id) }.map { [$0] } ?? []
+            model.cameraInspectorRequested = true
+            window?.makeFirstResponder(self)
         } else {
             cameraDragActive = false
+            guard zoomTargetView.isHidden else {
+                zoomTargetView.mouseDown(with: event)
+                window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
+                return
+            }
+            if let maskOverlayView, !maskOverlayView.isHidden {
+                maskOverlayView.mouseDown(with: event)
+                window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
+                return
+            }
             super.mouseDown(with: event)
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard zoomTargetView.isHidden else { zoomTargetView.mouseDragged(with: event); return }
-        if let maskOverlayView, !maskOverlayView.isHidden { maskOverlayView.mouseDragged(with: event); return }
+        guard cameraDragActive || zoomTargetView.isHidden else { zoomTargetView.mouseDragged(with: event); return }
+        if !cameraDragActive, let maskOverlayView, !maskOverlayView.isHidden { maskOverlayView.mouseDragged(with: event); return }
         guard cameraDragActive else { super.mouseDragged(with: event); return }
-        // No live follow: `Camera.corner` is the only stored position (four discrete corners) — the
-        // bubble snaps to whichever corner the mouse is released over, like the recording-time
-        // bubble (`CameraBubblePanel.snap()`).
+        let time = model.timeMap.sourceTime(atOutput: model.playhead)
+        if model.project.layouts.contains(where: { $0.kind != .bubble && time >= $0.start && time <= $0.end }) { return }
+        let p = convert(event.locationInWindow, from: nil)
+        if !cameraDidDrag { model.beginGesture(); cameraDidDrag = true }
+        let viewport = viewportRectInBounds()
+        let block = model.project.layouts.first { $0.id == cameraDragLayoutID }
+        let camera = block?.camera ?? model.project.camera
+        let rect = cameraOverlayRect(camera: camera, output: viewport.size,
+                                     viewScale: model.cameraPath.sample(atSource: time).scale)
+        let margin = min(0.02 * min(viewport.width, viewport.height),
+                         max(0, (min(viewport.width, viewport.height) - max(rect.width, rect.height)) / 2))
+        let position = NormPoint(
+            x: min(max(cameraDragPosition.x + (p.x - cameraDragStart.x) / max(1, viewport.width - rect.width - 2 * margin), 0), 1),
+            y: min(max(cameraDragPosition.y - (p.y - cameraDragStart.y) / max(1, viewport.height - rect.height - 2 * margin), 0), 1))
+        model.update { project in
+            if let id = cameraDragLayoutID, let i = project.layouts.firstIndex(where: { $0.id == id }) {
+                var value = project.layouts[i].camera ?? project.camera
+                value.position = position
+                project.layouts[i].camera = value
+            } else { project.camera.position = position }
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard zoomTargetView.isHidden else {
+        guard cameraDragActive || zoomTargetView.isHidden else {
             let wasDragging = zoomTargetView.isDragging
             zoomTargetView.mouseUp(with: event)
             if wasDragging { zoomTargetDragEnded() }
             return
         }
-        if let maskOverlayView, !maskOverlayView.isHidden {
+        if !cameraDragActive, let maskOverlayView, !maskOverlayView.isHidden {
             maskOverlayView.mouseUp(with: event)
             return
         }
         guard cameraDragActive else { super.mouseUp(with: event); return }
         cameraDragActive = false
-        let p = convert(event.locationInWindow, from: nil)
-        let viewport = viewportRectInBounds()
-        let corner: Camera.Corner
-        switch (p.x < viewport.midX, p.y < viewport.midY) {
-        case (true, true): corner = .bottomLeft
-        case (true, false): corner = .topLeft
-        case (false, true): corner = .bottomRight
-        case (false, false): corner = .topRight
-        }
-        if corner != model.project.camera.corner {
-            model.edit("Camera position") { $0.camera.corner = corner }
-        }
+        if cameraDidDrag { model.commitGesture("Camera position") }
+        cameraDidDrag = false
     }
 }
 

@@ -30,8 +30,7 @@ import RecorderCore
     /// T-610: read-only for the state snapshot — `currentTarget` itself stays private.
     var currentTargetDescription: String? { currentTarget?.targetDescription }
 
-    /// From the pickers' Start button. Awaits the countdown (Esc there returns to the picker, which is
-    /// still showing at that point), then closes the recording-flow UI and starts capture.
+    /// From the pickers' Start button. Reserve the transition before scheduling asynchronous work.
     func begin(target: CaptureTarget) {
         guard state == .idle else { return }
         // CLAUDE.md / SPEC §4.1: no recording without both TCC grants. The toolbar itself never shows
@@ -40,6 +39,7 @@ import RecorderCore
             NSLog("Recorder: begin(target:) blocked — Screen Recording/Accessibility not granted")
             return
         }
+        state = .countdown
         Task { await start(target: target) }
     }
 
@@ -50,19 +50,29 @@ import RecorderCore
     private func start(target: CaptureTarget, isRestart: Bool = false, restartCamera: CameraCapture? = nil) async {
         let settings = RecordingSettings.shared
         state = .countdown
+        // Keep the camera alive while removing every picker/toolbar that could steal countdown keys.
+        let camera = isRestart ? restartCamera : CameraCapture.current
+        if let cameraID = settings.cameraID, camera?.deviceID != cameraID {
+            state = .idle
+            SourcePickerOverlay.close()
+            let alert = NSAlert()
+            alert.messageText = "Camera is not ready"
+            alert.informativeText = "Select an available camera and wait for its preview before starting."
+            alert.runModal()
+            ToolbarController.shared.show()
+            return
+        }
+        if !isRestart { ToolbarController.shared.close() }
 
         if settings.countdown > 0 && !isRestart {
             let targetRect = SourcePickerOverlay.flip(target.frameInScreenPoints, in: NSScreen.screens[0])
             guard await CountdownOverlay.run(seconds: settings.countdown, over: targetRect) else {
-                state = .idle // Esc: back to the picker (still open, we haven't touched it yet).
+                state = .idle
+                ToolbarController.shared.show()
                 return
             }
         }
 
-        // Grab our own strong reference before `ToolbarController.close()` drops its own (which would
-        // otherwise let the AVCaptureSession deallocate) and hides the bubble.
-        let camera = isRestart ? restartCamera : CameraCapture.current
-        if !isRestart { ToolbarController.shared.close() }
         if let camera { CameraBubblePanel.show(previewLayer: camera.previewLayer) }
 
         let name = "Recording \(RecordingController.folderFormatter.string(from: Date()))"
@@ -89,12 +99,19 @@ import RecorderCore
             self.currentTarget = target
             state = .recording
             applyDockIconPolicy(hiddenWhileRecording: true)
+            if case .window(let window) = target, let pid = window.owningApplication?.processID {
+                WindowResizer.focus(pid: pid, windowTitle: window.title, frame: window.frame)
+            }
         } catch {
             NSLog("Recorder: capture failed to start: \(error)")
             hideHighlight()
             RecordingWidgetPanel.hide()
+            await camera?.stop(cancelled: true)
+            CameraBubblePanel.hide()
             try? FileManager.default.removeItem(at: packageURL)
             state = .idle
+            NSAlert(error: error).runModal()
+            ToolbarController.shared.show()
         }
     }
 
@@ -108,21 +125,30 @@ import RecorderCore
     }
 
     private func finishCapture() async {
-        defer { reset() }
+        defer { if state == .finishing { reset() } }
         guard let session, let packageURL else { return }
         hideHighlight()
 
-        guard let source = try? await session.finish() else {
-            await camera?.stop(cancelled: true)
-            try? FileManager.default.removeItem(at: packageURL)
-            return
+        var source: Source
+        do {
+            source = try await session.finish()
+        } catch {
+            await camera?.stop(cancelled: false)
+            NSAlert(error: error).runModal()
+            return // Keep the package available for recovery.
         }
         await camera?.stop(cancelled: false)
+        source.hasCamera = camera?.hasRecording == true
+        if let error = camera?.error {
+            NSAlert(error: error).runModal()
+            return // Preserve the package for recovery instead of claiming the camera saved.
+        }
 
         var project = Project(title: packageURL.deletingPathExtension().lastPathComponent,
                                source: source,
                                clips: [Clip(sourceStart: 0, sourceEnd: source.duration)])
         project.camera.corner = CameraBubblePanel.corner
+        project.audio.denoise = RecordingSettings.shared.denoise
 
         if let data = try? Data(contentsOf: packageURL.appendingPathComponent("events.json")),
            let log = try? JSONDecoder().decode(EventLog.self, from: data) {
@@ -132,13 +158,13 @@ import RecorderCore
         do {
             try project.save(to: packageURL.appendingPathComponent("project.json"))
         } catch {
-            NSLog("Recorder: failed to save project.json: \(error)")
+            NSAlert(error: error).runModal()
+            return
         }
 
-        await writeThumbnail(packageURL: packageURL)
-
-        // MARK: Editor hand-off call site
+        reset() // Restore normal activation policy before making the editor key.
         EditorWindowController.open(package: packageURL)
+        Task { await writeThumbnail(packageURL: packageURL) }
     }
 
     func cancel() {
@@ -178,6 +204,7 @@ import RecorderCore
         let session = self.session
         let camera = self.camera
         Task {
+            await camera?.finishWriting(cancelled: true)
             await session?.cancel()
             self.reset()
             await self.start(target: target, isRestart: true, restartCamera: camera)

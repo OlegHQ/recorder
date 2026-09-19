@@ -1,6 +1,6 @@
 import AppKit
 
-/// Borderless, non-activating, above everything, on all Spaces, HUD material, radius 16.
+/// Borderless, non-activating, above document windows, on all Spaces, HUD material, radius 16.
 /// Every recording-flow window uses this. SPEC §3 "floating panels", §4 window/panel rule.
 final class FloatingPanel: NSPanel {
     private let content: NSView
@@ -10,14 +10,12 @@ final class FloatingPanel: NSPanel {
         super.init(contentRect: NSRect(origin: .zero, size: content.fittingSize),
                     styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
 
+        hidesOnDeactivate = false
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
-        // SPEC §4 window/panel rule: `.screenSaver`-1 (above normal windows). `CGShieldingWindowLevel()` is the
-        // level of the system's screen-lock/transition shield surface, not a normal interactive HUD level; a
-        // window that high sits above menu bar/Dock/system UI where WindowServer doesn't treat it as an
-        // ordinary interactive window (broken vibrancy rendering, no mouse/key event routing).
-        level = NSWindow.Level(NSWindow.Level.screenSaver.rawValue - 1)
+        // Stay above document windows, but below modal dialogs, menus and system UI.
+        level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         isMovableByWindowBackground = draggable
 

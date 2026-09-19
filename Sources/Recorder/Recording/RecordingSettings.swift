@@ -9,6 +9,7 @@ import Observation
 
     static let shared = RecordingSettings()
 
+    var recordAllKeys: Bool { didSet { UserDefaults.standard.set(recordAllKeys, forKey: "recording.allKeys") } }
     var mode: Mode { didSet { UserDefaults.standard.set(mode.rawValue, forKey: Keys.mode) } }
     var cameraID: String? { didSet { UserDefaults.standard.set(cameraID, forKey: Keys.cameraID) } }
     var micID: String? { didSet { UserDefaults.standard.set(micID, forKey: Keys.micID) } }
@@ -45,6 +46,7 @@ import Observation
 
     private init() {
         let d = UserDefaults.standard
+        recordAllKeys = d.bool(forKey: "recording.allKeys")
         mode = Mode(rawValue: d.string(forKey: Keys.mode) ?? "") ?? .display
         cameraID = d.string(forKey: Keys.cameraID)
         micID = d.string(forKey: Keys.micID)

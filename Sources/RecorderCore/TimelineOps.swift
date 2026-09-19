@@ -318,7 +318,12 @@ public extension Project {
     /// that contains source time `s`. Returns its id, or `nil` if that gap is shorter than 0.5 s.
     @discardableResult
     mutating func addLayout(atSource s: Double, length: Double = 3, kind: Layout.Kind) -> UUID? {
-        addBlock(atSource: s, length: length, in: \.layouts) { id, start, end in Layout(id: id, start: start, end: end, kind: kind) }
+        let camera = self.camera
+        let kind: Layout.Kind = kind == .bubble && !source.hasCamera ? .settings : kind
+        let keys = kind == .settings ? self.keys : nil
+        return addBlock(atSource: s, length: length, in: \.layouts) { id, start, end in
+            Layout(id: id, start: start, end: end, kind: kind, camera: kind == .bubble ? camera : nil, keys: keys)
+        }
     }
 
     /// Moves layout `id` so it starts at source time `s`, clamped against its neighbours and
@@ -388,7 +393,7 @@ public extension Project {
             }) != nil else { return nil }
         } else if let mask = masks.first(where: { $0.id == key }) {
             guard masks.addBlock(atSource: mask.end, length: mask.end - mask.start, duration: source.duration, minLength: Self.minBlockLength, make: { start, end in
-                Mask(id: newID.uuidString, start: start, end: end, kind: mask.kind, rect: mask.rect, opacity: mask.opacity)
+                Mask(id: newID.uuidString, start: start, end: end, kind: mask.kind, rect: mask.rect, opacity: mask.opacity, transition: mask.transition)
             }) != nil else { return nil }
         } else {
             return nil

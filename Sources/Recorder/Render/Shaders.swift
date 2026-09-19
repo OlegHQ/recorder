@@ -77,7 +77,7 @@ float4 roundedRectShadow(float2 localPos, constant Uniforms &u, float4 texColor)
     float2 halfSize = u.contentSize * 0.5;
     float2 p = localPos - u.contentOffset;
     float2 q = abs(p) - halfSize + u.radius;
-    float d = length(max(q, 0.0)) - u.radius;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u.radius;
     float fillAlpha = 1.0 - smoothstep(-1.0, 1.0, d);
     // Native NSWindow shadow, fitted to a WindowServer capture of a key window (alpha profile of its
     // left/top/bottom edges): one Gaussian, sigma 20 pt, peak 0.39, dropped 17 pt, plus a 1 pt black
@@ -142,6 +142,23 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
         float4 result = roundedRectShadow(in.localPos, u, float4(rgb, 1.0));
         result.a *= u.globalAlpha;
         return result;
+    } else if (u.mode == 6 || u.mode == 7) {
+        // Gaussian blur in source coordinates, identical in preview and export.
+        float2 step = float2(6.0) / float2(tex.get_width(), tex.get_height());
+        float3 sum = float3(0.0);
+        float total = 0.0;
+        for (int y = -4; y <= 4; y++) {
+            for (int x = -4; x <= 4; x++) {
+                float weight = exp(-float(x*x + y*y) / 8.0);
+                float2 uv = in.uv + float2(x, y) * step;
+                float3 rgb = u.mode == 7
+                    ? ycbcr709VideoToRGB(tex.sample(smp, uv).r, texChroma.sample(smp, uv).rg)
+                    : tex.sample(smp, uv).rgb;
+                sum += rgb * weight;
+                total += weight;
+            }
+        }
+        return float4(sum / total, u.globalAlpha);
     } else {
         // Mode 5: cursor quad — N taps translated between prevContentOffset and contentOffset
         // (motion blur trail), each rotated back into its own local space and bounds-checked.

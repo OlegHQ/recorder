@@ -18,6 +18,121 @@ import UniformTypeIdentifiers
 /// Cases are registered by later tasks: `SelfTest.cases["name"] = { args in … throws }`.
 enum SelfTest {
     nonisolated(unsafe) static var cases: [String: ([String]) async throws -> Void] = [
+        "capture-exclusion": { _ in
+            struct Fail: Error { let description: String }
+            let first = await MainActor.run { () -> NSWindow in
+                NSApplication.shared.setActivationPolicy(.accessory)
+                NSApplication.shared.finishLaunching()
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 400),
+                                      styleMask: [.borderless], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.backgroundColor = NSColor(deviceRed: 1, green: 0, blue: 1, alpha: 1)
+                window.contentView?.wantsLayer = true
+                window.contentView?.layer?.backgroundColor = window.backgroundColor.cgColor
+                window.level = .floating
+                window.center()
+                window.orderFrontRegardless()
+                return window
+            }
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) else { throw Fail(description: "No display") }
+            let target = CaptureTarget.display(display)
+            let filter = target.filter(content: content, settings: RecordingSettings.shared)
+            // This panel did not exist when the recording filter was constructed.
+            let second = await MainActor.run { () -> NSWindow in
+                let window = NSWindow(contentRect: first.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.backgroundColor = NSColor(deviceRed: 1, green: 0, blue: 1, alpha: 1)
+                window.contentView?.wantsLayer = true
+                window.contentView?.layer?.backgroundColor = window.backgroundColor.cgColor
+                window.level = .floating
+                window.orderFrontRegardless()
+                return window
+            }
+            defer { Task { @MainActor in first.close(); second.close() } }
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let config = target.configuration(settings: RecordingSettings.shared)
+            config.width = 640; config.height = 360
+            let raw = try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: display, excludingWindows: []), configuration: config)
+            let clean = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            func magentaCount(_ image: CGImage) -> Int {
+                var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+                return pixels.withUnsafeMutableBytes { bytes in
+                    guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+                        bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return 0 }
+                    context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+                    var count = 0
+                    for i in stride(from: 0, to: bytes.count, by: 4) {
+                        if bytes[i] > 200 && bytes[i + 1] < 60 && bytes[i + 2] > 200 { count += 1 }
+                    }
+                    return count
+                }
+            }
+            let before = magentaCount(raw), after = magentaCount(clean)
+            guard before > 100, after < before / 2 else {
+                throw Fail(description: "Recorder panels were not excluded: raw=\(before), filtered=\(after)")
+            }
+            print("Excluded existing and newly created Recorder windows: \(before) → \(after) magenta pixels")
+        },
+        "idle-recording": { _ in
+            struct Fail: Error { let description: String }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("idle-\(UUID()).mov")
+            defer { try? FileManager.default.removeItem(at: url) }
+            let writer = try TrackWriter(url: url, videoSettings: [
+                AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: 64, AVVideoHeightKey: 64])
+            var pixel: CVPixelBuffer?
+            CVPixelBufferCreate(nil, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixel)
+            guard let pixel else { throw Fail(description: "pixel buffer") }
+            var format: CMVideoFormatDescription?
+            CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: pixel, formatDescriptionOut: &format)
+            var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 60), presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+            var sample: CMSampleBuffer?
+            CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: pixel, formatDescription: format!, sampleTiming: &timing, sampleBufferOut: &sample)
+            guard let sample else { throw Fail(description: "sample buffer") }
+            writer.append(sample, offset: .zero)
+            await writer.finish(at: CMTime(seconds: 12, preferredTimescale: 600))
+            if let error = writer.error { throw error }
+            let asset = AVURLAsset(url: url)
+            let duration = try await asset.load(.duration).seconds
+            guard abs(duration - 12) < 0.1 else { throw Fail(description: "idle recording truncated: \(duration)") }
+            let generator = AVAssetImageGenerator(asset: asset)
+            _ = try await generator.image(at: CMTime(seconds: 11, preferredTimescale: 600))
+            print("Idle recording: one frame held for \(duration) seconds, final second decodes")
+        },
+        "blur-render": { _ in
+            struct Fail: Error { let description: String }
+            guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
+                throw Fail(description: "Metal unavailable")
+            }
+            let compositor = try Compositor(device: device)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 128, height: 128, mipmapped: false)
+            desc.storageMode = .shared
+            desc.usage = [.shaderRead, .renderTarget]
+            let source = device.makeTexture(descriptor: desc)!
+            let target = device.makeTexture(descriptor: desc)!
+            var pixels = [UInt8](repeating: 255, count: 128 * 128 * 4)
+            for y in 0..<128 { for x in 0..<128 {
+                for c in 0..<3 { pixels[(y * 128 + x) * 4 + c] = x < 64 ? 0 : 255 }
+            } }
+            source.replace(region: MTLRegionMake2D(0, 0, 128, 128), mipmapLevel: 0, withBytes: pixels, bytesPerRow: 512)
+            var project = Project(source: Source(pixelWidth: 128, pixelHeight: 128, duration: 3))
+            project.frame = Frame(padding: 0, cornerRadius: 0, shadow: 0)
+            var samples: [UInt8] = []
+            for blurred in [false, true] {
+                project.masks = blurred ? [Mask(start: 0, end: 3, kind: .blur, opacity: 1)] : []
+                let state = FrameState(outputSize: CGSize(width: 128, height: 128), screen: .init(luma: source), camera: nil, sourceTime: 1, project: project)
+                let command = queue.makeCommandBuffer()!
+                compositor.render(state, to: target, commandBuffer: command)
+                command.commit()
+                command.waitUntilCompleted()
+                target.getBytes(&pixels, bytesPerRow: 512, from: MTLRegionMake2D(0, 0, 128, 128), mipmapLevel: 0)
+                samples.append(pixels[(64 * 128 + 60) * 4])
+            }
+            guard samples[0] < 5, samples[1] > 30, samples[1] < 220 else {
+                throw Fail(description: "blur did not soften edge: \(samples)")
+            }
+        },
         "metal": { _ in
             let device = MTLCreateSystemDefaultDevice()!
             _ = try device.makeLibrary(source: "kernel void k(uint2 g [[thread_position_in_grid]]) {}", options: nil)
@@ -116,7 +231,7 @@ enum SelfTest {
         "export-sheet": { args in try await ExportSheetSelfTest.run(args) },
         "export-sheet-png": { args in try await ExportSheetSelfTest.runPNG(args) },
         "camera-drag": { args in
-            // T-502: dragging the camera bubble in the preview snaps to the nearest corner, one
+            // Dragging the camera follows the pointer with normalized placement, one
             // `model.edit`. Synthetic mouse events, same technique as the `pickers` case below
             // (`SelectionRectView`'s drag tests) — `PreviewView` isn't in a real window here, so
             // `convert(_:from:)` treats the event location as already being in view-local coords.
@@ -143,22 +258,44 @@ enum SelfTest {
 
                 let from = CGPoint(x: view.bounds.width - 40, y: 40)     // inside the bottomRight bubble
                 let to = CGPoint(x: 40, y: view.bounds.height - 40)      // near the topLeft corner
+                let undoCount = model.undoStepCount
                 view.mouseDown(with: synthEvent(.leftMouseDown, from))
+                guard model.cameraInspectorRequested else { throw Fail(description: "camera click did not open controls") }
                 view.mouseDragged(with: synthEvent(.leftMouseDragged, to))
                 view.mouseUp(with: synthEvent(.leftMouseUp, to))
 
-                guard model.project.camera.corner == .topLeft else {
-                    throw Fail(description: "drag to top-left corner didn't snap: got \(model.project.camera.corner)")
+                guard model.project.camera.position == NormPoint(x: 0, y: 0) else {
+                    throw Fail(description: "drag to top-left did not update position: got \(model.project.camera.corner)")
                 }
+
+                guard model.undoStepCount == undoCount + 1 else { throw Fail(description: "drag must be one undo step") }
 
                 // A click that starts OUTSIDE the bubble must not move it (one `model.edit` only for
                 // an actual bubble drag).
                 view.mouseDown(with: synthEvent(.leftMouseDown, CGPoint(x: view.bounds.midX, y: view.bounds.midY)))
                 view.mouseUp(with: synthEvent(.leftMouseUp, CGPoint(x: view.bounds.midX, y: view.bounds.midY)))
-                guard model.project.camera.corner == .topLeft else {
+                guard model.project.camera.position == NormPoint(x: 0, y: 0) else {
                     throw Fail(description: "a click outside the bubble moved it: \(model.project.camera.corner)")
                 }
-                print("camera-drag OK: snapped bottomRight -> topLeft, outside-click ignored")
+                model.undo()
+                guard model.project.camera.position == nil else { throw Fail(description: "camera drag undo failed") }
+                let layout = Layout(start: 0, end: 10, kind: .bubble, camera: Camera())
+                model.edit("Camera block fixture") { $0.layouts = [layout] }
+                model.playhead = 5
+                view.mouseDown(with: synthEvent(.leftMouseDown, from))
+                view.mouseDragged(with: synthEvent(.leftMouseDragged, to))
+                view.mouseUp(with: synthEvent(.leftMouseUp, to))
+                guard model.selection == [UUID(uuidString: layout.id)!],
+                      model.project.layouts[0].camera?.position == NormPoint(x: 0, y: 0),
+                      model.project.camera.position == nil else {
+                    throw Fail(description: "camera drag must select and edit the active block only")
+                }
+                model.edit("Hidden fixture") { $0.layouts[0].kind = .hidden }
+                model.selection = []
+                view.mouseDown(with: synthEvent(.leftMouseDown, from))
+                view.mouseUp(with: synthEvent(.leftMouseUp, from))
+                guard model.selection.isEmpty else { throw Fail(description: "hidden camera intercepted click") }
+                print("camera-drag OK: continuous placement, selection, block editing, undo, hidden hit-test")
             }
         },
         "library": { _ in
@@ -360,6 +497,14 @@ enum SelfTest {
             try await Task.sleep(nanoseconds: 700_000_000)
             let onDisk = try Project.load(from: projectURL)
             guard onDisk.title == "Persisted" else { throw Fail(description: "autosave didn't persist: \(onDisk.title)") }
+            try fm.removeItem(at: tmp)
+            await model.saveNow()
+            guard await model.saveError != nil else { throw Fail(description: "save failure was hidden") }
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            await model.saveNow()
+            guard await model.saveError == nil, await model.saveStatus == "Saved" else {
+                throw Fail(description: "save retry didn't recover")
+            }
         },
         // T-310: (a) `CropMapping`'s view↔NormRect round trip for a letterboxed case, (b) `CropSheet.confirm`
         // (the exact closure the sheet's Confirm button calls) drives a real `EditorModel` in one undo step,
@@ -1054,6 +1199,7 @@ enum SelfTest {
                 guard let window = EditorWindowController.makeOffscreen(package: packageURL) else {
                     throw Fail(description: "couldn't load project.json at \(packageURL.path)")
                 }
+                window.appearance = NSAppearance(named: .darkAqua)
                 let capture = window.contentView?.superview ?? window.contentView
                 guard let capture else { throw Fail(description: "no capturable view") }
                 capture.layoutSubtreeIfNeeded()
@@ -1503,6 +1649,16 @@ enum SelfTest {
             }
             try? FileManager.default.removeItem(at: dir)
         },
+        "devices": { _ in
+            for media in [AVMediaType.video, .audio] {
+                print("\(media.rawValue) authorization=\(AVCaptureDevice.authorizationStatus(for: media).rawValue)")
+                let types: [AVCaptureDevice.DeviceType] = media == .video
+                    ? [.builtInWideAngleCamera, .external, .continuityCamera] : [.microphone, .external]
+                for device in AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: media, position: .unspecified).devices {
+                    print("\(device.localizedName): \(device.uniqueID)")
+                }
+            }
+        },
         "record": { args in
             let kind = args.first ?? "display"
             let seconds = args.count > 1 ? (Double(args[1]) ?? 3) : 3
@@ -1515,13 +1671,32 @@ enum SelfTest {
             let target = CaptureTarget.display(display)
             let packageURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("recorder-selftest-record-\(UUID().uuidString).recorder")
-            let session = try await CaptureSession(target: target, settings: RecordingSettings.shared, packageURL: packageURL)
+            let settings = RecordingSettings.shared
+            let originalMic = settings.micID
+            let originalAudio = settings.systemAudio
+            defer { settings.micID = originalMic; settings.systemAudio = originalAudio }
+            // Optional: record display 3 <mic-device-ID|off> <all|off|app-bundle-ID>
+            if args.count > 2 { settings.micID = args[2] == "off" ? nil : args[2] }
+            if args.count > 3 {
+                settings.systemAudio = args[3] == "all" ? .all : args[3] == "off" ? .off : .apps([args[3]])
+            }
+            defer { try? FileManager.default.removeItem(at: packageURL) }
+            let session = try await CaptureSession(target: target, settings: settings, packageURL: packageURL)
             try await session.start()
             try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             let source = try await session.finish()
+            if settings.micID != nil, !source.hasMic { throw NSError(domain: "SelfTest.record", code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "selected microphone produced no audio samples"]) }
+            for (name, present) in [("mic.m4a", source.hasMic), ("system.m4a", source.hasSystemAudio)] where present {
+                let audio = AVURLAsset(url: packageURL.appendingPathComponent(name))
+                guard try await !audio.loadTracks(withMediaType: .audio).isEmpty else {
+                    throw NSError(domain: "SelfTest.record", code: 8, userInfo: [NSLocalizedDescriptionKey: "\(name) has no playable audio track"])
+                }
+            }
+            print("Audio: microphone=\(source.hasMic), system=\(source.hasSystemAudio)")
 
-            guard (2.5...3.5).contains(source.duration) else {
-                throw NSError(domain: "SelfTest.record", code: 3, userInfo: [NSLocalizedDescriptionKey: "duration \(source.duration) out of range 2.5...3.5"])
+            guard abs(source.duration - seconds) < 0.75 else {
+                throw NSError(domain: "SelfTest.record", code: 3, userInfo: [NSLocalizedDescriptionKey: "duration \(source.duration) differs from requested \(seconds) seconds"])
             }
             let asset = AVURLAsset(url: packageURL.appendingPathComponent("screen.mov"))
             guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -1540,6 +1715,68 @@ enum SelfTest {
         },
         "record-perf": { args in try await PerfSelfTest.runRecordPerf(args) },
         "idle-perf": { args in try await PerfSelfTest.runIdlePerf(args) },
+        "permission-return": { _ in try await ToolbarController.runPermissionReturnSelfTest() },
+        "recording-ui": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            try await MainActor.run {
+                _ = NSApplication.shared
+                let toolbar = ToolbarController.shared
+                defer { toolbar.close() }
+                let panel = FloatingPanel(content: NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 50)), draggable: false)
+                guard !panel.hidesOnDeactivate else {
+                    throw Fail(description: "recording controls disappear when permission UI takes focus")
+                }
+                let previewLayer = AVCaptureVideoPreviewLayer(session: AVCaptureSession())
+                CameraBubblePanel.show(previewLayer: previewLayer)
+                defer { CameraBubblePanel.hide() }
+                guard let bubble = NSApp.windows.first(where: { $0 is FloatingPanel && $0.isVisible }) else {
+                    throw Fail(description: "camera preview bubble did not appear")
+                }
+                bubble.contentView?.layoutSubtreeIfNeeded()
+                guard previewLayer.superlayer != nil, previewLayer.frame.width > 0, previewLayer.frame.height > 0 else {
+                    throw Fail(description: "camera preview has no visible layer")
+                }
+                guard bubble.contentView?.layer === previewLayer.superlayer,
+                      !bubble.isOpaque, bubble.backgroundColor.alphaComponent == 0,
+                      previewLayer.cornerRadius == 40, previewLayer.masksToBounds else {
+                    throw Fail(description: "camera corners have a panel backing instead of transparency")
+                }
+                guard panel.level.rawValue < NSWindow.Level.modalPanel.rawValue else {
+                    throw Fail(description: "floating controls cover modal dialogs")
+                }
+                let dialog = NSAlert().window
+                for mode in [RecordingSettings.Mode.display, .window, .area] {
+                    SourcePickerOverlay.show(mode: mode)
+                    guard SourcePickerOverlay.isOpen || AreaSelectionOverlay.isOpen else {
+                        throw Fail(description: "picker did not open")
+                    }
+                    let overlays = NSApp.windows.filter { $0.isVisible && FloatingPanel.allWindowIDs.contains(CGWindowID($0.windowNumber)) }
+                    guard !overlays.isEmpty, overlays.allSatisfy({ $0.level.rawValue < NSWindow.Level.modalPanel.rawValue }) else {
+                        throw Fail(description: "picker covers dialogs or menus")
+                    }
+                    // Reproduce a confirmation taking focus, without blocking in a live modal loop.
+                    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: dialog)
+                    guard !SourcePickerOverlay.isOpen, !AreaSelectionOverlay.isOpen else {
+                        throw Fail(description: "confirmation left a blocking picker open")
+                    }
+                    SourcePickerOverlay.show(mode: mode)
+                    toolbar.handleEscape()
+                    guard !SourcePickerOverlay.isOpen, !AreaSelectionOverlay.isOpen else {
+                        throw Fail(description: "Escape did not dismiss picker")
+                    }
+                    if let otherApp = NSWorkspace.shared.runningApplications.first(where: {
+                        $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+                    }) {
+                        SourcePickerOverlay.show(mode: mode)
+                        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didActivateApplicationNotification,
+                            object: nil, userInfo: [NSWorkspace.applicationUserInfoKey: otherApp])
+                        guard !SourcePickerOverlay.isOpen, !AreaSelectionOverlay.isOpen else {
+                            throw Fail(description: "switching apps left a blocking picker open")
+                        }
+                    }
+                }
+            }
+        },
         "pickers": { _ in
             // T-107/T-108 bug fix regression coverage: `SelectionRectView`'s create/resize drag math
             // (AC-AREA-1/2) and `SourcePickerOverlay`'s window hit-test ordering (AC-WIN-1), both driven
@@ -2289,6 +2526,31 @@ private func runTimelineOpsSelfTest() async throws {
     do {
         let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
         defer { cleanup() }
+        for y in [py(82), py(140)] {
+            for (start, end) in [(2.0, 8.0), (8.0, 2.0)] {
+                let before = model.project
+                let count = model.undoStepCount
+                view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(start), y: y)))
+                view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(end), y: y), modifiers: .command))
+                view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(end), y: y)))
+                let range = y == py(82) ? model.project.zooms.map { ($0.start, $0.end) } : model.project.masks.map { ($0.start, $0.end) }
+                guard range.count == 1, abs(range[0].0 - 2) < 0.01, abs(range[0].1 - 8) < 0.01,
+                      model.undoStepCount == count + 1, model.project.checkInvariants() == nil else {
+                    throw TimelineOpsFail(description: "drag-to-create range / undo failed")
+                }
+                model.undo()
+                guard model.project == before else { throw TimelineOpsFail(description: "creation undo failed") }
+            }
+            let before = model.project
+            view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: y)))
+            view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(8), y: y)))
+            view.cancelOperation(nil)
+            guard model.project == before else { throw TimelineOpsFail(description: "creation Escape failed") }
+        }
+    }
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
         try runSplitSelfTest(model: model, view: view, px: px, py: py)
     }
     do {
@@ -2762,14 +3024,14 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
     // With a camera, lane order is ruler(22) + clip(44) + zoom(32) + layout(28) = 98...126.
     let layoutLaneY = py(112)
 
-    // Empty-lane click adds a `cameraFull` layout block starting at the click's source time
+    // Empty-lane click adds a `bubble` layout block starting at the click's source time
     // (the gap [0, 20) is wide open, so `addLayout`'s default 3 s block starts exactly at 10:
     // [10, 13)), selects it, one undo step.
     let undoBeforeAdd = model.undoStepCount
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(10), y: layoutLaneY)))
     view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(10), y: layoutLaneY)))
-    guard model.project.layouts.count == 1, model.project.layouts[0].kind == .cameraFull else {
-        throw TimelineOpsFail(description: "empty-lane click didn't add a cameraFull layout: \(model.project.layouts)")
+    guard model.project.layouts.count == 1, model.project.layouts[0].kind == .bubble else {
+        throw TimelineOpsFail(description: "empty-lane click didn't add a bubble layout: \(model.project.layouts)")
     }
     guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after addLayout") }
     guard model.undoStepCount == undoBeforeAdd + 1 else { throw TimelineOpsFail(description: "addLayout should push exactly one undo step") }
@@ -2844,7 +3106,7 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
 @MainActor
 private func runMaskBlockSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
     // No camera ⇒ layout lane is 0 pt, so mask is the third lane: ruler(22) + clip(44) + zoom(32) = 98...126.
-    let maskLaneY = py(112)
+    let maskLaneY = py(140)
 
     // Empty-lane click adds a `mask`-kind block at the click's source time (the gap [0, 20) is
     // wide open, so `addMask`'s default 3 s block starts exactly at 10: [10, 13)), selects it,
@@ -2852,7 +3114,7 @@ private func runMaskBlockSelfTest(model: EditorModel, view: TimelineView, px: (D
     let undoBeforeAdd = model.undoStepCount
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(10), y: maskLaneY)))
     view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(10), y: maskLaneY)))
-    guard model.project.masks.count == 1, model.project.masks[0].kind == .mask else {
+    guard model.project.masks.count == 1, model.project.masks[0].kind == .blur else {
         throw TimelineOpsFail(description: "empty-lane click didn't add a mask block: \(model.project.masks)")
     }
     guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after addMask") }
@@ -2902,8 +3164,8 @@ private func runMaskBlockSelfTest(model: EditorModel, view: TimelineView, px: (D
     // Hit-test: the mask lane now participates like zoom/layout (SPEC §7.2's hit-test table).
     // `hitTest(at:)` takes a point directly in the view's own (flipped) local space — unlike the
     // `synthMouse`-fed events above, which go through `mouseDown`'s `convert(_:from: nil)` and so
-    // need the pre-flipped `maskLaneY`; a direct `hitTest` call uses the un-converted local y (112).
-    let bodyPoint = CGPoint(x: px((resized.start + resized.end) / 2), y: 112)
+    // need the pre-flipped `maskLaneY`; a direct `hitTest` call uses the un-converted local y (140).
+    let bodyPoint = CGPoint(x: px((resized.start + resized.end) / 2), y: 140)
     guard case .blockBody(let hitID) = view.hitTest(at: bodyPoint), hitID == maskID else {
         throw TimelineOpsFail(description: "hitTest over the mask body didn't return .blockBody(maskID): \(view.hitTest(at: bodyPoint))")
     }

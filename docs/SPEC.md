@@ -163,8 +163,8 @@ Dark-only UI. Put these in one file (`Theme.swift`) and never hard-code colours 
 
 ## 4. Screens — recording flow
 
-Window/panel rule: every recording-flow surface is a borderless non-activating `NSPanel` at level `.screenSaver`-1
-(above normal windows), `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]`, and **excluded from capture**
+Window/panel rule: interactive recording-flow surfaces are borderless non-activating `NSPanel`s at level `.floating`
+(pickers one level below, all below modal dialogs and system menus), `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]`, and **excluded from capture**
 (`SCContentFilter(... excludingWindows:)` with all of our own windows).
 
 ### 4.1 Onboarding / permissions  (ref: `12.50.10.png`)
@@ -201,8 +201,13 @@ Shown at launch whenever a required permission is missing. 660×470, not resizab
 
 ### 4.2 Recording toolbar  (ref: `12.50.40.png`, `13.02.09.png`)
 
-Opens on launch, on dock-icon click, on `Record ▸ New Recording` (⌘N), and on the global hotkey. Bottom-centre of the
+Opens on launch, on the menu-bar New Recording/source actions, on `File ▸ New Recording` (⌘N), and on the global hotkey. Bottom-centre of the
 active display, 40 pt above the Dock. Draggable by its background.
+
+Dock reopening returns to the existing editor/projects window (or opens Projects), never starts source selection.
+Focusing a titled app window or switching to another application dismisses recording setup. Setup cannot reopen during countdown or capture.
+Starting a recording dismisses setup before countdown; Escape restores setup. Once capture starts, the selected
+window's application is activated and that window is raised.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────╮
@@ -226,7 +231,7 @@ Menus (all native `NSMenu`, check-marked current item — ref `13.03.07`, `13.03
    …each AVCaptureDevice         MacBook Air Microphone                 Record system audio from selected apps ▸ (app list, multi-check)
  ─────────────────────         ──────────────────────────────────     ─────────────────────────────────────
  ✓ Don't record camera           Reduce noise and normalize volume    ✓ Don't record system audio
-                                 Disable auto gain control
+                                 Microphone gain: macOS / device controlled
                                ──────────────────────────────────
                                ✓ Don't record microphone
 
@@ -360,7 +365,7 @@ is recorded to `camera.mov` and composited in the editor. Its corner becomes the
 - `t0` = PTS of the first complete screen frame. Every sample/event is stored as `pts − t0 − pausedSoFar`.
 - `EventRecorder`: listen-only `CGEventTap` for `mouseMoved`, `left/right/otherMouseDown/Up`, `*MouseDragged`, `scrollWheel`, `keyDown`, `flagsChanged`.
   Position is converted to **normalised source coordinates** (0…1, origin top-left of the captured rect/window) at record time; for window capture re-read the window frame (`SCWindow.frame` via a 10 Hz poll) so moves are tolerated.
-  Key events store only `keyCode` + modifier flags, and **only when a modifier (⌘/⌃/⌥) is held or the key is non-printing** — never log typed text. Typing activity is stored as timestamps only (for "speed up typing").
+  Key events store `keyCode` + modifier flags. By default only shortcuts and non-printing keys are recorded; Settings → Record all keystrokes explicitly enables printable key codes for future recordings. Typing timestamps remain available for "speed up typing" in both modes. The editor can filter all recorded keys back to shortcuts; older timestamp-only events cannot be reconstructed.
 - Cursor image: 60 Hz timer reads `NSCursor.currentSystem` (deprecated but functional; ponytail: replace if Apple removes it); hash the image, write new ones to `cursors/<hash>.png` at the largest representation with hot-spot, and log `cursorChange` events.
 
 ---
@@ -785,3 +790,33 @@ Open questions to verify during M1 (do not guess — test and record the answer 
    desktop-icons window. Its other windows are layer 0 (menu-bar strips, browser windows) or small layer 3/103
    helpers. `CaptureTarget.filter` excludes every Finder window at that level when "Hide desktop icons" is on,
    which matches (a). Still to eyeball in a real recording: (b) icons actually vanish, (c) the wallpaper stays.
+
+
+### Recording/editor polish (2026-09-19)
+
+- Finish holds the final screen frame through the stop timestamp, including idle content; writer failures retain the recording package and display the error.
+- Restore the regular app activation policy and open the loaded editor before generating the thumbnail.
+- Aspect and resize menus pair ratios/resolutions with purpose labels (Full HD, Stories/Reels, social square, Mac display). Export is a prominent 112 × 34 pt accent button.
+- Drag across an empty zoom, mask, or layout lane to choose the range, in either direction. Existing minimum length, neighbour clamping, snapping, Escape cancellation and one-step undo apply. Click and keyboard insertion remain available.
+- New timeline masks default to full-opacity blur. The inspector offers Cover, Blur, and Highlight, plus optional smooth fades (off by default). `Mask.transition` stores fade seconds, defaults to zero for old projects, and survives duplication. Preview and export share the implementation.
+- Autosave displays Saving/Saved or an error with retry. Pending saves pause during a gesture and resume on commit/cancel.
+- Single-window capture excludes its baked shadow so the compositor applies the calibrated macOS-style shadow once. The analytic profile remains an approximation, not a guaranteed pixel-identical WindowServer shadow.
+
+### Camera editing additions
+
+- Click the camera in the editor preview to open its controls (or its active camera timeline block). Drag to position it continuously within the canvas; a completed drag is one undo step.
+- Size spans 10–100% of the canvas short edge. Choose square, 16:9, 4:3 or 9:16 aspect ratios, corner presets or normalized horizontal/vertical placement. Old projects retain square, corner-based placement.
+- The camera timeline lane adds visible/size/position blocks by default. Select a block to set its size, aspect and position, switch it to hidden or fullscreen, or remove it. Existing block move, trim, snapping and undo apply. Gaps use the default camera settings; block edges ease in/out over 0.3 seconds.
+- The camera texture uses a centered cover crop matched to the current animated rectangle, including fullscreen. It preserves source proportions rather than stretching a square crop. Preview and export share this geometry.
+
+### Overlay settings clips (September 2026)
+
+Camera and keystrokes have a 3×3 position grid (including center), precise normalized position sliders,
+and size controls. Keystrokes additionally expose visibility, all-keys/shortcuts filtering, and display duration.
+The shared overlay timeline lane is available even without a camera. Settings clips can override camera
+layout/style and optionally keystrokes together, or keystrokes alone. Drag/trim/delete uses the existing
+source-time block operations and undo. Numeric settings ease from/to project defaults at clip boundaries;
+visibility fades, discrete switches apply inside the clip, and transition 0 switches instantly.
+Camera roundness/shadow animate alongside size/aspect/position; mirror is a discrete switch.
+Display/area capture excludes the Recorder application, including windows opened after capture starts;
+Finder desktop-icon exceptions remain independent. Preview and export share the same overlay evaluation.

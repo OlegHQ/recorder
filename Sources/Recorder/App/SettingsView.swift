@@ -53,6 +53,8 @@ struct SettingsView: View {
                     Text("5 s").tag(5)
                     Text("10 s").tag(10)
                 }
+                Toggle("Record all keystrokes", isOn: $settings.recordAllKeys)
+                Text("Includes typed keys in future recordings. Leave off for shortcuts only.").font(.caption)
                 Toggle("Hide desktop icons in recorded video", isOn: $settings.hideDesktopIcons)
                 Toggle("Hide Recorder dock icon while recording", isOn: $settings.hideDockIcon)
                 Toggle("Highlight recorded area during recording", isOn: $settings.highlightArea)

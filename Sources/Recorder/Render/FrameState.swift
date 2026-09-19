@@ -60,7 +60,8 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
     // T-602: the active key chip, if the Keys tab's "Show keyboard shortcuts" is on and a `.key`
     // event is within `activeKeyChip`'s hold window (`RecorderCore/KeyChips.swift`, already merged).
     var keyChip: FrameState.KeyChipState?
-    if model.project.keys.show, let chip = activeKeyChip(events: model.events.events, atSource: sourceTime) {
+    let keys = overlayKeys(project: model.project, atSource: sourceTime)
+    if keys.opacity > 0, let chip = activeKeyChip(events: model.events.events, atSource: sourceTime, hold: keys.settings.hold, allKeys: keys.settings.allKeys) {
         keyChip = FrameState.KeyChipState(label: chip.label, age: chip.age)
     }
     return FrameState(outputSize: size, screen: screen, camera: camera, view: view, prevView: prevView, cursor: cursor,

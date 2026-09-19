@@ -3,7 +3,7 @@ import SwiftUI
 import AVFoundation
 
 /// Owns the recording toolbar panel (SPEC §4.2) and every native `NSMenu` it pops (camera, microphone,
-/// system audio, settings gear). Shown on launch (permissions granted), dock click, `⌘N`, status item.
+/// system audio, settings gear). Shown on launch (permissions granted), `⌘N`, status item.
 final class ToolbarController: NSObject {
     static let shared = ToolbarController()
 
@@ -12,15 +12,39 @@ final class ToolbarController: NSObject {
     /// Live while a camera is selected (SPEC §4.6): feeds `CameraBubblePanel`'s preview and, once
     /// recording actually starts, `camera.mov`. Retained here so its `AVCaptureSession` stays alive.
     private var cameraCapture: CameraCapture?
+    private var deviceRequest = UUID()
+    private var requestingDeviceAccess = false
 
-    private override init() { super.init() }
+    private override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(documentBecameKey(_:)),
+                                               name: NSWindow.didBecomeKeyNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(applicationActivated(_:)),
+                                                          name: NSWorkspace.didActivateApplicationNotification, object: nil)
+    }
 
-    func show() {
+    @objc private func applicationActivated(_ notification: Notification) {
+        // TCC and other system UI agents can announce activation after their dialog callback.
+        // Only a switch to a regular app represents leaving recording setup.
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              app.activationPolicy == .regular,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        guard !requestingDeviceAccess else { return }
+        close()
+    }
+
+    @objc private func documentBecameKey(_ notification: Notification) {
+        guard !requestingDeviceAccess, let window = notification.object as? NSWindow,
+              window.styleMask.contains(.titled) else { return }
+        close()
+    }
+
+    @MainActor func show() {
         // Onboarding (T-102) owns this window while permissions are missing (AC-ONB-1).
-        guard Permissions.allGranted else { return }
-        if let panel {
-            panel.makeKeyAndOrderFront(nil)
-            SourcePickerOverlay.show(mode: RecordingSettings.shared.mode)
+        guard Permissions.allGranted, RecordingController.shared.state == .idle,
+              NSApp.modalWindow == nil, !requestingDeviceAccess else { return }
+        if panel != nil {
+            presentPicker()
             return
         }
 
@@ -35,15 +59,27 @@ final class ToolbarController: NSObject {
 
         let p = FloatingPanel(content: view, draggable: true)
         position(p)
-        p.makeKeyAndOrderFront(nil)
         panel = p
         observeDevices()
-        SourcePickerOverlay.show(mode: RecordingSettings.shared.mode)
+        presentPicker()
+        guard panel === p else { return }
         updateCameraBubble(deviceID: RecordingSettings.shared.cameraID) // reshow a previously-selected camera
+    }
+
+    private func presentPicker() {
+        guard let panel, !requestingDeviceAccess else { return }
+        SourcePickerOverlay.show(mode: RecordingSettings.shared.mode)
+        // Ordering windows delivers focus notifications synchronously; close() may run inside it.
+        guard self.panel === panel else { SourcePickerOverlay.close(); return }
+        panel.orderFrontRegardless()
+        panel.makeKeyAndOrderFront(nil)
     }
 
     /// `ⓧ` or `Esc`: close the toolbar and any overlay; the app keeps running (SPEC §4.2, AC-TB-4).
     func close() {
+        guard panel != nil || SourcePickerOverlay.isOpen || AreaSelectionOverlay.isOpen else { return }
+        deviceRequest = UUID()
+        requestingDeviceAccess = false
         SourcePickerOverlay.close()
         panel?.orderOut(nil)
         panel = nil
@@ -55,9 +91,10 @@ final class ToolbarController: NSObject {
     /// Sets the recording mode and shows its picker overlay (SPEC §4.2: "selecting a source mode
     /// immediately shows that mode's overlay"). The one entry point for mode selection — reused by the
     /// toolbar buttons here, the status-item menu (T-207b) and global hotkeys (T-204).
-    func selectMode(_ mode: RecordingSettings.Mode) {
+    @MainActor func selectMode(_ mode: RecordingSettings.Mode) {
+        guard RecordingController.shared.state == .idle, NSApp.modalWindow == nil else { return }
         RecordingSettings.shared.mode = mode
-        SourcePickerOverlay.show(mode: mode)
+        show()
     }
 
     /// `Esc`, from any of our windows — the toolbar panel or any overlay (`SourcePickerWindow`,
@@ -149,21 +186,81 @@ final class ToolbarController: NSObject {
     /// is selected, a live preview bubble appears." Resolves TCC (and any device open failure) async;
     /// bails out gracefully, and drops a stale result if the selection changed again meanwhile.
     private func updateCameraBubble(deviceID: String?) {
-        guard let deviceID else {
-            cameraCapture = nil
-            CameraBubblePanel.hide()
-            return
-        }
-        CameraCapture.request(deviceID: deviceID) { [weak self] capture in
-            guard let self, RecordingSettings.shared.cameraID == deviceID else { return } // superseded / controller gone
-            guard let capture else {
-                self.cameraCapture = nil
-                CameraBubblePanel.hide()
+        cameraCapture = nil
+        CameraBubblePanel.hide()
+        guard let deviceID else { return }
+        requestDeviceAccess(.video) { [weak self] granted in
+            guard let self, self.panel != nil, RecordingSettings.shared.cameraID == deviceID else { return }
+            guard granted else {
+                RecordingSettings.shared.cameraID = nil
                 return
             }
-            self.cameraCapture = capture
-            CameraBubblePanel.show(previewLayer: capture.previewLayer)
+            CameraCapture.request(deviceID: deviceID) { capture in
+                guard let capture else {
+                    RecordingSettings.shared.cameraID = nil
+                    self.showDeviceError("The selected camera could not be opened. Check that it is connected and available.")
+                    return
+                }
+                self.cameraCapture = capture
+                CameraBubblePanel.show(previewLayer: capture.previewLayer)
+            }
         }
+    }
+
+    /// Keep the permission transaction alive through window ordering, which re-enters observers.
+    private func suspendForDeviceAccess() -> UUID {
+        deviceRequest = UUID()
+        requestingDeviceAccess = true
+        SourcePickerOverlay.close()
+        panel?.orderOut(nil)
+        return deviceRequest
+    }
+
+    private func restoreAfterDeviceAccess(request: UUID, completion: @escaping () -> Void) {
+        // Leave native menu tracking / permission-dialog dismissal before ordering our panel.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.deviceRequest == request, let panel = self.panel else { return }
+            SourcePickerOverlay.close()
+            panel.orderFrontRegardless()
+            panel.makeKeyAndOrderFront(nil)
+            guard self.deviceRequest == request, self.panel === panel else { return }
+            // Do not reopen an input-intercepting picker after a system dialog. The visible
+            // toolbar's mode buttons explicitly resume source selection.
+            completion()
+            if self.deviceRequest == request { self.requestingDeviceAccess = false }
+        }
+    }
+
+    private func requestDeviceAccess(_ mediaType: AVMediaType, completion: @escaping (Bool) -> Void) {
+        let status = AVCaptureDevice.authorizationStatus(for: mediaType)
+        if status == .authorized { completion(true); return }
+        let request = suspendForDeviceAccess()
+        let finish: (Bool) -> Void = { [weak self] granted in
+            guard let self, self.deviceRequest == request, self.panel != nil else { return }
+            if !granted {
+                let alert = NSAlert()
+                alert.messageText = "Recording device unavailable"
+                alert.informativeText = "Allow \(mediaType == .video ? "Camera" : "Microphone") access for Recorder in System Settings → Privacy & Security, then select the device again."
+                alert.runModal()
+            }
+            self.restoreAfterDeviceAccess(request: request) { completion(granted) }
+        }
+        if status == .notDetermined {
+            AVCaptureDevice.requestAccess(for: mediaType) { granted in
+                DispatchQueue.main.async { finish(granted) }
+            }
+        } else {
+            DispatchQueue.main.async { finish(false) }
+        }
+    }
+
+    private func showDeviceError(_ message: String) {
+        let request = suspendForDeviceAccess()
+        let alert = NSAlert()
+        alert.messageText = "Recording device unavailable"
+        alert.informativeText = message
+        alert.runModal()
+        restoreAfterDeviceAccess(request: request) {}
     }
 
     // MARK: - Microphone menu
@@ -171,24 +268,29 @@ final class ToolbarController: NSObject {
     private func showMicrophoneMenu() {
         let s = RecordingSettings.shared
         let menu = NSMenu()
-        for device in AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone], mediaType: .audio, position: .unspecified).devices {
+        for device in AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices {
             menu.addItem(menuItem(device.localizedName, checked: s.micID == device.uniqueID,
                                    action: #selector(selectMicrophone(_:)), represented: device.uniqueID))
         }
         menu.addItem(.separator())
-        menu.addItem(menuItem("Reduce noise and normalize volume", checked: s.denoise, action: #selector(toggleDenoise)))
-        menu.addItem(menuItem("Disable auto gain control", checked: s.disableAGC, action: #selector(toggleDisableAGC)))
+        menu.addItem(menuItem("Reduce noise and normalize volume on export", checked: s.denoise, action: #selector(toggleDenoise)))
+        let gain = NSMenuItem(title: "Microphone gain is controlled by macOS / your device", action: nil, keyEquivalent: "")
+        menu.addItem(gain)
         menu.addItem(.separator())
         menu.addItem(menuItem("Don't record microphone", checked: s.micID == nil, action: #selector(selectMicrophone(_:))))
         popUp(menu)
     }
 
     @objc private func selectMicrophone(_ sender: NSMenuItem) {
-        RecordingSettings.shared.micID = sender.representedObject as? String
+        let id = sender.representedObject as? String
+        RecordingSettings.shared.micID = id
+        guard let id else { return }
+        requestDeviceAccess(.audio) { granted in
+            if !granted, RecordingSettings.shared.micID == id { RecordingSettings.shared.micID = nil }
+        }
     }
 
     @objc private func toggleDenoise() { RecordingSettings.shared.denoise.toggle() }
-    @objc private func toggleDisableAGC() { RecordingSettings.shared.disableAGC.toggle() }
 
     // MARK: - System audio menu
 
@@ -261,4 +363,58 @@ final class ToolbarController: NSObject {
 /// responder action (`FloatingPanel` is `final`, so this lives on the content view instead of a panel subclass).
 private final class ToolbarHostingView: NSHostingView<ToolbarView> {
     override func cancelOperation(_ sender: Any?) { ToolbarController.shared.handleEscape() }
+}
+
+// Exercises real panel ordering and re-entrant notifications without changing the user's TCC grants.
+extension ToolbarController {
+    @MainActor static func runPermissionReturnSelfTest() async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let toolbar = ToolbarController()
+        defer { toolbar.close() }
+        for mode in [RecordingSettings.Mode.display, .window, .area] {
+            let panel = FloatingPanel(content: NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 56)), draggable: true)
+            toolbar.panel = panel
+            panel.orderFrontRegardless()
+            SourcePickerOverlay.show(mode: mode)
+            let request = toolbar.suspendForDeviceAccess()
+            guard !panel.isVisible, !SourcePickerOverlay.isOpen, !AreaSelectionOverlay.isOpen else {
+                throw Fail(description: "permission prompt left recording controls or picker visible")
+            }
+            let dialog = NSAlert().window
+            // A document can become key as the permission dialog disappears or the panel is ordered.
+            var deliveredFocus = false
+            let observer = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                object: panel, queue: .main) { _ in
+                deliveredFocus = true
+                NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: dialog)
+            }
+            var restored = false
+            toolbar.restoreAfterDeviceAccess(request: request) { restored = true }
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            NotificationCenter.default.removeObserver(observer)
+            guard deliveredFocus, restored, toolbar.panel === panel, panel.isVisible, !toolbar.requestingDeviceAccess,
+                  !SourcePickerOverlay.isOpen, !AreaSelectionOverlay.isOpen else {
+                throw Fail(description: "permission return lost toolbar or reopened a blocking picker (\(mode))")
+            }
+            toolbar.presentPicker()
+            guard panel.isVisible, SourcePickerOverlay.isOpen || AreaSelectionOverlay.isOpen else {
+                throw Fail(description: "source selection could not resume from restored toolbar")
+            }
+            // Closing setup before an outstanding callback arrives must never resurrect it.
+            let cancelled = toolbar.suspendForDeviceAccess()
+            toolbar.close()
+            var staleCompletionRan = false
+            toolbar.restoreAfterDeviceAccess(request: cancelled) { staleCompletionRan = true }
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            guard toolbar.panel == nil, !panel.isVisible, !staleCompletionRan,
+                  !SourcePickerOverlay.isOpen, !AreaSelectionOverlay.isOpen else {
+                throw Fail(description: "cancelled permission callback resurrected setup")
+            }
+        }
+        print("Permission return: toolbar visible, picker closed, re-entrant focus and cancellation handled in all modes")
+    }
 }

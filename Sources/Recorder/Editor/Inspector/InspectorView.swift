@@ -108,6 +108,9 @@ struct InspectorView: View {
                 .padding(12)
             }
         }
+        .onChange(of: model.cameraInspectorRequested) { _, requested in
+            if requested { tab = .camera; model.cameraInspectorRequested = false }
+        }
         .frame(width: 300)
         .background(Theme.bgPanelColor)
     }
