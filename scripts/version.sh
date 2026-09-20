@@ -2,7 +2,8 @@
 # One source of release truth: a vMAJOR.MINOR.PATCH Git tag.
 set -eu
 
-tag="${GITHUB_REF_NAME:-}"
+tag=""
+case "${GITHUB_REF_NAME:-}" in v*) tag="$GITHUB_REF_NAME";; esac
 if [ -z "$tag" ]; then
     tag="$(git describe --tags --exact-match 2>/dev/null || true)"
 fi
