@@ -4,8 +4,8 @@ import UniformTypeIdentifiers
 enum AppIdentity {
     static let bundleID = "space.microapps.recorder"
     static let legacyBundleID = "sh.nexo.recorder"
-    static let projectTypes = [UTType(exportedAs: "space.microapps.recorder.project"),
-                               UTType(importedAs: "sh.nexo.recorder.project")]
+    static let projectTypes = [UTType(exportedAs: "space.microapps.recorder.project", conformingTo: .package),
+                               UTType(importedAs: "sh.nexo.recorder.project", conformingTo: .package)]
 
     /// Copy preferences once, before any settings singleton reads them. Preserve
     /// both the old domain and any choices already saved under the new identity.
