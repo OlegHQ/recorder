@@ -25,6 +25,9 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private let pixelWidth: Int
     private let pixelHeight: Int
 
+    /// Normalised to the shorter captured dimension; read after finish drains the output queue.
+    private(set) var windowCornerRadius: Double?
+
     /// Shared clock (SPEC §4.8): `CameraCapture`'s fourth `TrackWriter` retimes onto the same `t0`/
     /// `pausedSoFar`/`isPaused` so `camera.mov` stays in sync with `screen.mov` (AC-CAM-2).
     private(set) var t0: CMTime?
@@ -216,6 +219,20 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
                   let statusRaw = attachmentsArray.first?[.status] as? Int,
                   SCFrameStatus(rawValue: statusRaw) == .complete else { return }
 
+            if case .window = target, let buffer = sampleBuffer.imageBuffer,
+               CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA {
+                CVPixelBufferLockBaseAddress(buffer, .readOnly)
+                if let base = CVPixelBufferGetBaseAddress(buffer) {
+                    let bytes = base.assumingMemoryBound(to: UInt8.self)
+                    let stride = CVPixelBufferGetBytesPerRow(buffer)
+                    let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+                    if let radius = detectedWindowCornerRadius(width: width, height: height,
+                        alpha: { x, y in bytes[y * stride + x * 4 + 3] }) {
+                        windowCornerRadius = max(windowCornerRadius ?? 0, radius / Double(min(width, height)))
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
+            }
             let pts = sampleBuffer.presentationTimeStamp
             if t0 == nil {
                 t0 = pts

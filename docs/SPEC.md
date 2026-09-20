@@ -389,7 +389,7 @@ is recorded to `camera.mov` and composited in the editor. Its corner becomes the
 
 ### 4.8 Capture details (normative)
 
-- `SCStreamConfiguration`: `showsCursor = false`, `minimumFrameInterval = 1/60`, `pixelFormat = 420v` (BGRA only if colours are off), `queueDepth = 6`,
+- `SCStreamConfiguration`: `showsCursor = false`, `minimumFrameInterval = 1/60`, `pixelFormat = 420v` for displays/areas, BGRA for windows to measure native corner alpha before HEVC encoding, `queueDepth = 6`,
   `width/height` = source pixels, `capturesAudio` per setting, `excludesCurrentProcessAudio = true`, `captureMicrophone` + `microphoneCaptureDeviceID` per setting, `sampleRate 48000`, `channelCount 2`.
 - Only append frames whose `SCStreamFrameInfo.status == .complete`; if the screen is idle SCK sends no frames — that is fine, the file is variable-frame-rate; FrameSource (§6.2) holds the last frame.
 - Screen: HEVC, `AVVideoAverageBitRateKey` ≈ `pixels × 4` bps capped at 60 Mbps, realtime = true. Audio: AAC 48 kHz 192 kbps, one file per source.
@@ -534,6 +534,8 @@ FrameState(t_out) = {
   layout, masks, keysOverlay, project styling
 }
 ```
+
+New window recordings initialise `frame.cornerRadius` from the captured native corner alpha, normalised to the shorter source dimension. The single circular mask encloses all four corners (non-circular shapes may receive a small trim); the largest measured radius during capture is retained. Existing recordings and manual corner edits retain their saved values.
 
 Passes (single render encoder, 4 draw calls, all in `Shaders.swift`):
 1. **Background** — textured/gradient/colour quad, optional blur (pre-blurred once on change with `MPSImageGaussianBlur`, cached).

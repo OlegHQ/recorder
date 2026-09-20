@@ -146,6 +146,7 @@ import RecorderCore
         var project = Project(title: packageURL.deletingPathExtension().lastPathComponent,
                                source: source,
                                clips: [Clip(sourceStart: 0, sourceEnd: source.duration)])
+        if let radius = session.windowCornerRadius { project.frame.cornerRadius = radius }
         project.camera.corner = CameraBubblePanel.corner
         project.audio.denoise = RecordingSettings.shared.denoise
 
