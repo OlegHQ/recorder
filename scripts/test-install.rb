@@ -6,6 +6,31 @@ require 'fileutils'
 require 'open3'
 
 installer = File.read(File.join(__dir__, 'install-app.sh'))
+
+# Use the actual codesign verification lines, not a mock: -R TEXT is a file input,
+# while -R=TEXT is an inline requirement. No Keychain identity is needed for this
+# throwaway ad-hoc executable; the installer must reject its missing certificate.
+Dir.mktmpdir('recorder-signature-test-') do |dir|
+  fixture = File.join(dir, 'Recorder.app')
+  FileUtils.cp('/usr/bin/true', fixture)
+  output, status = Open3.capture2e('/usr/bin/codesign', '--force', '--sign', '-',
+                                  '--identifier', 'space.microapps.recorder', fixture)
+  abort "Fixture signing failed: #{output}" unless status.success?
+  full_requirement = installer[/^requirement='(.+)'$/, 1] or abort 'Missing installer requirement'
+  checks = installer.lines.grep(/^codesign --verify/)
+  abort 'Expected source and staged signature checks' unless checks.length == 2
+  checks.each do |command|
+    env = { 'source_app' => fixture, 'stage' => dir,
+            'requirement' => 'identifier "space.microapps.recorder"' }
+    output, status = Open3.capture2e(env, '/bin/sh', '-c', command)
+    abort "Native inline requirement failed: #{output}" unless status.success?
+    output, status = Open3.capture2e(env.merge('requirement' => full_requirement), '/bin/sh', '-c', command)
+    abort "Ad-hoc code was not rejected by the certificate requirement: #{output}" unless
+      !status.success? && output.include?('failed to satisfy')
+  end
+  puts 'native codesign: inline requirements parsed; missing certificate rejected: OK'
+end
+
 %w[success signature quit replace restore reset legacy].each do |scenario|
   Dir.mktmpdir('recorder-install-test-') do |dir|
     apps = File.join(dir, 'Applications')

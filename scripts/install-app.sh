@@ -5,14 +5,14 @@ set -eu
 source_app=build/Recorder.app
 destination=/Applications/Recorder.app
 requirement='identifier "space.microapps.recorder" and certificate leaf[subject.CN] = "Recorder Dev"'
-codesign --verify --deep --strict -R "$requirement" "$source_app"
+codesign --verify --deep --strict -R="$requirement" "$source_app"
 [ ! -L "$destination" ] || { echo "Refusing to replace a symlink: $destination" >&2; exit 1; }
 
 # Copy and verify before touching the installed app; keep replacement on one volume.
 stage=$(mktemp -d /Applications/.Recorder-install.XXXXXX)
 trap 'rm -rf "$stage"' EXIT
 ditto "$source_app" "$stage/Recorder.app"
-codesign --verify --deep --strict -R "$requirement" "$stage/Recorder.app"
+codesign --verify --deep --strict -R="$requirement" "$stage/Recorder.app"
 
 # NSRunningApplication sends a normal quit, allowing document autosave. Never kill
 # a process just because its executable happens to be named Recorder.
