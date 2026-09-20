@@ -4,11 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Recorder: a native macOS (15+, Apple Silicon) screen recorder + non-destructive video editor, modelled on Screen Studio.
+Recorder: a native macOS (15+, Apple Silicon and Intel) screen recorder + non-destructive video editor, modelled on Screen Studio.
 The repo is currently a **buildable skeleton plus a full spec and plan**. `docs/SPEC.md` is the source of truth for *what*:
 feature scope, ASCII mockups of every screen, acceptance criteria (`AC-*`), project file format, milestones M1–M6.
-`docs/PLAN.md` is the ordered task list **and the progress tracker** (79 tasks, `T-001`…`T-610`). `reference/*.png` are
-screenshots of the real Screen Studio recording flow that the mockups were derived from.
+`docs/PLAN.md` is the ordered task list **and the progress tracker** (79 tasks, `T-001`…`T-610`).
 
 ## How to work here (mandatory)
 

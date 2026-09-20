@@ -2413,7 +2413,7 @@ enum SelfTest {
             try await MainActor.run {
                 let delegate = AppDelegate()
 
-                // SPEC §8 idle status menu (`reference/status-item-menu.png`).
+                // SPEC §8 idle status menu.
                 let idle = delegate.buildIdleStatusMenu()
                 try checkItems(nonSeparators(idle), [
                     ("New Recording…", "\r", [.control, .command]),

@@ -423,7 +423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return (b.character, NSEvent.ModifierFlags(rawValue: b.modifiers))
     }
 
-    /// SPEC §8 mockup, titles/order/SF Symbols normative (`reference/status-item-menu.png`); key
+    /// SPEC §8 titles/order/SF Symbols are normative; key
     /// equivalents mirror `Hotkeys.table`'s current bindings (T-609).
     /// Not `private`: the `menus` selftest builds both status menus directly to check them against SPEC.
     func buildIdleStatusMenu() -> NSMenu {

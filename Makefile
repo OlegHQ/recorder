@@ -1,5 +1,7 @@
 # Command Line Tools only: no xcodebuild, no offline `metal`, no XCTest. See CLAUDE.md.
 APP      := build/Recorder.app
+VERSION  ?= $(shell scripts/version.sh version)
+BUILD    ?= $(shell scripts/version.sh build)
 CLT      := /Library/Developer/CommandLineTools/Library/Developer
 # swift-testing ships with CLT but is not on the default search path.
 TESTFLAGS := -Xswiftc -F -Xswiftc $(CLT)/Frameworks -Xlinker -F -Xlinker $(CLT)/Frameworks \
@@ -19,15 +21,7 @@ test:
 	swift test $(TESTFLAGS) $(if $(FILTER),--filter $(FILTER))
 
 app: build
-	rm -rf $(APP)
-	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
-	cp .build/$(CONFIG)/Recorder $(APP)/Contents/MacOS/Recorder
-	cp Resources/Info.plist $(APP)/Contents/Info.plist
-	cp -R Resources/Fonts $(APP)/Contents/Resources/
-	@if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns $(APP)/Contents/Resources/; fi
-	@if [ -d Resources/Wallpapers ]; then cp -R Resources/Wallpapers $(APP)/Contents/Resources/; fi
-	@if [ -f Resources/click.caf ]; then cp Resources/click.caf $(APP)/Contents/Resources/; fi
-	codesign --force --sign "$(SIGN_ID)" $(APP)
+	APP="$(APP)" BINARY=".build/$(CONFIG)/Recorder" VERSION="$(VERSION)" BUILD="$(BUILD)" SIGN_ID="$(SIGN_ID)" scripts/assemble-app.sh
 
 run: app
 	open $(APP)

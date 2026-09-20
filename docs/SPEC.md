@@ -1,8 +1,8 @@
 # Recorder — Product & Engineering Spec
 
 A native macOS screen recorder + editor, functionally modelled on Screen Studio 3.7.
-Sources for this spec: `reference/*.png` (recording flow, captured from the real app),
-Screen Studio's public guide (editor), and local toolchain probes (build constraints).
+Sources for this spec: Screen Studio's public guide (editor) and local toolchain probes
+(build constraints).
 
 **How to use this spec (for implementing agents):**
 - Build milestone by milestone (§9). Do not start a milestone until the previous one's acceptance criteria pass.
@@ -45,7 +45,7 @@ Screen Studio's public guide (editor), and local toolchain probes (build constra
 | Editor | Presets (save/apply/export as JSON file) | M6 |
 | Settings | General (project folder, defaults), Shortcuts, Recording | M2 (minimal) / M6 |
 | LATER | Captions (on-device Speech), background music, speaker notes, quick-share widget, reactions | after M6 |
-| OUT | Accounts/licensing/activation, shareable cloud links & comments, iPhone/iPad device recording + device frames, auto-update, Intel support | never (unless asked) |
+| OUT | Accounts/licensing/activation, shareable cloud links & comments, iPhone/iPad device recording + device frames, auto-update | never (unless asked) |
 
 The "Device" button from the reference toolbar is therefore **not shown**.
 
@@ -70,7 +70,7 @@ Verified on the dev machine (macOS 26.2, Swift 6.3, **Command Line Tools only, n
 
 | Concern | Choice | Why |
 |---|---|---|
-| Min OS | macOS 15, arm64 | `SCStreamConfiguration.captureMicrophone`, modern ScreenCaptureKit |
+| Min OS | macOS 15, universal (arm64 + x86_64) | `SCStreamConfiguration.captureMicrophone`, modern ScreenCaptureKit |
 | Language | Swift, tools 6.0, **language mode 5** | avoids strict-concurrency churn around AVFoundation/SCK callbacks |
 | App shell, windows, panels, overlays, menus | **AppKit** | floating `NSPanel`s, window levels, multi-display overlays, global event taps — SwiftUI cannot do these well |
 | Forms (inspector, onboarding, export sheet, settings, library grid) | **SwiftUI** in `NSHostingView` | fastest way to build sliders/toggles/lists |
@@ -727,7 +727,7 @@ Menu bar: **Recorder** (About, Settings… ⌘,, Copy State Snapshot ⌃⌥⌘S,
 
 Settings window (SwiftUI `Form`): General — projects folder, default export settings, "after recording: open editor"; Recording — fps 30/60, countdown, the three toggles from §4.2; Shortcuts (M6) — rebind the global hotkeys (§4.7).
 
-Status item (always present while the app runs; ref: `reference/status-item-menu.png`). Native `NSMenu`, SF Symbol icons, idle state:
+Status item (always present while the app runs). Native `NSMenu`, SF Symbol icons, idle state:
 
 ```
  ◉ New Recording…            ⌃⌘↩   → toolbar (§4.2) in the last-used mode

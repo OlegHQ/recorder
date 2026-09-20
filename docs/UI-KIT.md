@@ -5,7 +5,7 @@
 The user rejected the first cyan/neon palette, generic SF typography, widely tracked capitals,
 slogans, and uneven gallery spacing. That direction is superseded.
 
-The supplied references in `reference/ui-kit-inspiration/` are the visual source:
+The Signal UI visual direction is the visual source:
 
 - `111992…jpg`: narrow technical lettering, white blocks, fine rules and black negative space.
 - `72e44c…jpg`: aligned modules, white corner brackets, compact navigation, strong numbers.
