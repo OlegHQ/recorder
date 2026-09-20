@@ -101,7 +101,7 @@ tccutil reset Accessibility space.microapps.recorder
 ```
 
 These revoke Recorder’s two grants only. Do not use `tccutil reset All`.
-Starting with 0.1.3, the app identifier is `space.microapps.recorder`. For 0.1.2 and
+Starting with 0.1.4, the app identifier is `space.microapps.recorder`. For 0.1.2 and
 older, the reset commands must instead use `sh.nexo.recorder`. The new identity needs
 fresh macOS permissions; old grants cannot migrate. Quit older copies before updating.
 Existing preferences are copied once without overwriting new settings; project files
