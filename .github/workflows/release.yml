@@ -10,7 +10,7 @@ permissions:
 jobs:
   release:
     name: Signed universal DMG
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
