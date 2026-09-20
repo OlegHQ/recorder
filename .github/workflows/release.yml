@@ -11,6 +11,13 @@ jobs:
   release:
     name: Universal DMG
     runs-on: macos-15
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,17 +29,56 @@ jobs:
       - name: Install DMG layout tool
         run: brew install create-dmg
 
+      - name: Configure signing
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_BASE64$APPLE_CERTIFICATE_PASSWORD$APPLE_SIGNING_IDENTITY$APPLE_API_KEY_BASE64$APPLE_API_KEY_ID$APPLE_API_ISSUER_ID" ]; then
+            echo 'SIGN_ID=-' >> "$GITHUB_ENV"
+            echo '::warning::No Apple credentials: this build requires Open Anyway and permissions may need re-granting after updates.'
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+            test -n "${!name}" || { echo "Missing required repository secret: $name" >&2; exit 1; }
+          done
+          case "$APPLE_SIGNING_IDENTITY" in
+            'Developer ID Application: '*) ;;
+            *) echo 'APPLE_SIGNING_IDENTITY must be a Developer ID Application identity' >&2; exit 1 ;;
+          esac
+          keychain="$RUNNER_TEMP/recorder-build.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/recorder-certificate.p12"
+          security create-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+          security import "$RUNNER_TEMP/recorder-certificate.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/recorder-notary.p8"
+          xcrun notarytool store-credentials RecorderRelease --key "$RUNNER_TEMP/recorder-notary.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --keychain "$keychain"
+          echo "SIGN_ID=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          echo 'NOTARY_PROFILE=RecorderRelease' >> "$GITHUB_ENV"
+          echo "NOTARY_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
       - name: Test
         run: make test
 
       - name: Build universal DMG
-        run: VERSION="${GITHUB_REF_NAME#v}" BUILD="$GITHUB_RUN_NUMBER" SIGN_ID=- scripts/release-dmg.sh
+        run: VERSION="${GITHUB_REF_NAME#v}" BUILD="$GITHUB_RUN_NUMBER" scripts/release-dmg.sh
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
+          if [ "$SIGN_ID" = - ]; then
+            note='Ad-hoc signed, not notarized. On first launch use System Settings → Privacy & Security → Open Anyway. After updates, remove and re-add Recorder in Screen Recording and Accessibility if existing grants stop working.'
+          else
+            note='Developer ID signed and notarized by Apple.'
+          fi
           gh release create "$GITHUB_REF_NAME" "dist/Recorder-$version-universal.dmg#Recorder $version (Universal DMG)" \
             --title "Recorder $version" --generate-notes \
-            --notes "Created by [Oleg Pustovit](https://github.com/OlegHQ). This DMG is ad-hoc signed and not notarized."
+            --notes "Created by [Oleg Pustovit](https://github.com/OlegHQ). $note"
+
+      - name: Remove signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/recorder-build.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/recorder-certificate.p12" "$RUNNER_TEMP/recorder-notary.p8"

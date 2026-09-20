@@ -1,5 +1,15 @@
 # Recorder — Product & Engineering Spec
 
+September 2026 permission/release correction: onboarding offers direct Settings links,
+an explicit ScreenCaptureKit access check shared by every capture gate, refresh on return
+from Settings, and guidance for stale grants after replacing ad-hoc builds. Accessibility
+continues to use AXIsProcessTrusted. Relaunch reports launch failures instead of quitting
+silently. Verify with `Recorder --selftest permission-refresh` and `onboarding-png`;
+fresh grant/revoke cycles still require a human macOS Settings check.
+The installer uses the shared monochrome capture mark and Barlow/Andale typography.
+Configured Apple credentials enable signing, notarization and stapling of app and DMG;
+credential-free releases remain explicitly labelled ad-hoc and require Open Anyway.
+
 A native macOS screen recorder + editor, functionally modelled on Screen Studio 3.7.
 Sources for this spec: Screen Studio's public guide (editor) and local toolchain probes
 (build constraints).

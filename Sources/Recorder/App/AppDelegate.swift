@@ -59,9 +59,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showOnboarding() {
+        if let window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 470),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Recorder"
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.backgroundColor = Theme.bgWindow
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: OnboardingView { [weak self] in
             Task { @MainActor in

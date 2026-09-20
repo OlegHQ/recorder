@@ -1,9 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="840" viewBox="0 0 1320 840">
-  <rect width="1320" height="840" fill="#080808"/>
-  <path d="M64 120V64h56M1200 64h56v56M1256 720v56h-56M120 776H64v-56" fill="none" stroke="#383838" stroke-width="4"/>
-  <path d="M0 700H1320M0 704H1320" stroke="#202020" stroke-width="2"/>
-  <text x="80" y="130" fill="#F4F3EE" font-family="Helvetica Neue,Arial,sans-serif" font-size="48" font-weight="300">RECORDER</text>
-  <text x="82" y="172" fill="#B8B8B2" font-family="Menlo,monospace" font-size="18">DROP INTO APPLICATIONS TO INSTALL</text>
-  <circle cx="86" cy="748" r="10" fill="#E38276"/>
-  <text x="110" y="755" fill="#93938E" font-family="Menlo,monospace" font-size="16">NATIVE SCREEN RECORDING / EDITING</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="420" viewBox="0 0 660 420">
+  <rect width="660" height="420" fill="#080808"/>
+  <text x="36" y="67" fill="#F4F3EE" font-family="BarlowSemiCondensed-Light" font-size="42" font-weight="300">Recorder</text>
+  <text x="38" y="99" fill="#B8B8B2" font-family="Andale Mono" font-size="12">Drag Recorder into Applications</text>
+  <path d="M574 43h48v48" fill="none" stroke="#F4F3EE" stroke-width="2"/>
+  <rect x="24" y="140" width="612" height="176" fill="#F4F3EE"/>
+  <path d="M299 212h62m-12-12 12 12-12 12" fill="none" stroke="#080808" stroke-width="2"/>
+  <path d="M36 346h588" stroke="#383838"/>
+  <text x="36" y="375" fill="#B8B8B2" font-family="Andale Mono" font-size="11">Then open Recorder from Applications.</text>
 </svg>

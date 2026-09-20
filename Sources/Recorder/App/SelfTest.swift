@@ -197,7 +197,10 @@ enum SelfTest {
             guard let path = args.first else { throw Fail(description: "usage: onboarding-png <out.png>") }
             try await MainActor.run {
                 let size = NSSize(width: 660, height: 470)
-                let hosting = NSHostingView(rootView: OnboardingView(onContinue: {}))
+                let denied = args.contains("--denied")
+                let hosting = NSHostingView(rootView: OnboardingView(onContinue: {},
+                    screenGranted: denied ? false : Permissions.screen,
+                    accessibilityGranted: denied ? false : Permissions.accessibility, requested: denied))
                 hosting.frame = NSRect(origin: .zero, size: size)
                 hosting.appearance = NSAppearance(named: .darkAqua)
                 let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -227,6 +230,15 @@ enum SelfTest {
         },
         "permissions": { _ in
             print("screen=\(Permissions.screen) accessibility=\(Permissions.accessibility)")
+        },
+        "permission-refresh": { _ in
+            struct Denied: LocalizedError { var errorDescription: String? { "Test denial" } }
+            let success = await Permissions.checkScreen(probe: {})
+            precondition(success == nil && Permissions.screen)
+            precondition(Permissions.allGranted == Permissions.accessibility)
+            let failure = await Permissions.checkScreen(probe: { throw Denied() })
+            precondition(failure == "Test denial")
+            precondition(Permissions.screen == CGPreflightScreenCaptureAccess(), "A failed probe must clear the previous grant")
         },
         // Throwaway generator (T-308, SPEC §6.6): writes `Resources/Wallpapers/01.jpg`…`12.jpg` —
         // abstract gradients we made ourselves (never Apple's or Screen Studio's images). Run once

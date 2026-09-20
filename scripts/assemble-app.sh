@@ -24,5 +24,5 @@ cp Resources/AppIcon.icns Resources/click.caf Resources/THIRD_PARTY_NOTICES.md "
 if [ "$sign_id" = "-" ]; then
     codesign --force --sign - "$app"
 else
-    codesign --force --options runtime --timestamp --sign "$sign_id" "$app"
+    codesign --force --options runtime --entitlements Resources/Recorder.entitlements --timestamp --sign "$sign_id" "$app"
 fi
