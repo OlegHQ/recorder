@@ -283,8 +283,13 @@ public extension Project {
             before.append(pasted)
         }
         result.clips = before + after
-        let end = ([result.clips.last?.sourceEnd ?? 0] + result.cameraClips.map(\.end) + result.zooms.map(\.end)
-            + result.keystrokeClips.map(\.end) + result.layouts.map(\.end) + result.masks.map(\.end)).max() ?? 0
+        var ends = [result.clips.last?.sourceEnd ?? 0]
+        ends += result.cameraClips.map(\.end)
+        ends += result.zooms.map(\.end)
+        ends += result.keystrokeClips.map(\.end)
+        ends += result.layouts.map(\.end)
+        ends += result.masks.map(\.end)
+        let end = ends.max() ?? 0
         let videoEnd = result.clips.last?.sourceEnd ?? 0
         if end > videoEnd {
             var gap = Clip(sourceStart: videoEnd, sourceEnd: end); gap.isGap = true
