@@ -13,30 +13,46 @@ struct AudioTab: View {
     private var hasSystemAudio: Bool { project.source.hasSystemAudio }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            volumeRow(title: "Microphone", volume: \.audio.micVolume, muted: micMutedBinding,
-                      gestureName: "Microphone volume")
-                .disabled(!hasMic)
-
-            volumeRow(title: "System", volume: \.audio.systemVolume, muted: systemMutedBinding,
-                      gestureName: "System volume")
-                .disabled(!hasSystemAudio)
-
-            Toggle("Reduce noise & normalise", isOn: denoiseBinding)
-                .toggleStyle(.checkbox)
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.textPrimaryColor)
-                .disabled(!hasMic)
-
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                sourceHeading("Microphone", available: hasMic)
+                if hasMic {
+                    volumeRow(title: "Volume", volume: \.audio.micVolume, muted: micMutedBinding,
+                              gestureName: "Microphone volume", source: "microphone")
+                    Toggle("Reduce rumble & normalize", isOn: denoiseBinding)
+                    Text("Cleanup is applied on export. Preview plays the original microphone audio.")
+                        .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .modifier(InspectorReveal(identity: "microphone", order: 0))
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                sourceHeading("System audio", available: hasSystemAudio)
+                if hasSystemAudio {
+                    volumeRow(title: "Volume", volume: \.audio.systemVolume, muted: systemMutedBinding,
+                              gestureName: "System volume", source: "system audio")
+                }
+            }
+            .modifier(InspectorReveal(identity: "system-audio", order: 2))
+            Divider()
             Toggle("Mouse click sound", isOn: clickSoundBinding)
-                .toggleStyle(.checkbox)
-                .font(.system(size: 13))
                 .foregroundStyle(Theme.textPrimaryColor)
         }
     }
 
+    private func sourceHeading(_ title: String, available: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(Font(Theme.headingFont(22)))
+            Spacer(minLength: 4)
+            if !available {
+                Text("Not recorded").font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+            }
+        }
+    }
+
     private func volumeRow(title: String, volume: WritableKeyPath<Project, Double>, muted: Binding<Bool>,
-                            gestureName: String) -> some View {
+                            gestureName: String, source: String) -> some View {
         HStack(spacing: 8) {
             LabeledSlider(title: title, value: fieldBinding(volume), range: 0...1, defaultValue: 1,
                           onEditingChanged: gesture(gestureName))
@@ -46,7 +62,9 @@ struct AudioTab: View {
                 Image(systemName: muted.wrappedValue ? "speaker.slash.fill" : "speaker.wave.2.fill")
                     .foregroundStyle(muted.wrappedValue ? Theme.dangerColor : Theme.textSecondaryColor)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(TechButtonStyle(kind: .quiet, compact: true))
+            .help(muted.wrappedValue ? "Unmute \(source)" : "Mute \(source)")
+            .accessibilityLabel(muted.wrappedValue ? "Unmute \(source)" : "Mute \(source)")
         }
     }
 
@@ -70,7 +88,7 @@ struct AudioTab: View {
     }
 
     private var denoiseBinding: Binding<Bool> {
-        Binding(get: { project.audio.denoise }, set: { newValue in model.edit("Reduce noise & normalise") { $0.audio.denoise = newValue } })
+        Binding(get: { project.audio.denoise }, set: { newValue in model.edit("Microphone cleanup") { $0.audio.denoise = newValue } })
     }
 
     private var clickSoundBinding: Binding<Bool> {

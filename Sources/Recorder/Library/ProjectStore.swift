@@ -25,6 +25,21 @@ import RecorderCore
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Recorder")
     }
 
+    static func newProjectURL(in folder: URL) -> URL {
+        let adjective = ["Amber", "Bright", "Calm", "Cool", "Coral", "Cozy", "Golden", "Gentle",
+                         "Quiet", "Misty", "Silver", "Sunny", "Soft", "Wild", "Velvet", "Distant"].randomElement()!
+        let noun = ["Aurora", "Brook", "Cloud", "Cove", "Dawn", "Forest", "Garden", "Harbor",
+                    "Island", "Meadow", "Moon", "Ocean", "River", "Summit", "Valley", "Willow"].randomElement()!
+        let base = "\(adjective) \(noun)"
+        var url = folder.appendingPathComponent("\(base).recorder")
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = folder.appendingPathComponent("\(base) \(suffix).recorder")
+            suffix += 1
+        }
+        return url
+    }
+
     init(folder: URL = ProjectStore.defaultFolder) {
         self.folder = folder
         watch()
@@ -132,14 +147,16 @@ import RecorderCore
         let duration = try await asset.load(.duration).seconds
         guard duration.isFinite, duration > 0 else { throw ImportError.noVideoTrack }
 
+        // Generate before staging so the package is still published in one synchronous move.
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 640, height: 0)
+        let time = CMTime(seconds: duration > 1 ? 1 : 0, preferredTimescale: 600)
+        let thumbnail = try? await generator.image(at: time).image
+
         let fm = FileManager.default
-        let base = movieURL.deletingPathExtension().lastPathComponent
-        var name = "\(base).recorder"
-        var n = 2
-        while fm.fileExists(atPath: folder.appendingPathComponent(name).path) {
-            name = "\(base) \(n).recorder"
-            n += 1
-        }
+        let packageURL = Self.newProjectURL(in: folder)
+        let name = packageURL.lastPathComponent
 
         let finalURL = try stageThenMove(named: name) { staged in
             try fm.createDirectory(at: staged, withIntermediateDirectories: true)
@@ -150,21 +167,15 @@ import RecorderCore
             try JSONEncoder().encode(EventLog()).write(to: staged.appendingPathComponent("events.json"), options: .atomic)
 
             let project = Project(
-                title: base,
+                title: packageURL.deletingPathExtension().lastPathComponent,
                 source: Source(kind: .display, pixelWidth: Int(size.width), pixelHeight: Int(size.height),
                                 scale: 1, duration: duration, hasCamera: false, hasMic: false, hasSystemAudio: false),
-                clips: [Clip(sourceStart: 0, sourceEnd: duration, speed: 1)]
+                clips: [Clip(sourceStart: 0, sourceEnd: duration, speed: 1)],
+                frame: Frame(enabled: true)
             )
             try project.save(to: staged.appendingPathComponent("project.json"))
 
-            // Thumbnail (SPEC §5): 640 px wide, frame at 1 s (0 for shorter clips) — same recipe as
-            // `RecordingController.writeThumbnail`, using the synchronous generator since `build` here
-            // isn't async.
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 640, height: 0)
-            let time = CMTime(seconds: duration > 1 ? 1 : 0, preferredTimescale: 600)
-            if let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) {
+            if let cgImage = thumbnail {
                 let rep = NSBitmapImageRep(cgImage: cgImage)
                 if let data = rep.representation(using: .jpeg, properties: [:]) {
                     try? data.write(to: staged.appendingPathComponent("thumbnail.jpg"))

@@ -22,16 +22,16 @@ enum Waveform {
 
     /// Peak (max absolute sample across channels) per `peaksPerSecond`-of-a-second bucket, for the
     /// whole duration of the audio file at `url`. Cached in memory per `url` for the process lifetime.
-    static func peaks(for url: URL) throws -> [Float] {
+    static func peaks(for url: URL) async throws -> [Float] {
         if let cached = cache[url] { return cached }
-        let result = try extractPeaks(from: url)
+        let result = try await extractPeaks(from: url)
         cache[url] = result
         return result
     }
 
-    private static func extractPeaks(from url: URL) throws -> [Float] {
+    private static func extractPeaks(from url: URL) async throws -> [Float] {
         let asset = AVURLAsset(url: url)
-        guard let track = asset.tracks(withMediaType: .audio).first else { return [] }
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else { return [] }
 
         let reader = try AVAssetReader(asset: asset)
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [

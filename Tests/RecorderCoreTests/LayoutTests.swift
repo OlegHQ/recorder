@@ -172,7 +172,7 @@ struct LayoutTests {
     project.keys = Keys(show: true)
     var block = Layout(start: 2, end: 6, kind: .settings,
                        keys: Keys(show: false, allKeys: true, size: 2, position: NormPoint(x: 0, y: 0), hold: 3))
-    project.layouts = [block]
+    project.keystrokeClips = [block]
     #expect(overlayKeys(project: project, atSource: 1).settings == project.keys)
     #expect(overlayKeys(project: project, atSource: 2).opacity == 1)
     let during = overlayKeys(project: project, atSource: 2.15)
@@ -182,7 +182,7 @@ struct LayoutTests {
     #expect(overlayKeys(project: project, atSource: 4).opacity == 0)
     #expect(overlayKeys(project: project, atSource: 6).settings == project.keys)
     block.camera = Camera(roundness: 0.1, mirror: false, shadow: 0.2)
-    project.layouts = [block]
+    project.keystrokeClips = [block]
     #expect(overlayCamera(project: project, atSource: 4) == project.camera)
     block.kind = .bubble
     project.layouts = [block]
@@ -190,6 +190,7 @@ struct LayoutTests {
     #expect(!overlayCamera(project: project, atSource: 4).mirror)
     block.transition = 0
     project.layouts = [block]
+    project.keystrokeClips[0].transition = 0
     #expect(overlayKeys(project: project, atSource: 2).opacity == 0)
     #expect(try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(project)) == project)
     let legacy = try JSONDecoder().decode(Keys.self, from: Data("{\"show\":true}".utf8))

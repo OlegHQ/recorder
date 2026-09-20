@@ -47,7 +47,7 @@ import Testing
 
 @Test func projectRejectsNewerVersion() throws {
     let json = """
-    {"version":2,"source":{}}
+    {"version":\(Project.currentVersion + 1),"source":{}}
     """
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
     try Data(json.utf8).write(to: url)
@@ -95,4 +95,32 @@ import Testing
     var project = Project(source: Source(duration: 10), clips: [Clip(sourceStart: 0, sourceEnd: 10)], masks: [mask])
     let duplicate = project.duplicateBlock(UUID(uuidString: mask.id)!)!
     #expect(project.masks.first { $0.id == duplicate.uuidString }?.transition == 0.5)
+}
+
+@Test func captureFramingDefaultsAndOverrides() throws {
+    for kind in [Source.Kind.display, .window, .area] {
+        // Existing projects have no enabled flag, even when frame styling was saved.
+        let json = """
+        {"source":{"kind":"\(kind.rawValue)"},"frame":{"padding":0.12,"cornerRadius":0.03,"shadow":0.7}}
+        """
+        var project = try JSONDecoder().decode(Project.self, from: Data(json.utf8))
+        #expect(project.framingEnabled)
+        #expect(Project(source: Source(kind: kind)).framingEnabled)
+        let savedFrame = project.frame
+        project.frame.enabled = false
+        #expect(project.renderedFrame.padding == 0)
+        #expect(project.renderedFrame.cornerRadius == 0)
+        #expect(project.renderedFrame.shadow == 0)
+        #expect(screenRect(output: CGSize(width: 1920, height: 1080), cropAspect: 16.0 / 9,
+                           padding: project.renderedFrame.padding) == CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        project.frame.enabled = true
+        #expect(project.renderedFrame.padding == savedFrame.padding)
+        #expect(project.renderedFrame.cornerRadius == savedFrame.cornerRadius)
+        #expect(project.renderedFrame.shadow == savedFrame.shadow)
+        let decoded = try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(project))
+        #expect(decoded.framingEnabled)
+        #expect(decoded == project)
+        project.frame.enabled = false
+        #expect(try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(project)).framingEnabled == false)
+    }
 }

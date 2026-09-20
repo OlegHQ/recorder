@@ -1,8 +1,7 @@
 import SwiftUI
 import AVFoundation
 
-/// SPEC §4.2 mockup: close · 3 mode buttons · 3 input buttons (open native `NSMenu`s, built by
-/// `ToolbarController`) · gear. Hosted inside a `FloatingPanel` (HUD material already supplies the background).
+/// Capture choice, input review, then target selection. Commands stay in ToolbarController.
 struct ToolbarView: View {
     var settings = RecordingSettings.shared
     var onClose: () -> Void
@@ -13,102 +12,126 @@ struct ToolbarView: View {
     var onSettings: () -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
-            closeButton
-            divider
-            modeButtons
-            divider
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 16) {
+                Text("Record").font(Font(Theme.headingFont(26)))
+                modeButtons
+                closeButton
+            }
+            Rectangle().fill(Theme.strokeColor).frame(height: 1)
             inputButtons
-            divider
-            settingsButton
+            HStack {
+                Text("Choose a target on screen, then Start.")
+                    .font(Font(Theme.captionFont))
+                    .foregroundStyle(Theme.textSecondaryColor)
+                Spacer(minLength: 8)
+                settingsButton
+            }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 56)
-        .fixedSize()
+        .padding(16)
+        .frame(width: 560)
+        .fixedSize(horizontal: false, vertical: true)
+        .signalWindow()
+        .overlay { TechCornerMarks().padding(1) }
     }
 
     private var closeButton: some View {
         Button(action: onClose) {
-            Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(Theme.textSecondaryColor)
+            Image(systemName: "xmark")
+                .frame(width: 16, height: 32)
         }
-        .buttonStyle(.plain)
-        .padding(.trailing, 12)
+        .buttonStyle(TechButtonStyle(kind: .quiet, compact: true))
+        .help("Close recording setup")
+        .accessibilityLabel("Close recording setup")
     }
 
     private var modeButtons: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             modeButton(.display, symbol: "display", title: "Display")
             modeButton(.window, symbol: "macwindow", title: "Window")
             modeButton(.area, symbol: "rectangle.dashed", title: "Area")
         }
-        .padding(.horizontal, 12)
+        .padding(2)
+        .background(Theme.bgControlColor)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Capture source")
     }
 
     private func modeButton(_ mode: RecordingSettings.Mode, symbol: String, title: String) -> some View {
         let selected = settings.mode == mode
         return Button { onSelectMode(mode) } label: {
-            VStack(spacing: 2) {
-                Image(systemName: symbol).font(.system(size: 16))
-                Text(title).font(Font(Theme.captionFont))
+            HStack(spacing: 6) {
+                Image(systemName: symbol).font(.system(size: 13))
+                Text(title)
             }
-            .foregroundStyle(selected ? Theme.textPrimaryColor : Theme.textSecondaryColor)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(selected ? Theme.bgHoverColor : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .frame(maxWidth: .infinity, minHeight: 32)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TechButtonStyle(kind: selected ? .primary : .quiet, compact: true))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help("Choose a \(title.lowercased()) to record")
     }
 
     private var inputButtons: some View {
-        HStack(spacing: 16) {
-            inputButton(title: cameraTitle, on: settings.cameraID != nil,
+        HStack(spacing: 8) {
+            inputButton(label: "Camera", title: cameraTitle, on: settings.cameraID != nil,
                         onIcon: "video.fill", offIcon: "video.slash", action: onCamera)
-            inputButton(title: micTitle, on: settings.micID != nil,
+            inputButton(label: "Microphone", title: micTitle, on: settings.micID != nil,
                         onIcon: "mic.fill", offIcon: "mic.slash", action: onMicrophone)
-            inputButton(title: systemAudioTitle, on: !isSystemAudioOff,
+            inputButton(label: "System audio", title: systemAudioTitle, on: !isSystemAudioOff,
                         onIcon: "speaker.wave.2.fill", offIcon: "speaker.slash", action: onSystemAudio)
         }
-        .padding(.horizontal, 12)
     }
 
-    private func inputButton(title: String, on: Bool, onIcon: String, offIcon: String,
+    private func inputButton(label: String, title: String, on: Bool, onIcon: String, offIcon: String,
                               action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: on ? onIcon : offIcon)
-                Text(title).lineLimit(1).truncationMode(.tail)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: on ? onIcon : offIcon)
+                        .frame(width: 14)
+                    Text(label)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.down").font(.system(size: 8))
+                }
+                .foregroundStyle(Theme.textSecondaryColor)
+                Text(title)
+                    .font(Font(Theme.labelFont))
+                    .foregroundStyle(on ? Theme.textPrimaryColor : Theme.textSecondaryColor)
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .foregroundStyle(on ? Theme.textPrimaryColor : Theme.textSecondaryColor)
+            .font(Font(Theme.captionFont))
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
         }
-        .buttonStyle(.plain)
-        .frame(maxWidth: 140, alignment: .leading)
+        .buttonStyle(TechButtonStyle(kind: .quiet, compact: true))
+        .background(Theme.bgControlColor)
+        .accessibilityLabel(label)
+        .accessibilityValue(title)
+        .accessibilityHint("Opens recording input choices")
+        .help("\(label): \(title)")
     }
 
     private var settingsButton: some View {
         Button(action: onSettings) {
-            HStack(spacing: 4) {
-                Image(systemName: "gearshape")
+            HStack(spacing: 6) {
+                Text("Options")
                 Image(systemName: "chevron.down").font(.system(size: 9))
             }
-            .foregroundStyle(Theme.textSecondaryColor)
+            .frame(height: 28)
         }
-        .buttonStyle(.plain)
-        .padding(.leading, 12)
-    }
-
-    private var divider: some View {
-        Rectangle().fill(Theme.strokeColor).frame(width: 1, height: 28)
+        .buttonStyle(TechButtonStyle(kind: .quiet, compact: true))
+        .help("Countdown and recording options")
     }
 
     private var cameraTitle: String {
-        guard let id = settings.cameraID, let device = AVCaptureDevice(uniqueID: id) else { return "No camera" }
+        guard let id = settings.cameraID else { return "Off" }
+        guard let device = AVCaptureDevice(uniqueID: id) else { return "Unavailable" }
         return device.localizedName
     }
 
     private var micTitle: String {
-        guard let id = settings.micID, let device = AVCaptureDevice(uniqueID: id) else { return "No microphone" }
+        guard let id = settings.micID else { return "Off" }
+        guard let device = AVCaptureDevice(uniqueID: id) else { return "Unavailable" }
         return device.localizedName
     }
 
@@ -119,9 +142,9 @@ struct ToolbarView: View {
 
     private var systemAudioTitle: String {
         switch settings.systemAudio {
-        case .off: return "No system audio"
+        case .off: return "Off"
         case .all: return "All apps"
-        case .apps(let ids): return ids.isEmpty ? "No system audio" : "\(ids.count) app\(ids.count == 1 ? "" : "s")"
+        case .apps(let ids): return ids.isEmpty ? "Off" : "\(ids.count) app\(ids.count == 1 ? "" : "s")"
         }
     }
 }

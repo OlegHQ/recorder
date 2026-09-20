@@ -203,9 +203,11 @@ Shown at launch whenever a required permission is missing. 660×470, not resizab
 
 Opens on launch, on the menu-bar New Recording/source actions, on `File ▸ New Recording` (⌘N), and on the global hotkey. Bottom-centre of the
 active display, 40 pt above the Dock. Draggable by its background.
+Entering capture setup hides Projects before showing the floating toolbar and source overlay.
 
 Dock reopening returns to the existing editor/projects window (or opens Projects), never starts source selection.
 Focusing a titled app window or switching to another application dismisses recording setup. Setup cannot reopen during countdown or capture.
+Source pickers only open after the toolbar is visible; hiding the toolbar or the app dismisses all pickers together.
 Starting a recording dismisses setup before countdown; Escape restores setup. Once capture starts, the selected
 window's application is activated and that window is raised.
 
@@ -218,7 +220,7 @@ window's application is activated and that window is raised.
           bg.hover pill behind it)          label = device name, truncated ("FaceTim…")     menu
 ```
 
-- `ⓧ` or `Esc`: close the toolbar and any overlay; app stays running (menu-bar item remains).
+- `ⓧ` or `Esc`: close the toolbar and every recording overlay together, then show Projects; app stays running (menu-bar item remains).
 - Selecting a source mode immediately shows that mode's overlay (§4.3–4.5). Mode persists across launches.
 - Input buttons dim (`text.secondary`, slashed icon) when off; white with plain icon when on.
 
@@ -249,7 +251,7 @@ Menus (all native `NSMenu`, check-marked current item — ref `13.03.07`, `13.03
 **AC-TB-1** Toolbar never appears in any recording (own windows excluded from the filter).
 **AC-TB-2** Device lists update live when devices are plugged/unplugged (`AVCaptureDevice` connect/disconnect notifications).
 **AC-TB-3** All selections persist in `UserDefaults` and are restored next launch; a missing device falls back to "Don't record…".
-**AC-TB-4** `Esc` closes overlays first, then the toolbar on a second press.
+**AC-TB-4** One `Esc` closes the toolbar and all recording overlays together and brings Projects forward, restoring it if minimized.
 
 ### 4.3 Display picker  (ref: `13.02.15.png`)
 
@@ -329,6 +331,7 @@ dimmed). Window list from `SCShareableContent` (on-screen, layer 0, width/height
 ### 4.6 Camera bubble  (ref: `13.02.58.png`)
 
 When a camera is selected, a live preview bubble appears (bottom-right, 200×200 pt, squircle radius 40, mirrored).
+Its opaque backing follows the same rounded shape so the window shadow matches the preview, even before the first camera frame.
 Draggable; snaps to the four corners with a 24 pt margin. It is a preview only — excluded from screen capture; the camera
 is recorded to `camera.mov` and composited in the editor. Its corner becomes the project's initial camera position.
 
@@ -435,13 +438,16 @@ Rules:
 │  empty state:  "No recordings yet"  [ ◉ New Recording ]                           │
 └────────────────────────────────────────────────────────────────────────────────┘
  Right-click a card: Open · Rename · Duplicate · Show in Finder · ─ · Move to Trash
- Double-click / Return: open · click on title: inline rename (renames the package dir) · drag a video file in: import (M6)
+ Click / Return: open · arrows: select · Actions / right-click ▸ Rename: inline rename (renames the package dir) · drag a video file in: import (M6)
 ```
 
 `ProjectStore` = scan the projects folder for `*.recorder`, read `project.json` title/duration + `thumbnail.jpg`. No database, no cache; watch the folder with `DispatchSource` and rescan.
+New recordings and imported projects receive a random two-word name (for example, “Golden Willow”), with a numeric suffix when needed to avoid an existing package. Each card shows its edited duration beside the modified date.
 
 **AC-LIB-1** 200 projects list in < 300 ms (only JSON headers + thumbnails are read, off the main thread).
 **AC-LIB-2** Rename/duplicate/trash reflect in Finder immediately and vice versa. Delete uses `FileManager.trashItem` (recoverable).
+**AC-LIB-4** A single card click immediately shows the editor shell while project data, motion paths and rendering resources load off the main thread. Repeated opens focus that window; closing cancels without saving. Loading errors offer Retry and Projects. The loaded editor uses a brief reveal, disabled with Reduce Motion.
+
 **AC-LIB-3** Double-clicking a `.recorder` package in Finder opens it in the editor; opening an already-open project focuses its window.
 
 ---
@@ -450,7 +456,7 @@ Rules:
 
 ### 6.1 Main window
 
-Min 1100×700. Three regions; splitters are fixed (no user-resizable panes except timeline height, draggable 160–420 pt).
+Min 1100×700. The inspector spans the full working height beside preview, transport and timeline. The timeline fits its visible lanes, toolbar and overview by default; its divider permits enlargement up to 420 pt and prevents lane clipping. The historical sketch below is superseded by this layout and the current captures in `build/editor-refined/`.
 
 ```
 ┌ ● ● ●   ‹ Projects      My Recording ▾ (click = rename)            Auto ▾   ⌗ Crop     [ ⬆ Export ] ┐
@@ -474,8 +480,11 @@ Min 1100×700. Three regions; splitters are fixed (no user-resizable panes excep
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+- `‹ Projects` pauses playback and hides the current editor, preserving its editing session when the project is reopened.
 - `Auto ▾` = output aspect (Auto = source aspect + padding). Changing it re-letterboxes the preview instantly.
 - Preview is direct-manipulation: with a **manual zoom selected**, a rectangle overlay shows the zoom target and can be dragged; with the **Camera tab** open, the camera can be dragged between corners; with a **mask selected**, its rect has 8 handles.
+- Canvas owns output-shape selection and Crop source. The document bar contains Projects, title, save state and Export. Padding remains exposed; corners, inset and shadow use a named disclosure.
+- Selected manual zooms and masks expose **Edit region / View result**. Edit region presents unzoomed footage with handles and temporarily hides the selected mask so its edges can be aligned to the underlying content; View result preserves selection and shows the composed output without handles. Whole-project inspection also shows composed output. Preview mode is transient and resets when selection changes. An out-of-interval playhead is identified with a **Go to interval** action that respects retained footage and output timing.
 - Transport: `Space` play/pause · `←/→` one frame · `⇧←/⇧→` 1 s · `Home/End` · `J K L` shuttle.
 
 **AC-ED-1** Any inspector slider change is visible in the preview on the next frame (< 16 ms at 1080p preview size); dragging a slider never stutters playback.
@@ -529,9 +538,9 @@ Pipeline over raw `move` events → 240 Hz table: (optional) shake removal (drop
 
 **AC-CUR-1** (unit) output never leads the raw path; final position error after 1 s of rest < 0.5 px. **AC-CUR-2** Cursor at size 4× is sharp (uses the hi-res stored representation, not an upscaled frame).
 
-### 6.6 Inspector (SwiftUI, 300 pt wide)
+### 6.6 Inspector (SwiftUI, 320 pt wide)
 
-Rule: **no selection ⇒ tabs; selection in timeline ⇒ the selection's panel replaces the tabs** with a `‹ Back`/`Esc` to deselect. All sliders: label left, value right (editable on double-click), `⌥`-click resets to default. Every control edits `EditorModel.project` through one `model.edit { }` closure (which snapshots undo; slider drags coalesce into one undo step).
+Rule: **composition navigation remains visible above preview and inspector**. Whole project / Selection explicitly chooses the property scope. Choosing a project destination preserves timeline selection; changing selection follows the new item. Deselect/`Esc` clears selection. Camera footage selection exposes timing context and a route to project appearance, not global appearance controls disguised as clip-local controls. Multiple selection shows group scope until explicit batch property editing is supported. The diagram below describes the individual property sets; the former disappearing tab bar is superseded by this navigation rule. All sliders: label left, value right (editable on double-click), `⌥`-click resets to default. Every control edits `EditorModel.project` through one `model.edit { }` closure (which snapshots undo; slider drags coalesce into one undo step).
 
 ```
  Background tab          Cursor tab                     Camera tab                  Audio tab
@@ -664,6 +673,8 @@ The x-axis is **output time** (what the viewer sees) — removed segments take n
 **Remove a segment** = select clip → `⌫` (or right-click ▸ Remove). Neighbours close the gap with a 0.18 s slide animation; a ✂ bubble marks the seam. Ripple is inherent (x-axis is output time). The last remaining clip cannot be removed.
 
 **Trim** = drag a clip edge. The clip's other edge stays fixed **on screen**; following clips ripple live. While dragging: preview shows the frame at the edge, a chip shows `new duration (Δ ±0:01.20)`. Can extend back up to the neighbour's source boundary (never overlap source ranges). Min clip length 0.1 s.
+
+Video clip movement uses output-time distances across mixed playback speeds, including gaps and grouped selections. Camera and keystroke media rates are preserved when the editing clock is rebased; linking controls whether those layers follow the move.
 
 **Restore**: clicking a ✂ bubble between two clips shows a popover `Restore 00:05.80 removed here` `[Restore]`; it re-inserts the removed source range (merging clips when speeds match).
 

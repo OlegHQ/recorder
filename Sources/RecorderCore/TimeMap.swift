@@ -5,10 +5,19 @@ public struct Clip: Codable, Equatable, Sendable {
     public var sourceStart: Double
     public var sourceEnd: Double
     public var speed: Double
+    public var isGap: Bool? = nil
+    public var mediaStart: Double? = nil
+    /// Separate the timeline clock from playback rate for an unlinked speed edit.
+    public var clockSpeed: Double? = nil
+    public var timeScale: Double { clockSpeed ?? speed }
+    public var mediaDuration: Double { outputDuration * speed }
+    public func mediaTime(atSource time: Double) -> Double { mediaIn + (time - sourceStart) * speed / timeScale }
+    public var mediaIn: Double { mediaStart ?? sourceStart }
+    public var isEmpty: Bool { isGap == true }
     public init(sourceStart: Double, sourceEnd: Double, speed: Double = 1) {
         self.sourceStart = sourceStart; self.sourceEnd = sourceEnd; self.speed = speed
     }
-    public var outputDuration: Double { (sourceEnd - sourceStart) / speed }
+    public var outputDuration: Double { (sourceEnd - sourceStart) / timeScale }
 }
 
 /// Maps between output (what the viewer sees) and source (what was recorded) time.
@@ -23,7 +32,7 @@ public struct TimeMap: Sendable {
         var start = 0.0
         for c in clips {
             let end = start + c.outputDuration
-            if t < end { return c.sourceStart + max(0, t - start) * c.speed }
+            if t < end { return c.sourceStart + max(0, t - start) * c.timeScale }
             start = end
         }
         return clips.last?.sourceEnd ?? 0
@@ -33,7 +42,7 @@ public struct TimeMap: Sendable {
     public func outputTime(atSource s: Double) -> Double? {
         var start = 0.0
         for c in clips {
-            if s >= c.sourceStart && s <= c.sourceEnd { return start + (s - c.sourceStart) / c.speed }
+            if s >= c.sourceStart && s <= c.sourceEnd { return start + (s - c.sourceStart) / c.timeScale }
             start += c.outputDuration
         }
         return nil

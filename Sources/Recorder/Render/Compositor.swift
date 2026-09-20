@@ -128,13 +128,13 @@ final class Compositor {
         // `cameraFull` fades the screen out as the camera grows to fill the canvas, `hidden` fades
         // the camera bubble out (screen unaffected). Gaps between blocks ⇒ `kind == nil`, amount 0.
         let (layoutKind, layoutAmount) = (s.layoutKind, s.layoutAmount)
-        let screenAlpha = layoutKind == .cameraFull ? 1 - layoutAmount : 1
+        let screenAlpha = (s.camera != nil && layoutKind == .cameraFull ? 1 - layoutAmount : 1) * s.videoOpacity
 
         // Pass 2: screen (rounded rect + shadow + crop/zoom UV + motion blur, SPEC §6.2 pass 2,
         // T-501). Pass 3 (cursor) shares the same content rect + crop/zoom UV mapping so it lands
         // in "screen space" and zooms with the content (SPEC §6.2 pass 3, T-413).
         if let screen = s.screen, screenAlpha > 0 {
-            let rectPx = screenRect(output: s.outputSize, cropAspect: cropAspect(s.project), padding: s.project.frame.padding)
+            let rectPx = screenRect(output: s.outputSize, cropAspect: cropAspect(s.project), padding: s.project.renderedFrame.padding)
             let contentUV = cropUV(s.project.crop, view: s.view)
             let prevContentUV = motionBlurContentUV(project: s.project, view: s.view, prevView: s.prevView, contentUV: contentUV, rectPx: rectPx)
             // Zoom scales the whole frame (corners, shadow, clip), not just the UVs inside a fixed one;
@@ -269,8 +269,8 @@ final class Compositor {
         u.pixelSize = SIMD2(Float(outputSize.width), Float(outputSize.height))
         u.contentSize = SIMD2(Float(frameRect.width), Float(frameRect.height))
         u.contentOffset = SIMD2(Float(frameRect.midX - outputSize.width / 2), Float(frameRect.midY - outputSize.height / 2))
-        u.radius = Float(project.frame.cornerRadius * min(frameRect.width, frameRect.height))
-        u.shadowAlpha = Float(project.frame.shadow)
+        u.radius = Float(project.renderedFrame.cornerRadius * min(frameRect.width, frameRect.height))
+        u.shadowAlpha = Float(project.renderedFrame.shadow)
         // 20 pt (the native window shadow's sigma) in output px, so the shadow scales with the window.
         let sourcePointsWide = project.crop.w * Double(max(project.source.pixelWidth, 1)) / max(project.source.scale, 0.0001)
         u.shadowBlur = Float(20 * frameRect.width / sourcePointsWide)
@@ -808,7 +808,7 @@ extension Compositor {
         let state = makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
         compositor.render(state, to: target, commandBuffer: commandBuffer)
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        await commandBuffer.completed()
 
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)

@@ -77,6 +77,11 @@ private final class BubbleView: NSView {
         previewLayer.cornerRadius = 40
         previewLayer.cornerCurve = .continuous
         previewLayer.masksToBounds = true
+        // Give the window shadow a stable silhouette even before the camera supplies a frame.
+        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.cornerRadius = previewLayer.cornerRadius
+        layer?.cornerCurve = previewLayer.cornerCurve
+        layer?.masksToBounds = true
         layer?.addSublayer(previewLayer)
     }
 

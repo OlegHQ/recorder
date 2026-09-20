@@ -118,11 +118,13 @@ public struct Layout: Codable, Equatable, Sendable {
     public var kind: Kind
     public var camera: Camera?
     public var keys: Keys?
+    public var mediaStart: Double? = nil
+    public var mediaRate: Double? = nil
     public var transition: Double = 0.3
     public init(id: String = UUID().uuidString, start: Double = 0, end: Double = 0, kind: Kind = .cameraFull, camera: Camera? = nil, keys: Keys? = nil) {
         self.id = id; self.start = start; self.end = end; self.kind = kind; self.camera = camera; self.keys = keys
     }
-    enum CodingKeys: String, CodingKey { case id, start, end, kind, camera, keys, transition }
+    enum CodingKeys: String, CodingKey { case id, start, end, kind, camera, keys, transition, mediaStart, mediaRate }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.value(.id, default: UUID().uuidString)
@@ -131,6 +133,8 @@ public struct Layout: Codable, Equatable, Sendable {
         kind = try c.value(.kind, default: .cameraFull)
         camera = try c.decodeIfPresent(Camera.self, forKey: .camera)
         keys = try c.decodeIfPresent(Keys.self, forKey: .keys)
+        mediaStart = try c.decodeIfPresent(Double.self, forKey: .mediaStart)
+        mediaRate = try c.decodeIfPresent(Double.self, forKey: .mediaRate)
         transition = try c.value(.transition, default: 0.3)
     }
 }
@@ -170,6 +174,18 @@ public struct Mask: Codable, Equatable, Sendable {
     }
 }
 
+/// Camera footage occupies its own interval; moving it preserves the media in-point.
+public struct CameraClip: Codable, Equatable, Sendable {
+    public var id: String
+    public var start: Double
+    public var end: Double
+    public var mediaStart: Double
+    public var mediaRate: Double? = nil
+    public init(id: String = UUID().uuidString, start: Double, end: Double, mediaStart: Double? = nil) {
+        self.id = id; self.start = start; self.end = end; self.mediaStart = mediaStart ?? start
+    }
+}
+
 public struct Background: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable { case wallpaper, gradient, color, image }
     public var kind: Kind
@@ -199,19 +215,23 @@ public struct Background: Codable, Equatable, Sendable {
 }
 
 public struct Frame: Codable, Equatable, Sendable {
+    /// nil uses the capture type: displays are edge to edge; windows and areas are framed.
+    public var enabled: Bool?
     public var padding: Double
     public var cornerRadius: Double
     public var inset: Double
     public var insetColor: String
     public var shadow: Double
     public init(padding: Double = 0.08, cornerRadius: Double = 0.02, inset: Double = 0,
-                insetColor: String = "#000000", shadow: Double = 0.5) {
+                insetColor: String = "#000000", shadow: Double = 0.5, enabled: Bool? = nil) {
+        self.enabled = enabled
         self.padding = padding; self.cornerRadius = cornerRadius; self.inset = inset
         self.insetColor = insetColor; self.shadow = shadow
     }
-    enum CodingKeys: String, CodingKey { case padding, cornerRadius, inset, insetColor, shadow }
+    enum CodingKeys: String, CodingKey { case padding, cornerRadius, inset, insetColor, shadow, enabled }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled)
         padding = try c.value(.padding, default: 0.08)
         cornerRadius = try c.value(.cornerRadius, default: 0.02)
         inset = try c.value(.inset, default: 0)
@@ -377,16 +397,28 @@ public enum ProjectError: Error, Equatable, Sendable {
 /// The editor's entire edit state. See docs/SPEC.md §5. `project.json` is the only file the
 /// editor ever rewrites; media alongside it is never modified after recording.
 public struct Project: Codable, Equatable, Sendable {
-    public static let currentVersion = 1
+    public static let currentVersion = 3
+
+    public var framingEnabled: Bool { frame.enabled ?? true }
+
+    /// Shared by preview, export, and editor overlay coordinates. Keeps saved styling intact.
+    public var renderedFrame: Frame {
+        framingEnabled ? frame : Frame(padding: 0, cornerRadius: 0, inset: 0, shadow: 0, enabled: false)
+    }
 
     public var version: Int
     public var id: String
     public var title: String
     public var createdAt: String
     public var source: Source
+    public var linkVideoEdits: Bool = true
+    public var rippleDelete: Bool = true
+    public var timelineSourceDuration: Double { max(source.duration, clips.last?.sourceEnd ?? 0) }
     public var clips: [Clip]
     public var zooms: [Zoom]
     public var layouts: [Layout]
+    public var keystrokeClips: [Layout]
+    public var cameraClips: [CameraClip]
     public var masks: [Mask]
     public var cursorHidden: [TimeRange]
     public var crop: NormRect
@@ -408,6 +440,8 @@ public struct Project: Codable, Equatable, Sendable {
         clips: [Clip] = [],
         zooms: [Zoom] = [],
         layouts: [Layout] = [],
+        cameraClips: [CameraClip]? = nil,
+        keystrokeClips: [Layout] = [],
         masks: [Mask] = [],
         cursorHidden: [TimeRange] = [],
         crop: NormRect = NormRect(),
@@ -421,14 +455,16 @@ public struct Project: Codable, Equatable, Sendable {
         keys: Keys = Keys()
     ) {
         self.version = version; self.id = id; self.title = title; self.createdAt = createdAt
-        self.source = source; self.clips = clips; self.zooms = zooms; self.layouts = layouts; self.masks = masks
+        self.keystrokeClips = keystrokeClips + layouts.filter { $0.kind == .settings }
+        self.cameraClips = cameraClips ?? (source.hasCamera && source.duration > 0 ? [CameraClip(start: 0, end: source.duration)] : [])
+        self.source = source; self.clips = clips; self.zooms = zooms; self.layouts = layouts.filter { $0.kind != .settings }; self.masks = masks
         self.cursorHidden = cursorHidden; self.crop = crop; self.output = output; self.background = background
         self.frame = frame; self.cursor = cursor; self.animation = animation; self.camera = camera
         self.audio = audio; self.keys = keys
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, id, title, createdAt, source, clips, zooms, layouts, masks, cursorHidden, crop, output,
+        case version, id, title, createdAt, source, linkVideoEdits, rippleDelete, clips, zooms, layouts, cameraClips, keystrokeClips, masks, cursorHidden, crop, output,
              background, frame, cursor, animation, camera, audio, keys
     }
 
@@ -439,9 +475,14 @@ public struct Project: Codable, Equatable, Sendable {
         title = try c.value(.title, default: "Untitled")
         createdAt = try c.value(.createdAt, default: ISO8601DateFormatter().string(from: Date()))
         source = try c.value(.source, default: Source())
+        linkVideoEdits = try c.value(.linkVideoEdits, default: true)
+        rippleDelete = try c.value(.rippleDelete, default: true)
         clips = try c.value(.clips, default: [])
         zooms = try c.value(.zooms, default: [])
         layouts = try c.value(.layouts, default: [])
+        keystrokeClips = try c.value(.keystrokeClips, default: layouts.filter { $0.kind == .settings })
+        layouts.removeAll { $0.kind == .settings }
+        cameraClips = try c.value(.cameraClips, default: source.hasCamera && source.duration > 0 ? [CameraClip(start: 0, end: source.duration)] : [])
         masks = try c.value(.masks, default: [])
         cursorHidden = try c.value(.cursorHidden, default: [])
         crop = try c.value(.crop, default: NormRect())
@@ -466,6 +507,8 @@ public struct Project: Codable, Equatable, Sendable {
     public func save(to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(self).write(to: url, options: .atomic)
+        var saved = self
+        saved.version = Self.currentVersion
+        try encoder.encode(saved).write(to: url, options: .atomic)
     }
 }

@@ -20,32 +20,36 @@ struct LabeledSlider: View {
     @State private var typedText = ""
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(title)
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.textSecondaryColor)
-                .lineLimit(1)
-                .frame(width: 72, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture { resetIfOption() }
-
-            Slider(value: $value, in: range, onEditingChanged: onEditingChanged)
-
-            if isTyping {
-                TextField("", text: $typedText, onCommit: commitTyped)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 13).monospacedDigit())
-                    .frame(width: 52)
-                    .onExitCommand { isTyping = false }
-            } else {
-                Text(format(value))
-                    .font(.system(size: 13).monospacedDigit())
-                    .foregroundStyle(Theme.textPrimaryColor)
-                    .frame(width: 52, alignment: .trailing)
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(Font(Theme.bodyFont))
+                    .foregroundStyle(Theme.textSecondaryColor)
                     .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { startTyping() }
-                    .onTapGesture(count: 1) { resetIfOption() }
-            }
+                    .onTapGesture { resetIfOption() }
+                Spacer(minLength: 8)
+                if isTyping {
+                    TextField("", text: $typedText, onCommit: commitTyped)
+                        .accessibilityLabel("\(title), numeric value")
+                        .textFieldStyle(TechFieldStyle())
+                        .font(Font(Theme.timecodeFont(11)))
+                        .frame(width: 64)
+                        .onExitCommand { isTyping = false }
+                } else {
+                    Text(format(value))
+                        .font(Font(Theme.timecodeFont(12)))
+                        .foregroundStyle(Theme.textPrimaryColor)
+                        .frame(minWidth: 48, alignment: .trailing)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { startTyping() }
+                        .onTapGesture(count: 1) { resetIfOption() }
+                        .help("Double-click to enter a value · Option-click to reset")
+                }
+            }.frame(minHeight: 22)
+            Slider(value: $value, in: range, onEditingChanged: onEditingChanged)
+                .controlSize(.small)
+                .accessibilityLabel(title)
+                .accessibilityValue(format(value))
         }
     }
 

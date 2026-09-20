@@ -13,33 +13,32 @@ struct CursorTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle("Hide cursor", isOn: hiddenBinding)
-                .toggleStyle(.checkbox)
-                .font(.system(size: 13))
                 .foregroundStyle(Theme.textPrimaryColor)
 
             LabeledSlider(title: "Size", value: fieldBinding(\.cursor.size), range: 0.5...4,
                           defaultValue: 1.5, format: { String(format: "%.1f×", $0) },
                           onEditingChanged: gesture("Cursor size"))
 
-            Picker("Movement", selection: styleBinding) {
+            Divider().padding(.vertical, 4)
+            Text("Movement").font(Font(Theme.headingFont(22)))
+            Picker("Response", selection: styleBinding) {
                 Text("Smooth").tag(CursorStyle.Style.smooth)
                 Text("Medium").tag(CursorStyle.Style.medium)
                 Text("Rapid").tag(CursorStyle.Style.rapid)
-                Text("None").tag(CursorStyle.Style.none)
+                Text("Original movement").tag(CursorStyle.Style.none)
             }
-            .font(.system(size: 13))
+            .font(Font(Theme.bodyFont))
             .foregroundStyle(Theme.textSecondaryColor)
 
             Toggle("Hide when idle", isOn: hideWhenIdleBinding)
-                .toggleStyle(.checkbox)
-                .font(.system(size: 13))
                 .foregroundStyle(Theme.textPrimaryColor)
 
             Divider().overlay(Theme.strokeColor)
 
+            Text("Playback behavior").font(Font(Theme.headingFont(22)))
             checkbox("Loop cursor position", loopBinding)
 
-            DisclosureGroup("Advanced") {
+            DisclosureGroup("Pointer appearance & cleanup") {
                 VStack(alignment: .leading, spacing: 8) {
                     checkbox("Always use arrow", alwaysArrowBinding)
                     checkbox("Rotate while moving", rotateBinding)
@@ -47,15 +46,13 @@ struct CursorTab: View {
                 }
                 .padding(.top, 4)
             }
-            .font(.system(size: 13))
+            .font(Font(Theme.bodyFont))
             .foregroundStyle(Theme.textPrimaryColor)
         }
     }
 
     private func checkbox(_ title: String, _ isOn: Binding<Bool>) -> some View {
         Toggle(title, isOn: isOn)
-            .toggleStyle(.checkbox)
-            .font(.system(size: 13))
             .foregroundStyle(Theme.textPrimaryColor)
     }
 

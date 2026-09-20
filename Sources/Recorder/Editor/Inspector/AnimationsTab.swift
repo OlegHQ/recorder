@@ -12,39 +12,36 @@ struct AnimationsTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            LabeledSlider(title: "Motion blur", value: fieldBinding(\.animation.motionBlur),
+            Text("Zoom transitions").font(Font(Theme.headingFont(22)))
+            TechSegmentedControl(selection: screenBinding, options: [
+                (.focused, "Focused"), (.smooth, "Smooth"),
+            ])
+            Text(animation.screen == .focused ? "Quick, controlled settling." : "Slower settling with a gentle overshoot.")
+                .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+            Text("Applies to animated zooms. Instant zooms skip this transition.")
+                .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider().padding(.vertical, 4)
+            Text("Motion blur").font(Font(Theme.headingFont(22)))
+            LabeledSlider(title: "Amount", value: fieldBinding(\.animation.motionBlur),
                           range: 0...1, defaultValue: 0.5, onEditingChanged: gesture("Motion blur"))
-
-            DisclosureGroup("Advanced") {
+            DisclosureGroup("Blur sources") {
                 VStack(alignment: .leading, spacing: 8) {
-                    checkbox("Cursor", blurCursorBinding)
-                    checkbox("Zoom", blurZoomBinding)
-                    checkbox("Pan", blurPanBinding)
+                    checkbox("Cursor movement", blurCursorBinding)
+                    checkbox("Zooming", blurZoomBinding)
+                    checkbox("Panning", blurPanBinding)
                 }
                 .padding(.top, 4)
             }
-            .font(.system(size: 13))
+            .font(Font(Theme.bodyFont))
             .foregroundStyle(Theme.textPrimaryColor)
-
-            HStack(spacing: 8) {
-                Text("Screen")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.textSecondaryColor)
-                    .frame(width: 72, alignment: .leading)
-                Picker("", selection: screenBinding) {
-                    Text("Focused").tag(RecorderCore.Animation.Screen.focused)
-                    Text("Smooth").tag(RecorderCore.Animation.Screen.smooth)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
+            Text("Play the recording to judge motion and blur.")
+                .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
         }
     }
 
     private func checkbox(_ title: String, _ isOn: Binding<Bool>) -> some View {
         Toggle(title, isOn: isOn)
-            .toggleStyle(.checkbox)
-            .font(.system(size: 13))
             .foregroundStyle(Theme.textPrimaryColor)
     }
 
@@ -76,5 +73,36 @@ struct AnimationsTab: View {
 
     private var screenBinding: Binding<RecorderCore.Animation.Screen> {
         Binding(get: { animation.screen }, set: { newValue in model.edit("Zoom spring") { $0.animation.screen = newValue } })
+    }
+}
+
+/// Connect whole-project transition settings to the interval visible in the preview.
+struct ZoomTimelineActions: View {
+    let model: EditorModel
+    private var time: Double { model.timeMap.sourceTime(atOutput: model.playhead) }
+    private var activeID: UUID? {
+        model.project.zooms.first { time >= $0.start && time < $0.end }
+            .flatMap { UUID(uuidString: $0.id) }
+    }
+    private var canAdd: Bool {
+        guard model.playhead < model.timeMap.outputDuration else { return false }
+        var trial = model.project
+        return trial.addZoom(atSource: time, mode: .manual) != nil
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(activeID != nil ? "Zoom active at playhead" : "Emphasize a moment")
+                .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+            Button(activeID != nil ? "Edit this zoom" : "Add zoom at playhead") {
+                if let id = activeID {
+                    model.isPlaying = false
+                    model.selectedClips = []
+                    model.selection = [id]
+                    model.inspectorShowsProject = false
+                } else { model.addZoom(atSource: time) }
+            }
+            .buttonStyle(TechButtonStyle(kind: activeID != nil ? .primary : .secondary, compact: true))
+            .disabled(activeID == nil && !canAdd)
+        }
     }
 }

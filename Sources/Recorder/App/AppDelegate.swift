@@ -23,21 +23,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wireViewHelpItems()
         wireCopyStateSnapshot()
         Hotkeys.install()
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateStatusItem() }
-        }
+        statusTimer = Timer.scheduledTimer(timeInterval: 1, target: self,
+                                           selector: #selector(statusTimerFired), userInfo: nil, repeats: true)
 
         // AC-REC-3: recover any package left with a `screen.mov` but no `project.json` by a prior crash.
         Task { await RecordingRecovery.recoverOrphans(in: RecordingSettings.shared.projectsFolder) }
 
         // Dev/HUMAN entry point (T-306/T-307): `Recorder --open <package>` opens the editor for
         // that package directly, so it's reachable before the library (T-3xx, another lane) exists.
-        if let i = CommandLine.arguments.firstIndex(of: "--open"), CommandLine.arguments.indices.contains(i + 1) {
+        if CommandLine.arguments.contains("--ui-gallery") {
+            UIKitGallery.show()
+        } else if CommandLine.arguments.contains("--projects") {
+            Library.show()
+        } else if let i = CommandLine.arguments.firstIndex(of: "--open"), CommandLine.arguments.indices.contains(i + 1) {
             EditorWindowController.open(package: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
         } else if !Permissions.allGranted {
             showOnboarding()
         } else {
-            Library.show() // shown alongside the toolbar on launch, SPEC §5.1
             ToolbarController.shared.show()
         }
 
@@ -178,6 +180,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @MainActor @objc private func statusTimerFired() { updateStatusItem() }
+
     /// Wires the "File ▸ New Recording" item built by `buildMainMenu` to the same selector the status
     /// item's "New Recording…" uses (T-104; status item items are wired directly in `buildIdleStatusMenu`).
     private func wireNewRecording() {
@@ -213,6 +217,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// which stay `target = nil` for the responder chain — these are plain `AppDelegate` actions.
     private func wireViewHelpItems() {
         let view = NSApp.mainMenu?.item(withTitle: "View")?.submenu
+        let gallery = view?.item(withTitle: "Signal UI Gallery")
+        gallery?.target = self
+        gallery?.action = #selector(showUIKitGallery)
         let commandMenu = view?.item(withTitle: "Command Menu…")
         commandMenu?.target = self
         commandMenu?.action = #selector(showCommandMenu)
@@ -223,6 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func showCommandMenu() { CommandMenu.show() }
     @MainActor @objc private func showCheatSheet() { CheatSheet.show() }
+    @MainActor @objc private func showUIKitGallery() { UIKitGallery.show() }
 
     /// Wires "Recorder ▸ Copy State Snapshot" (T-610) — same pattern as `wireSettings`. The status
     /// item's own copy (idle + recording variants, `buildIdleStatusMenu`/`buildRecordingStatusMenu`)
@@ -334,6 +342,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let edit = NSMenu(title: "Edit")
         edit.addItem(item("Undo", "z", action: #selector(EditorWindowController.performUndo(_:))))
         edit.addItem(item("Redo", "z", [.command, .shift], action: #selector(EditorWindowController.performRedo(_:))))
+        edit.addItem(item("Cut", "x", action: #selector(NSText.cut(_:))))
+        edit.addItem(item("Copy", "c", action: #selector(NSText.copy(_:))))
+        edit.addItem(item("Paste", "v", action: #selector(NSText.paste(_:))))
         edit.addItem(item("Split", "c", [], action: #selector(EditorWindowController.splitAtPlayhead(_:))))
         edit.addItem(item("Remove", "\u{8}", [], action: #selector(EditorWindowController.removeSelected(_:))))
         edit.addItem(item("Add Zoom", "z", [], action: #selector(EditorWindowController.addZoomAtPlayhead(_:))))
@@ -372,6 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.addItem(.separator())
         view.addItem(item("Crop…", action: #selector(EditorWindowController.cropTapped)))
         view.addItem(.separator())
+        view.addItem(item("Signal UI Gallery"))
         // SPEC §8's menu-bar list doesn't place these (there's no Help menu); T-311's Log records
         // that they were added here, in the View menu's last group, per the coordinator's instruction.
         view.addItem(item("Command Menu…", "k"))

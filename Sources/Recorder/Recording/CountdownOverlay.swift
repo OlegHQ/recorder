@@ -18,7 +18,7 @@ enum CountdownOverlay {
 
             var timer: Timer?
             var resumed = false
-            func finish(_ result: Bool) {
+            @MainActor func finish(_ result: Bool) {
                 guard !resumed else { return }
                 resumed = true
                 timer?.invalidate()
@@ -28,10 +28,13 @@ enum CountdownOverlay {
 
             hosting.onCancel = { finish(false) }
             timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-                if state.remaining <= 1 {
-                    finish(true)
-                } else {
-                    state.remaining -= 1
+                Task { @MainActor in
+                    guard !resumed else { return }
+                    if state.remaining <= 1 {
+                        finish(true)
+                    } else {
+                        state.remaining -= 1
+                    }
                 }
             }
             panel.makeKeyAndOrderFront(nil)
@@ -39,25 +42,27 @@ enum CountdownOverlay {
     }
 }
 
-@Observable private final class CountdownState {
+@MainActor @Observable final class CountdownState {
     var remaining: Int
     init(remaining: Int) { self.remaining = remaining }
 }
 
 /// SPEC §4.7 mockup: 72 pt number, scaling and fading in/out as `remaining` ticks down each second.
-private struct CountdownView: View {
+struct CountdownView: View {
     var state: CountdownState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
             Text("\(state.remaining)")
                 .id(state.remaining)
-                .font(.system(size: 72, weight: .semibold))
+                .font(Font(Theme.headingFont(80)))
                 .foregroundStyle(Theme.textPrimaryColor)
-                .transition(.scale(scale: 1.4).combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .scale(scale: 1.18).combined(with: .opacity))
         }
         .frame(width: 160, height: 160)
-        .animation(.easeOut(duration: 0.35), value: state.remaining)
+        .signalWindow()
+        .animation(reduceMotion ? nil : .easeOut(duration: Theme.Motion.contextReveal), value: state.remaining)
     }
 }
 

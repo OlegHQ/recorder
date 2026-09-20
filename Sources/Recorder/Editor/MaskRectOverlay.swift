@@ -45,6 +45,9 @@ final class MaskRectOverlay {
         view = container
 
         selectionView.onChange = { [weak self] r in self?.rectChanged(r) }
+        selectionView.onKeyboardEditingChanged = { [weak self] editing in
+            if editing { self?.gestureBegan() } else { self?.gestureEnded() }
+        }
         container.onMouseDown = { [weak self] in self?.gestureBegan() }
         container.onMouseUp = { [weak self] in self?.gestureEnded() }
         observeSelection()
@@ -84,7 +87,7 @@ final class MaskRectOverlay {
 
     /// The selected mask's id, or `nil` while no mask (or something else) is selected.
     private var selectedMaskID: UUID? {
-        guard model.selectedClip == nil, model.selection.count == 1, let id = model.selection.first,
+        guard !model.inspectorShowsProject, !model.previewShowsResult, model.selectedClip == nil, model.selection.count == 1, let id = model.selection.first,
               model.project.masks.contains(where: { $0.id == id.uuidString }) else { return nil }
         return id
     }
@@ -96,6 +99,8 @@ final class MaskRectOverlay {
     /// `project.crop`/`project.frame.padding`, which can change independently of the mask list.
     private func observeSelection() {
         withObservationTracking {
+            _ = model.inspectorShowsProject
+            _ = model.previewShowsResult
             _ = model.selection
             _ = model.selectedClip
             _ = model.project

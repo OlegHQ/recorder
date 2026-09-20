@@ -36,6 +36,8 @@ enum ExportSheet {
 
     var settings: ExportSettings { didSet { settings.persist(to: defaults) } }
     private(set) var phase: Phase = .idle
+    private(set) var errorMessage: String?
+    private(set) var copyStatus: String?
 
     private var exporter: Exporter?
     private var exportStart: Date?
@@ -93,6 +95,8 @@ enum ExportSheet {
     /// by the `export-sheet` selftest, no window/NSSavePanel required.
     func startExport(to destination: URL, copyToPasteboardWhenDone: Bool = false) {
         guard !isExporting else { return }
+        errorMessage = nil
+        copyStatus = nil
         exportStart = Date()
         phase = .exporting(fraction: 0, frame: 0, total: 0)
 
@@ -100,8 +104,11 @@ enum ExportSheet {
         self.exporter = exporter
         // Exporter's own doc comment: "T-506 hops to the main actor itself if it touches UI state" —
         // `progress` is called on whatever thread the frame just finished on.
-        exporter.progress = { [weak self] fraction, frame, total in
-            Task { @MainActor in self?.phase = .exporting(fraction: fraction, frame: frame, total: total) }
+        exporter.progress = { [weak self, weak exporter] fraction, frame, total in
+            Task { @MainActor in
+                guard let self, let exporter, self.exporter === exporter, self.isExporting else { return }
+                self.phase = .exporting(fraction: fraction, frame: frame, total: total)
+            }
         }
 
         Task { [weak self] in
@@ -110,13 +117,17 @@ enum ExportSheet {
                 await MainActor.run {
                     guard let self, self.exporter === exporter else { return }
                     self.exporter = nil
-                    if copyToPasteboardWhenDone { Self.copyToPasteboard(destination) }
+                    if copyToPasteboardWhenDone { self.copyResult(destination) }
                     self.phase = .done(url: destination, sizeBytes: Self.fileSize(destination))
                 }
             } catch {
                 await MainActor.run {
                     guard let self, self.exporter === exporter else { return }
                     self.exporter = nil
+                    if case Exporter.ExportError.cancelled = error { self.errorMessage = nil }
+                    else if let error = error as? Exporter.ExportError {
+                        self.errorMessage = error.description
+                    } else { self.errorMessage = error.localizedDescription }
                     self.phase = .idle
                 }
             }
@@ -141,10 +152,11 @@ enum ExportSheet {
         return "\(percent)%  ·  \(frame) / \(total) frames\(remaining)"
     }
 
-    static func copyToPasteboard(_ url: URL) {
-        let pasteboard = NSPasteboard.general
+    func copyResult(_ url: URL, pasteboard: NSPasteboard = .general) {
         pasteboard.clearContents()
-        pasteboard.writeObjects([url as NSURL])
+        copyStatus = pasteboard.writeObjects([url as NSURL])
+            ? "File copied — ready to paste."
+            : "Couldn’t copy the file. Try again or use Show in Finder."
     }
 
     private static func fileSize(_ url: URL) -> Int64 {
@@ -200,7 +212,7 @@ extension ExportSettings {
 final class ExportSheetWindow: NSWindow {
     let model: ExportSheetModel
 
-    private static let contentSize = NSSize(width: 620, height: 360)
+    private static let contentSize = NSSize(width: 620, height: 440)
 
     init(model: ExportSheetModel) {
         self.model = model
@@ -217,7 +229,7 @@ final class ExportSheetWindow: NSWindow {
             onChooseDestination: { [weak self] in self?.chooseDestinationAndExport() },
             onCopyToClipboard: { [weak self] in self?.copyToClipboard() },
             onShowInFinder: { url in NSWorkspace.shared.activateFileViewerSelecting([url]) },
-            onCopyResult: { url in ExportSheetModel.copyToPasteboard(url) },
+            onCopyResult: { url in model.copyResult(url) },
             onDone: { [weak self] in self?.end() })
         contentView = NSHostingView(rootView: content)
     }
@@ -270,74 +282,85 @@ struct ExportSheetView: View {
     let onDone: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Export").font(Font(Theme.titleFont)).foregroundStyle(Theme.textPrimaryColor)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Export").font(Font(Theme.titleFont)).foregroundStyle(Theme.textPrimaryColor)
+                Spacer()
+                Text(model.durationText)
+                    .font(Font(Theme.timecodeFont(12)))
+                    .foregroundStyle(Theme.textTertiaryColor)
+            }
+            .padding(.bottom, 8)
+            .overlay(alignment: .bottom) { Rectangle().fill(Theme.textPrimaryColor).frame(height: 2) }
 
-            VStack(alignment: .leading, spacing: 12) {
+            if model.phase == .idle {
+            VStack(alignment: .leading, spacing: 8) {
                 row("Format") {
-                    Picker("", selection: $model.settings.format) {
-                        Text("MP4").tag(ExportSettings.Format.mp4)
-                        Text("GIF").tag(ExportSettings.Format.gif)
-                    }
-                    .pickerStyle(.segmented).frame(width: 160)
+                    TechSegmentedControl(selection: $model.settings.format,
+                                         options: [(.mp4, "MP4"), (.gif, "GIF")])
+                        .frame(width: 160)
                     .onChange(of: model.settings.format) { _, newFormat in
                         let allowed = newFormat == .gif ? [10, 15, 24] : [24, 30, 60]
                         if !allowed.contains(model.settings.fps) { model.settings.fps = allowed.contains(24) ? 24 : allowed[0] }
                     }
                 }
                 row("Resolution") {
-                    Picker("", selection: $model.settings.shortEdge) {
-                        Text("720p").tag(720)
-                        Text("1080p").tag(1080)
-                        Text("4K").tag(2160)
-                    }
-                    .pickerStyle(.segmented).frame(width: 220)
+                    TechSegmentedControl(selection: $model.settings.shortEdge,
+                                         options: [(720, "720p"), (1080, "1080p"), (2160, "4K")])
+                        .frame(width: 220)
                     Text("→ \(model.resolutionText)").foregroundStyle(Theme.textSecondaryColor)
                 }
                 row("Frame rate") {
-                    Picker("", selection: $model.settings.fps) {
-                        ForEach(model.settings.format == .gif ? [10, 15, 24] : [24, 30, 60], id: \.self) { fps in
-                            Text("\(fps)").tag(fps)
-                        }
-                    }
-                    .pickerStyle(.segmented).frame(width: 160)
-                    if model.settings.format == .gif { Text("GIF: 10|15|24").foregroundStyle(Theme.textSecondaryColor) }
+                    TechSegmentedControl(selection: $model.settings.fps,
+                                         options: (model.settings.format == .gif ? [10, 15, 24] : [24, 30, 60])
+                                            .map { ($0, "\($0)") })
+                        .frame(width: 160)
+                    Text("fps").foregroundStyle(Theme.textSecondaryColor)
                 }
-                row("Quality") {
-                    Picker("", selection: $model.settings.quality) {
-                        Text("Web").tag(ExportSettings.Quality.web)
-                        Text("Social").tag(ExportSettings.Quality.social)
-                        Text("High").tag(ExportSettings.Quality.high)
-                        Text("Studio").tag(ExportSettings.Quality.studio)
+                if model.settings.format == .mp4 {
+                    row("Quality") {
+                        TechSegmentedControl(selection: $model.settings.quality, options: [
+                            (.web, "Web"), (.social, "Social"), (.high, "High"), (.studio, "Studio"),
+                        ]).frame(width: 260)
                     }
-                    .pickerStyle(.segmented).frame(width: 260)
-                }
-                row("Codec") {
-                    Picker("", selection: $model.settings.codec) {
-                        Text("H.264").tag(ExportSettings.Codec.h264)
-                        Text("HEVC").tag(ExportSettings.Codec.hevc)
+                    row("Codec") {
+                        TechSegmentedControl(selection: $model.settings.codec,
+                                             options: [(.h264, "H.264"), (.hevc, "HEVC")])
+                            .frame(width: 160)
                     }
-                    .pickerStyle(.segmented).frame(width: 160)
-                    .disabled(model.settings.format == .gif)
-                    .opacity(model.settings.format == .gif ? 0.4 : 1)
-                    Text("MP4 only").foregroundStyle(Theme.textSecondaryColor)
                 }
+                Text(model.settings.format == .gif ? "Animated image · no audio" : "Video · uses your Sound settings")
+                    .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
                 if let warning = model.gifDurationWarning {
                     Text(warning).foregroundStyle(Theme.dangerColor).font(Font(Theme.captionFont))
                 }
             }
             .font(Font(Theme.bodyFont))
             .foregroundStyle(Theme.textPrimaryColor)
-            .disabled(model.isExporting)
-            .opacity(model.isExporting ? 0.5 : 1)
-
+            } else {
+                Text("\(model.resolutionText) · \(model.settings.fps) fps · \(model.durationText)")
+                    .font(Font(Theme.timecodeFont(13))).foregroundStyle(Theme.textSecondaryColor)
+            }
+            if case .done = model.phase { } else { Spacer(minLength: 0) }
+            if let error = model.errorMessage {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Export failed", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(Theme.dangerColor)
+                    Text(error).font(Font(Theme.captionFont))
+                        .foregroundStyle(Theme.textSecondaryColor).lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true).help(error)
+                }
+            }
             Divider().background(Theme.strokeColor)
 
             bottomArea
         }
         .padding(24)
-        .frame(width: 620, height: 360, alignment: .top)
-        .background(Theme.bgPanelColor)
+        .frame(width: 620, height: 440, alignment: .top)
+        .background {
+            ZStack { Theme.bgPanelColor; TechGridBackground(step: 40).opacity(0.25) }
+        }
+        .signalWindow()
     }
 
     @ViewBuilder
@@ -347,13 +370,15 @@ struct ExportSheetView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Estimated size  \(model.estimatedSizeText)")
-                    Text("Duration \(model.durationText)").foregroundStyle(Theme.textSecondaryColor)
+                    Text("Final size may vary").foregroundStyle(Theme.textSecondaryColor)
                 }
                 .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textPrimaryColor)
                 Spacer()
-                Button("Copy to clipboard", action: onCopyToClipboard).buttonStyle(.bordered)
+                Button("Copy to clipboard", action: onCopyToClipboard)
+                    .buttonStyle(TechButtonStyle(kind: .secondary))
                 Button("Export…", action: onChooseDestination)
-                    .buttonStyle(.borderedProminent).tint(Theme.accentColor)
+                    .buttonStyle(TechButtonStyle(kind: .primary))
+                    .keyboardShortcut(.defaultAction)
             }
         case let .exporting(fraction, _, _):
             VStack(alignment: .leading, spacing: 8) {
@@ -362,18 +387,28 @@ struct ExportSheetView: View {
                 HStack {
                     Text(model.progressDetailText).foregroundStyle(Theme.textSecondaryColor).font(Font(Theme.captionFont))
                     Spacer()
-                    Button("Cancel") { model.cancel() }.buttonStyle(.bordered).tint(Theme.dangerColor)
+                    Button("Cancel") { model.cancel() }.buttonStyle(TechButtonStyle(kind: .danger))
                 }
             }
         case let .done(url, sizeBytes):
-            HStack {
-                Label("Exported \(url.lastPathComponent) (\(ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)))",
-                      systemImage: "checkmark.circle.fill")
+            VStack(alignment: .leading, spacing: 14) {
+                Label("Export complete", systemImage: "checkmark.circle.fill")
+                    .font(Font(Theme.headingFont(24))).foregroundStyle(Theme.textPrimaryColor)
+                Text(url.lastPathComponent).lineLimit(2).truncationMode(.middle).help(url.path)
                     .foregroundStyle(Theme.textPrimaryColor)
-                Spacer()
-                Button("Show in Finder") { onShowInFinder(url) }.buttonStyle(.bordered)
-                Button("Copy") { onCopyResult(url) }.buttonStyle(.bordered)
-                Button("Done", action: onDone).buttonStyle(.borderedProminent).tint(Theme.accentColor)
+                Text(ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file))
+                    .font(Font(Theme.timecodeFont(12))).foregroundStyle(Theme.textSecondaryColor)
+                if let status = model.copyStatus {
+                    Text(status).font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+                }
+                Spacer(minLength: 0)
+                HStack {
+                    Button("Show in Finder") { onShowInFinder(url) }.buttonStyle(TechButtonStyle(kind: .secondary))
+                    Button("Copy file") { onCopyResult(url) }.buttonStyle(TechButtonStyle(kind: .secondary))
+                    Spacer()
+                    Button("Done", action: onDone).buttonStyle(TechButtonStyle(kind: .primary))
+                        .keyboardShortcut(.defaultAction)
+                }
             }
         }
     }
@@ -398,8 +433,16 @@ enum ExportSheetSelfTest {
     /// (d) cancelling immediately after starting deletes the partial file (AC-EXP-3).
     @MainActor
     static func run(_ args: [String]) async throws {
-        guard let packagePath = args.first else { throw Fail(description: "usage: export-sheet <package>") }
-        let editorModel = try loadEditorModel(package: URL(fileURLWithPath: packagePath))
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-export-handoff-" + UUID().uuidString)
+        let editorModel: EditorModel
+        if let packagePath = args.first {
+            editorModel = try loadEditorModel(package: URL(fileURLWithPath: packagePath))
+        } else {
+            editorModel = EditorWorkspaceGallery.makeModel(at: scratch)
+            try await WorkspaceMedia.prepare(at: scratch)
+            editorModel.edit("Short export fixture") { $0.clips = [Clip(sourceStart: 0, sourceEnd: 1)] }
+        }
+        defer { editorModel.saveNow(); try? FileManager.default.removeItem(at: scratch) }
 
         let suiteName = "recorder-selftest-export-sheet-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else { throw Fail(description: "no UserDefaults suite") }
@@ -438,6 +481,7 @@ enum ExportSheetSelfTest {
         // (c) a real export through `startExport(to:)`, progress reaching 1.0, playable output.
         model.settings = ExportSettings(format: .mp4, shortEdge: 720, fps: 30, quality: .high, codec: .h264)
         let outURL = FileManager.default.temporaryDirectory.appendingPathComponent("export-sheet-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: outURL) }
         model.startExport(to: outURL)
         var maxFraction = 0.0
         var deadline = Date().addingTimeInterval(15)
@@ -453,6 +497,14 @@ enum ExportSheetSelfTest {
         let duration = try await asset.load(.duration).seconds
         guard duration > 0 else { throw Fail(description: "exported file has zero duration") }
         print("export-sheet run OK duration=\(duration)s maxFraction=\(maxFraction)")
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        model.copyResult(outURL, pasteboard: pasteboard)
+        guard pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] == [outURL],
+              model.copyStatus == "File copied — ready to paste." else {
+            throw Fail(description: "file handoff or copy receipt failed")
+        }
+        print("export-sheet file pasteboard and receipt OK")
 
         // (d) cancel immediately (before the export Task even starts) deletes the partial file.
         let cancelledModel = ExportSheetModel(editorModel: editorModel, defaults: defaults)
@@ -468,7 +520,28 @@ enum ExportSheetSelfTest {
         guard !FileManager.default.fileExists(atPath: cancelURL.path) else {
             throw Fail(description: "cancelled export left a partial file at \(cancelURL.path)")
         }
+        guard cancelledModel.phase == .idle, cancelledModel.errorMessage == nil else {
+            throw Fail(description: "cancel presented as a failure")
+        }
         print("export-sheet cancel OK")
+        let retrySettings = cancelledModel.settings
+        defer { try? FileManager.default.removeItem(at: cancelURL) }
+        cancelledModel.startExport(to: cancelURL)
+        deadline = Date().addingTimeInterval(15)
+        while cancelledModel.isExporting {
+            guard Date() < deadline else { throw Fail(description: "retry did not settle") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .done = cancelledModel.phase, cancelledModel.settings.format == retrySettings.format,
+              cancelledModel.settings.shortEdge == retrySettings.shortEdge,
+              cancelledModel.settings.fps == retrySettings.fps,
+              cancelledModel.settings.quality == retrySettings.quality,
+              cancelledModel.settings.codec == retrySettings.codec,
+              cancelledModel.errorMessage == nil else { throw Fail(description: "retry failed or lost settings") }
+        guard try await AVURLAsset(url: cancelURL).load(.duration).seconds > 0 else {
+            throw Fail(description: "retry output is not playable")
+        }
+        print("export-sheet retry OK; settings retained and output playable")
     }
 
     /// Renders `ExportSheetView` offscreen (dark appearance, forced before the hosting view is
@@ -485,23 +558,52 @@ enum ExportSheetSelfTest {
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
         try project.save(to: tmp.appendingPathComponent("project.json"))
+        if ["done", "copied"].contains(args.dropFirst().first ?? "") {
+            project.source.pixelWidth = 960
+            project.source.pixelHeight = 540
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 1)]
+            try await WorkspaceMedia.prepare(at: tmp)
+        }
         let editorModel = EditorModel(packageURL: tmp, project: project, events: EventLog())
         let suiteName = "recorder-selftest-export-sheet-png-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else { throw Fail(description: "no UserDefaults suite") }
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let model = ExportSheetModel(editorModel: editorModel, defaults: defaults)
 
+        let variant = args.dropFirst().first
+        if variant == "gif" { model.settings.format = .gif; model.settings.fps = 15 }
+        if variant == "failure" || variant == "done" || variant == "copied" {
+            let destination = tmp.appendingPathComponent("Project walkthrough with a deliberately long descriptive filename for review.mp4")
+            model.startExport(to: destination)
+            let deadline = Date().addingTimeInterval(20)
+            while model.isExporting {
+                guard Date() < deadline else { throw Fail(description: "export state did not settle") }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            if variant == "failure" {
+                guard model.phase == .idle, model.errorMessage != nil else { throw Fail(description: "missing visible export failure") }
+            } else {
+                guard case .done = model.phase, model.errorMessage == nil else { throw Fail(description: "export did not succeed") }
+            }
+        }
+
+        if variant == "copied", case let .done(url, _) = model.phase {
+            let pasteboard = NSPasteboard.withUniqueName()
+            model.copyResult(url, pasteboard: pasteboard)
+            pasteboard.releaseGlobally()
+        }
+
         let view = ExportSheetView(model: model, onChooseDestination: {}, onCopyToClipboard: {},
                                     onShowInFinder: { _ in }, onCopyResult: { _ in }, onDone: {})
         let hosting = NSHostingView(rootView: view)
         hosting.appearance = NSAppearance(named: .darkAqua)
-        hosting.frame = NSRect(x: 0, y: 0, width: 620, height: 360)
+        hosting.frame = NSRect(x: 0, y: 0, width: 620, height: 440)
 
         let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = hosting
         hosting.layoutSubtreeIfNeeded()
-        for _ in 0..<5 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+        try await Task.sleep(for: .milliseconds(100))
         hosting.layoutSubtreeIfNeeded()
 
         guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
@@ -511,5 +613,71 @@ enum ExportSheetSelfTest {
         guard let png = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
         try png.write(to: URL(fileURLWithPath: outPath))
         print("wrote \(outPath)")
+    }
+}
+
+
+extension ExportSheetSelfTest {
+    @MainActor static func checkNativeHandoff() async throws {
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-native-export-" + UUID().uuidString)
+        let editor = EditorWorkspaceGallery.makeModel(at: scratch)
+        try await WorkspaceMedia.prepare(at: scratch)
+        editor.edit("Short export fixture") { $0.clips = [Clip(sourceStart: 0, sourceEnd: 1)] }
+        let suiteName = "recorder-native-export-" + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suiteName) else { throw Fail(description: "defaults unavailable") }
+        defer { editor.saveNow(); try? FileManager.default.removeItem(at: scratch); defaults.removePersistentDomain(forName: suiteName) }
+        let model = ExportSheetModel(editorModel: editor, defaults: defaults)
+        model.settings.shortEdge = 720
+        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        parent.isReleasedWhenClosed = false
+        let sheet = ExportSheetWindow(model: model)
+        sheet.isReleasedWhenClosed = false
+        parent.makeKeyAndOrderFront(nil)
+        parent.beginSheet(sheet) { _ in }
+        defer {
+            if let panel = sheet.attachedSheet { sheet.endSheet(panel) }
+            if parent.attachedSheet != nil { parent.endSheet(sheet) }
+            parent.orderOut(nil)
+        }
+        func waitFor(_ message: String, _ condition: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(15)
+            while !condition() {
+                guard Date() < deadline else { throw Fail(description: message + "; phase=\(model.phase)") }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        func pressReturn(in target: NSWindow? = nil) {
+            let target = target ?? sheet
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: target.windowNumber,
+                context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+            target.sendEvent(event)
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        pressReturn()
+        try await waitFor("Return did not present Save", { sheet.attachedSheet is NSSavePanel })
+        guard let first = sheet.attachedSheet as? NSSavePanel,
+              first.allowedContentTypes == [.mpeg4Movie], first.nameFieldStringValue == model.defaultFileName() else {
+            throw Fail(description: "Save filename/type did not reflect export settings")
+        }
+        first.cancel(nil)
+        try await waitFor("Save cancellation did not dismiss", { sheet.attachedSheet == nil })
+        guard model.phase == .idle, model.settings.shortEdge == 720, model.errorMessage == nil else {
+            throw Fail(description: "Save cancellation changed export settings or phase")
+        }
+        // Native opening/cancellation and an explicit temporary export are separate checks.
+        // Never export to an unconfirmed remote dialog URL.
+        let destination = scratch.appendingPathComponent("Native handoff.mp4")
+        model.startExport(to: destination)
+        try await waitFor("Chosen destination did not complete export", { if case .done = model.phase { return true }; return false })
+        guard case let .done(url, bytes) = model.phase, url.lastPathComponent == destination.lastPathComponent,
+              url.deletingLastPathComponent().resolvingSymlinksInPath().path == scratch.resolvingSymlinksInPath().path, bytes > 0 else {
+            throw Fail(description: "Selected destination produced the wrong result: \(model.phase), expected directory \(scratch.path)")
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        pressReturn()
+        try await waitFor("Return did not close completion", { parent.attachedSheet == nil })
+        print("Native export passed: Return opens Save; cancel retains settings; explicit test destination exports; Return closes completion. System Save confirmation is not simulated.")
     }
 }

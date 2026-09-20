@@ -38,6 +38,7 @@ final class PreviewView: MTKView {
 
     private var isSeeking = false
     private var pendingSeekTime: Double?
+    private var lastCameraClips: [CameraClip] = []
     private var lastClips: [Clip]
     private var lastAudio: Audio
 
@@ -90,14 +91,22 @@ final class PreviewView: MTKView {
     /// does for the zoom-target overlay, which this view owns outright.
     var onResize: ((CGSize) -> Void)?
 
-    init(model: EditorModel) {
+    private let loadingLabel = NSTextField(wrappingLabelWithString: "Loading preview…")
+    private let statusDetail = NSTextField(wrappingLabelWithString: "")
+    private let statusStack = NSStackView()
+    private lazy var statusAction = TechAppKit.button("Retry preview", compact: true,
+        target: self, action: #selector(recoverPreview))
+    private var compositionRevision = 0
+
+
+    init(model: EditorModel, preparedCompositor: Compositor? = nil) {
         self.model = model
         self.lastClips = model.project.clips
         self.lastAudio = model.project.audio
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             fatalError("no Metal device")
         }
-        compositor = try! Compositor(device: device, package: model.packageURL)
+        compositor = try! preparedCompositor ?? Compositor(device: device, package: model.packageURL)
         textureCache = TextureCache(device: device)
         commandQueue = queue
         super.init(frame: .zero, device: device)
@@ -110,12 +119,47 @@ final class PreviewView: MTKView {
         zoomTargetView.isHidden = true
         zoomTargetView.autoresizingMask = [.width, .height]
         zoomTargetView.onChange = { [weak self] r in self?.zoomTargetRectChanged(r) }
+        zoomTargetView.onKeyboardEditingChanged = { [weak self] editing in
+            guard let self else { return }
+            if editing {
+                guard self.selectedManualZoom() != nil else { return }
+                self.model.beginGesture()
+                self.zoomTargetGestureActive = true
+            } else { self.zoomTargetDragEnded() }
+        }
         addSubview(zoomTargetView)
 
+        loadingLabel.font = Theme.headingFont(24)
+        loadingLabel.textColor = Theme.textPrimary
+        loadingLabel.alignment = .center
+        statusDetail.font = Theme.labelFont
+        statusDetail.textColor = Theme.textSecondary
+        statusDetail.alignment = .center
+        statusStack.orientation = .vertical
+        statusStack.alignment = .centerX
+        statusStack.spacing = 12
+        statusStack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        statusStack.wantsLayer = true
+        statusStack.layer?.backgroundColor = Theme.bgPanel.cgColor
+        statusStack.layer?.borderColor = Theme.stroke.cgColor
+        statusStack.layer?.borderWidth = 1
+        statusStack.translatesAutoresizingMaskIntoConstraints = false
+        for item in [loadingLabel, statusDetail, statusAction] { statusStack.addArrangedSubview(item) }
+        statusAction.isHidden = true
+        addSubview(statusStack)
+        NSLayoutConstraint.activate([
+            statusStack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            statusStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            statusStack.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -48),
+            statusStack.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
+            loadingLabel.widthAnchor.constraint(lessThanOrEqualTo: statusStack.widthAnchor, constant: -40),
+            statusDetail.widthAnchor.constraint(lessThanOrEqualTo: statusStack.widthAnchor, constant: -40),
+        ])
         rebuildComposition()
         observeProject()
         observeSelection()
         observePlayhead()
+        observePlayback()
     }
 
     @available(*, unavailable)
@@ -242,7 +286,8 @@ final class PreviewView: MTKView {
         guard !isSeeking, let player, let item = player.currentItem else { return }  // mid-seek time is stale
         let t = player.currentTime().seconds
         playClickSoundIfCrossed(outputTime: t)
-        model.playhead = t
+        model.advancePlayback(to: t)
+        if !model.isPlaying { pause(); return }
         if item.duration.isValid, t >= item.duration.seconds - 1.0 / 60 {
             pause()
             return
@@ -271,6 +316,8 @@ final class PreviewView: MTKView {
     override func keyDown(with event: NSEvent) {
         let shift = event.modifierFlags.contains(.shift)
         switch event.keyCode {
+        case 53:
+            if cameraDragActive { cancelOperation(nil) } else { super.keyDown(with: event) }
         case 49: togglePlayPause()                              // Space
         case 123: stepFrame(shift ? -1.0 : -1.0 / 60)            // ←
         case 124: stepFrame(shift ? 1.0 : 1.0 / 60)              // →
@@ -294,7 +341,8 @@ final class PreviewView: MTKView {
                 self.updateZoomTargetOverlay()
                 let clips = self.model.project.clips
                 let audio = self.model.project.audio
-                if clips != self.lastClips {
+                if clips != self.lastClips || self.model.project.cameraClips != self.lastCameraClips {
+                    self.lastCameraClips = self.model.project.cameraClips
                     self.lastClips = clips
                     self.lastAudio = audio
                     self.rebuildComposition()
@@ -317,10 +365,13 @@ final class PreviewView: MTKView {
     private func observeSelection() {
         withObservationTracking {
             _ = model.selection
+            _ = model.inspectorShowsProject
+            _ = model.previewShowsResult
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.updateZoomTargetOverlay()
+                self.needsDisplay = true
                 self.observeSelection()
             }
         }
@@ -328,6 +379,23 @@ final class PreviewView: MTKView {
 
     // Timeline clicks/scrubs (and anything else) only write `model.playhead`; while paused the
     // player follows it here, so every writer gets the seek without calling `seek(toOutput:)`.
+    private func observePlayback() {
+        withObservationTracking {
+            _ = model.isPlaying
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.window != nil {
+                    if self.model.isPlaying {
+                        // Keep an existing J/K/L playback rate; start only when currently paused.
+                        if self.model.previewPlaybackEnd != nil || self.player?.rate == 0 { self.setRate(1) }
+                    } else { self.pause() }
+                }
+                self.observePlayback()
+            }
+        }
+    }
+
     private func observePlayhead() {
         withObservationTracking {
             _ = model.playhead
@@ -340,8 +408,47 @@ final class PreviewView: MTKView {
         }
     }
 
+    @objc private func recoverPreview() {
+        if model.project.clips.isEmpty { model.undo() }
+        else { rebuildComposition() }
+    }
+
+    private func showPreviewStatus(_ title: String, detail: String, action: String? = nil) {
+        loadingLabel.stringValue = title
+        statusDetail.stringValue = detail
+        statusAction.title = action ?? ""
+        statusAction.isHidden = action == nil
+        statusStack.isHidden = false
+    }
+
+    private func clearPreviewMedia() {
+        pause()
+        statusObservation = nil
+        player = nil
+        cameraPlayer = nil
+        screenOutput = nil
+        cameraOutput = nil
+        lastScreenPixelBuffer = nil
+        lastCameraPixelBuffer = nil
+        needsDisplay = true
+    }
+
+    private func showUnavailablePreview() {
+        clearPreviewMedia()
+        showPreviewStatus("Preview unavailable", detail: "Check the recording’s media files, then retry.", action: "Retry preview")
+    }
+
     private func rebuildComposition() {
+        compositionRevision += 1
+        let revision = compositionRevision
         let project = model.project
+        if project.clips.isEmpty {
+            clearPreviewMedia()
+            showPreviewStatus("No video clips", detail: "The recording has no video intervals in this edit.",
+                              action: model.undoName.map { "Undo " + $0 })
+            return
+        }
+        showPreviewStatus("Loading preview…", detail: "Preparing the current edit.")
         let packageURL = model.packageURL
         let resumeSeconds = player?.currentTime().seconds ?? model.playhead
         Task { [weak self] in
@@ -349,13 +456,16 @@ final class PreviewView: MTKView {
             do {
                 let (composition, audioMix, micTrack, systemTrack) = try await makeComposition(package: packageURL, project: project)
                 await MainActor.run {
+                    guard self.compositionRevision == revision else { return }
                     self.liveMicTrack = micTrack
                     self.liveSystemTrack = systemTrack
                     self.attach(composition: composition, audioMix: audioMix, resumeSeconds: resumeSeconds)
                 }
             } catch {
-                // ponytail: a package whose screen.mov is missing/too short just shows an empty
-                // preview; recording/onboarding never hands the editor a project without one.
+                await MainActor.run {
+                    guard self.compositionRevision == revision else { return }
+                    self.showUnavailablePreview()
+                }
             }
         }
     }
@@ -390,8 +500,11 @@ final class PreviewView: MTKView {
         // skipped entirely (T-306 fix: "paused at open" showed no screen quad). Only a *completed*
         // zero-tolerance seek guarantees the output has a frame ready to redraw with.
         statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
-            guard item.status == .readyToPlay else { return }
-            DispatchQueue.main.async { self?.seekToShowCurrentFrame(resumeSeconds: resumeSeconds) }
+            DispatchQueue.main.async {
+                guard let self, self.player?.currentItem === item else { return }
+                if item.status == .readyToPlay { self.seekToShowCurrentFrame(resumeSeconds: resumeSeconds) }
+                if item.status == .failed { self.showUnavailablePreview() }
+            }
         }
 
         if let player {
@@ -443,10 +556,12 @@ final class PreviewView: MTKView {
 
     // MARK: - Draw (SPEC §6.2 "Preview")
 
-    override func draw(_ dirtyRect: NSRect) {
+    override func draw(_ dirtyRect: NSRect) { _ = drawFrame() }
+
+    private func drawFrame(capture: ((MTLTexture, MTLCommandBuffer) -> Void)? = nil) -> Bool {
         guard drawableSize.width > 0, drawableSize.height > 0,
               let drawable = currentDrawable,
-              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+              let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
 
         let project = model.project
         let unit = compositor.outputSize(for: project, longEdge: 1000)   // aspect only
@@ -455,6 +570,7 @@ final class PreviewView: MTKView {
 
         let pixelBuffer = currentScreenPixelBuffer()
         if pixelBuffer != nil {
+            statusStack.isHidden = true
             pendingFrameRetries = 0
         } else if !model.isPlaying {
             // `copyPixelBuffer(forItemTime:)` can still be nil for a beat right after a seek
@@ -480,10 +596,55 @@ final class PreviewView: MTKView {
             state.view = .identity
             state.prevView = .identity
         }
+        // Region editing must reveal the pixels being covered so its edges can be aligned.
+        if isMaskSelected(), let id = model.selection.first {
+            state.project.masks.removeAll { $0.id == id.uuidString }
+        }
 
         compositor.render(state, to: drawable.texture, commandBuffer: commandBuffer, viewport: viewportRect)
+        capture?(drawable.texture, commandBuffer)
         commandBuffer.present(drawable)
         commandBuffer.commit()
+        return true
+    }
+
+    /// Copies the actual rendered drawable for gallery verification. Callers opt into readable
+    /// drawables before presentation; ordinary editor playback keeps framebufferOnly enabled.
+    func captureRenderedFrame() async throws -> CGImage {
+        enum Failure: Error { case unavailable, copy, render, image }
+        guard !framebufferOnly else { throw Failure.unavailable }
+        return try await withCheckedThrowingContinuation { continuation in
+            let rendered = drawFrame { texture, buffer in
+                let width = texture.width, height = texture.height
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                    width: width, height: height, mipmapped: false)
+                descriptor.storageMode = .shared
+                guard let copy = texture.device.makeTexture(descriptor: descriptor),
+                      let blit = buffer.makeBlitCommandEncoder() else {
+                    continuation.resume(throwing: Failure.copy); return
+                }
+                blit.copy(from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
+                          sourceSize: MTLSize(width: width, height: height, depth: 1), to: copy,
+                          destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin())
+                blit.endEncoding()
+                buffer.addCompletedHandler { completed in
+                    guard completed.status == .completed else {
+                        continuation.resume(throwing: Failure.render); return
+                    }
+                    var bytes = [UInt8](repeating: 0, count: width * height * 4)
+                    copy.getBytes(&bytes, bytesPerRow: width * 4,
+                                  from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+                    guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+                          let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                              bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                              provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+                    else { continuation.resume(throwing: Failure.image); return }
+                    continuation.resume(returning: image)
+                }
+            }
+            if !rendered { continuation.resume(throwing: Failure.unavailable) }
+        }
     }
 
     private func scheduleFrameRetryIfNeeded() {
@@ -519,7 +680,7 @@ final class PreviewView: MTKView {
     /// The selected zoom, if it's the only selected block and its mode is `.manual` — the one state
     /// that shows the target overlay (SPEC §6.6: "with a manual zoom selected…").
     private func selectedManualZoom() -> Zoom? {
-        guard model.selection.count == 1, let id = model.selection.first else { return nil }
+        guard !model.inspectorShowsProject, !model.previewShowsResult, model.selection.count == 1, let id = model.selection.first else { return nil }
         guard let zoom = model.project.zooms.first(where: { $0.id == id.uuidString }) else { return nil }
         return zoom.mode == .manual ? zoom : nil
     }
@@ -528,7 +689,7 @@ final class PreviewView: MTKView {
     /// (`MaskRectOverlay.selectedMaskID`) — kept here too since `draw()`'s un-zoomed override needs
     /// it and `MaskRectOverlay` doesn't touch `PreviewView`'s drawing at all.
     private func isMaskSelected() -> Bool {
-        guard model.selection.count == 1, let id = model.selection.first else { return false }
+        guard !model.inspectorShowsProject, !model.previewShowsResult, model.selection.count == 1, let id = model.selection.first else { return false }
         return model.project.masks.contains(where: { $0.id == id.uuidString })
     }
 
@@ -590,10 +751,11 @@ final class PreviewView: MTKView {
     private func cameraBubbleRectInBounds() -> CGRect {
         let viewport = viewportRectInBounds()
         let time = model.timeMap.sourceTime(atOutput: model.playhead)
+        guard model.project.cameraClips.contains(where: { time >= $0.start && time < $0.end }) else { return .zero }
         let mix = layoutMix(layouts: model.project.layouts, atSource: time)
         if mix.kind == .hidden && mix.amount >= 0.99 { return .zero }
         let local = cameraOverlayRect(project: model.project, output: viewport.size, atSource: time,
-                                      viewScale: model.cameraPath.sample(atSource: time).scale)
+                                      viewScale: selectedManualZoom() != nil || isMaskSelected() ? 1 : model.cameraPath.sample(atSource: time).scale)
         return CGRect(x: viewport.minX + local.minX, y: viewport.minY + viewport.height - local.maxY,
                       width: local.width, height: local.height)
     }
@@ -602,17 +764,28 @@ final class PreviewView: MTKView {
     // would bypass everything below) — `self` stays the one dispatch point, same as the camera
     // bubble, which has no subview of its own at all.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(convert(point, from: superview)) ? self : nil
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        if !statusStack.isHidden, let hit = statusStack.hitTest(local) { return hit }
+        return self
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        guard cameraDragActive else { super.cancelOperation(sender); return }
+        if cameraDidDrag { model.cancelGesture() }
+        cameraDragActive = false
+        cameraDidDrag = false
     }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if model.project.source.hasCamera, cameraBubbleRectInBounds().contains(p) {
+            pause()
             cameraDragActive = true
             cameraDidDrag = false
             cameraDragStart = p
             let time = model.timeMap.sourceTime(atOutput: model.playhead)
-            let block = model.project.layouts.first { time >= $0.start && time <= $0.end }
+            let block = model.project.layouts.first { $0.kind != .settings && time >= $0.start && time < $0.end }
             cameraDragLayoutID = block?.kind == .bubble ? block?.id : nil
             let camera = block?.kind == .bubble ? (block?.camera ?? model.project.camera) : model.project.camera
             cameraDragPosition = camera.position ?? NormPoint(
@@ -643,14 +816,14 @@ final class PreviewView: MTKView {
         if !cameraDragActive, let maskOverlayView, !maskOverlayView.isHidden { maskOverlayView.mouseDragged(with: event); return }
         guard cameraDragActive else { super.mouseDragged(with: event); return }
         let time = model.timeMap.sourceTime(atOutput: model.playhead)
-        if model.project.layouts.contains(where: { $0.kind != .bubble && time >= $0.start && time <= $0.end }) { return }
+        if model.project.layouts.contains(where: { $0.kind != .bubble && $0.kind != .settings && time >= $0.start && time < $0.end }) { return }
         let p = convert(event.locationInWindow, from: nil)
         if !cameraDidDrag { model.beginGesture(); cameraDidDrag = true }
         let viewport = viewportRectInBounds()
         let block = model.project.layouts.first { $0.id == cameraDragLayoutID }
         let camera = block?.camera ?? model.project.camera
         let rect = cameraOverlayRect(camera: camera, output: viewport.size,
-                                     viewScale: model.cameraPath.sample(atSource: time).scale)
+                                     viewScale: selectedManualZoom() != nil || isMaskSelected() ? 1 : model.cameraPath.sample(atSource: time).scale)
         let margin = min(0.02 * min(viewport.width, viewport.height),
                          max(0, (min(viewport.width, viewport.height) - max(rect.width, rect.height)) / 2))
         let position = NormPoint(
@@ -742,31 +915,40 @@ struct TransportBar: View {
     let preview: PreviewView
 
     var body: some View {
-        HStack(spacing: 20) {
-            transportButton("backward.end.fill") { preview.seek(toOutput: 0) }
-            transportButton("backward.frame.fill") { preview.stepFrame(-1.0 / 60) }
-            transportButton(model.isPlaying ? "pause.fill" : "play.fill") { preview.togglePlayPause() }
-            transportButton("forward.frame.fill") { preview.stepFrame(1.0 / 60) }
-            transportButton("forward.end.fill") { preview.seek(toOutput: model.timeMap.outputDuration) }
-            Text("\(Self.timecode(model.playhead)) / \(Self.timecode(model.timeMap.outputDuration))")
-                .font(Font(Theme.timecodeFont(13)))
-                .foregroundStyle(Theme.textPrimaryColor)
+        HStack(spacing: 0) {
+            HStack(spacing: 2) {
+                transportButton("backward.end.fill", label: "Go to beginning") { preview.seek(toOutput: 0) }
+                transportButton("backward.frame.fill", label: "Previous frame") { preview.stepFrame(-1.0 / 60) }
+                transportButton(model.isPlaying ? "pause.fill" : "play.fill", label: model.isPlaying ? "Pause" : "Play", primary: true) { preview.togglePlayPause() }
+                transportButton("forward.frame.fill", label: "Next frame") { preview.stepFrame(1.0 / 60) }
+                transportButton("forward.end.fill", label: "Go to end") { preview.seek(toOutput: model.timeMap.outputDuration) }
+            }
+            Spacer(minLength: 16)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(Self.timecode(model.playhead)).font(Font(Theme.timecodeFont(16)))
+                    .foregroundStyle(Theme.textPrimaryColor)
+                Text("/  " + Self.timecode(model.timeMap.outputDuration))
+                    .font(Font(Theme.timecodeFont(11))).foregroundStyle(Theme.textSecondaryColor)
+            }.fixedSize()
         }
-        .padding(.vertical, 10)
+        .padding(.horizontal, 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.bgPanelColor)
+        .overlay(alignment: .top) { Theme.strokeColor.frame(height: 1) }
     }
 
-    private func transportButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+    private func transportButton(_ symbol: String, label: String, primary: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 15)).foregroundStyle(Theme.textPrimaryColor)
+            Image(systemName: symbol).font(.system(size: 12))
+                .frame(width: primary ? 28 : 16, height: 28)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TechButtonStyle(kind: primary ? .primary : .quiet, compact: true))
+        .help(label)
+        .accessibilityLabel(label)
     }
 
     static func timecode(_ t: Double) -> String {
-        let clamped = max(0, t)
-        let minutes = Int(clamped) / 60
-        let seconds = Int(clamped) % 60
-        let hundredths = Int(((clamped - clamped.rounded(.down)) * 100).rounded())
-        return String(format: "%02d:%02d.%02d", minutes, seconds, hundredths)
+        let centiseconds = Int((max(0, t) * 100).rounded())
+        return String(format: "%02d:%02d.%02d", centiseconds / 6000, (centiseconds / 100) % 60, centiseconds % 100)
     }
 }

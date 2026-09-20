@@ -8,7 +8,9 @@ import Foundation
 /// once `startWriting` attaches a `CaptureSession` clock — every buffer is retimed onto that session's
 /// shared `t0`/`pausedSoFar`/`isPaused` (SPEC §4.8) so `camera.mov` stays in sync with `screen.mov`
 /// (AC-CAM-2). Buffers before `t0`, or captured while paused, are dropped.
-final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+// Capture state is serialized on `queue`; the unchecked conformance expresses that queue ownership
+// across the async handoffs to Swift's sendability checker.
+final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     private let session = AVCaptureSession()
     let deviceID: String
     private let dataOutput = AVCaptureVideoDataOutput()
@@ -25,8 +27,10 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var clock: CaptureSession?
     private var packageURL: URL?
     private var writer: TrackWriter?
-    private(set) var hasRecording = false
-    private(set) var error: Error?
+    private var hasRecordingStorage = false
+    private var errorStorage: Error?
+    var hasRecording: Bool { queue.sync { hasRecordingStorage } }
+    var error: Error? { queue.sync { errorStorage } }
 
     /// Resolves camera TCC before opening the device: camera access is its own authorization (separate
     /// from `Permissions.swift`'s screen-recording/accessibility pair, gated per SPEC §4.1 before the
@@ -88,8 +92,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         queue.sync {
             writer?.cancel()
             writer = nil
-            hasRecording = false
-            error = nil
+            hasRecordingStorage = false
+            errorStorage = nil
             self.packageURL = packageURL
             self.clock = clock
         }
@@ -113,8 +117,10 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             }
         }
         if cancelled { writer?.cancel() } else { await writer?.finish() }
-        hasRecording = !cancelled && writer?.hasSamples == true
-        error = error ?? writer?.error
+        queue.sync {
+            hasRecordingStorage = !cancelled && writer?.hasSamples == true
+            errorStorage = errorStorage ?? writer?.error
+        }
     }
 
     // ponytail: reads `clock.t0`/`isPaused`/`pausedSoFar` from this session's own queue, not
@@ -132,11 +138,11 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 AVVideoWidthKey: CVPixelBufferGetWidth(imageBuffer),
                 AVVideoHeightKey: CVPixelBufferGetHeight(imageBuffer),
             ]
-            guard error == nil else { return }
+            guard errorStorage == nil else { return }
             do {
                 writer = try TrackWriter(url: packageURL.appendingPathComponent("camera.mov"), videoSettings: videoSettings)
             } catch {
-                self.error = error
+                self.errorStorage = error
                 return
             }
         }

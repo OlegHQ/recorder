@@ -76,6 +76,7 @@ private struct LCG: RandomNumberGenerator {
     var rng = LCG(state: 1)
     var p = Project(source: Source(duration: 60), clips: [Clip(sourceStart: 0, sourceEnd: 60, speed: 1)])
 
+    p.linkVideoEdits = true
     for _ in 0..<1000 {
         switch Int.random(in: 0..<6, using: &rng) {
         case 0:
@@ -157,6 +158,7 @@ private struct LCG: RandomNumberGenerator {
         Clip(sourceStart: 0, sourceEnd: 12, speed: 1),
         Clip(sourceStart: 12, sourceEnd: 20, speed: 1),
     ])
+    p.linkVideoEdits = true
     p.speedUpTyping([TimeRange(start: 5, end: 9), TimeRange(start: 12, end: 16), TimeRange(start: 18, end: 25)])
 
     #expect(p.checkInvariants() == nil)

@@ -125,13 +125,94 @@ enum SelfTest {
                 let command = queue.makeCommandBuffer()!
                 compositor.render(state, to: target, commandBuffer: command)
                 command.commit()
-                command.waitUntilCompleted()
+                await command.completed()
                 target.getBytes(&pixels, bytesPerRow: 512, from: MTLRegionMake2D(0, 0, 128, 128), mipmapLevel: 0)
                 samples.append(pixels[(64 * 128 + 60) * 4])
             }
             guard samples[0] < 5, samples[1] > 30, samples[1] < 220 else {
                 throw Fail(description: "blur did not soften edge: \(samples)")
             }
+        },
+        "capture-panel-png": { @MainActor args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: capture-panel-png <out.png>") }
+            let hosting = NSHostingView(rootView: ToolbarView(
+                onClose: {}, onSelectMode: { _ in }, onCamera: {}, onMicrophone: {},
+                onSystemAudio: {}, onSettings: {}))
+            let panel = FloatingPanel(content: hosting, draggable: true, bordered: false)
+            defer { panel.orderOut(nil) }
+            panel.appearance = NSAppearance(named: .darkAqua)
+            guard let view = panel.contentView else { throw Fail(description: "no panel content") }
+            view.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(300))
+            view.layoutSubtreeIfNeeded()
+            guard abs(view.bounds.width - 560) < 1, (150...200).contains(view.bounds.height),
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw Fail(description: "unexpected capture panel geometry: \(view.bounds)")
+            }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            guard let data = rep.representation(using: .png, properties: [:]) else {
+                throw Fail(description: "could not render capture panel")
+            }
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            print("wrote \(path), panel \(view.bounds.size)")
+        },
+        "ui-kit-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: ui-kit-png <out.png>") }
+            try await UIKitGallery.renderPNG(to: URL(fileURLWithPath: path))
+            print("wrote \(path)")
+        },
+        "settings-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: settings-png <out.png>") }
+            try await MainActor.run {
+                let size = NSSize(width: 520, height: 640)
+                let hosting = NSHostingView(rootView: SettingsView().frame(width: size.width, height: size.height))
+                hosting.frame = NSRect(origin: .zero, size: size)
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else {
+                    throw Fail(description: "png encode failed")
+                }
+                try png.write(to: URL(fileURLWithPath: path))
+                print("wrote \(path)")
+            }
+        },
+        "onboarding-png": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: onboarding-png <out.png>") }
+            try await MainActor.run {
+                let size = NSSize(width: 660, height: 470)
+                let hosting = NSHostingView(rootView: OnboardingView(onContinue: {}))
+                hosting.frame = NSRect(origin: .zero, size: size)
+                hosting.appearance = NSAppearance(named: .darkAqua)
+                let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                    throw Fail(description: "no bitmap rep")
+                }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else {
+                    throw Fail(description: "png encode failed")
+                }
+                try png.write(to: URL(fileURLWithPath: path))
+                print("wrote \(path)")
+            }
+        },
+        "ui-motion": { _ in
+            precondition(TimelineInteractionPrototype.snapped(-3, upper: 20) == 0)
+            precondition(TimelineInteractionPrototype.snapped(40, upper: 20) == 20)
+            precondition(TimelineInteractionPrototype.snapped(4.24, upper: 20) == 4)
+            precondition(TimelineInteractionPrototype.snapped(4.26, upper: 20) == 4.5)
+            precondition(TimelineInteractionPrototype.snapped(9, upper: 8.2) == 8.2)
         },
         "metal": { _ in
             let device = MTLCreateSystemDefaultDevice()!
@@ -228,6 +309,7 @@ enum SelfTest {
         "parity": { args in try await ExporterSelfTest.runParitySelfTest(args) },
         "export-gif": { args in try await ExporterSelfTest.runExportGIFSelfTest(args) },
         "export-perf": { args in try await PerfSelfTest.runExportPerf(args) },
+        "export-native": { _ in try await ExportSheetSelfTest.checkNativeHandoff() },
         "export-sheet": { args in try await ExportSheetSelfTest.run(args) },
         "export-sheet-png": { args in try await ExportSheetSelfTest.runPNG(args) },
         "camera-drag": { args in
@@ -236,10 +318,12 @@ enum SelfTest {
             // (`SelectionRectView`'s drag tests) — `PreviewView` isn't in a real window here, so
             // `convert(_:from:)` treats the event location as already being in view-local coords.
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard let packagePath = args.first else { throw Fail(description: "usage: camera-drag <package>") }
-            let packageURL = URL(fileURLWithPath: packagePath)
+            let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-camera-drag-" + UUID().uuidString)
             try await MainActor.run {
-                let model = try loadEditorModel(package: packageURL)
+                let model: EditorModel
+                if let packagePath = args.first { model = try loadEditorModel(package: URL(fileURLWithPath: packagePath)) }
+                else { model = EditorWorkspaceGallery.makeModel(at: scratch) }
+                defer { model.saveNow(); try? FileManager.default.removeItem(at: scratch) }
                 guard model.project.source.hasCamera else { throw Fail(description: "fixture must have source.hasCamera = true") }
 
                 let view = PreviewView(model: model)
@@ -279,6 +363,32 @@ enum SelfTest {
                 }
                 model.undo()
                 guard model.project.camera.position == nil else { throw Fail(description: "camera drag undo failed") }
+                let beforeCancel = model.project
+                let beforeCancelUndo = model.undoStepCount
+                view.mouseDown(with: synthEvent(.leftMouseDown, from))
+                view.mouseDragged(with: synthEvent(.leftMouseDragged, to))
+                let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: 0, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                    isARepeat: false, keyCode: 53)!
+                view.keyDown(with: escape)
+                view.mouseUp(with: synthEvent(.leftMouseUp, to))
+                guard model.project == beforeCancel, model.undoStepCount == beforeCancelUndo else {
+                    throw Fail(description: "cancelled camera drag changed project/history")
+                }
+                model.edit("Zoom hit area fixture") { $0.zooms = [Zoom(start: 0, end: 10, scale: 2, mode: .manual)] }
+                model.playhead = 5
+                model.selection = [UUID(uuidString: model.project.zooms[0].id)!]
+                model.inspectorShowsProject = false
+                model.previewShowsResult = false
+                model.cameraInspectorRequested = false
+                let bubble = cameraOverlayRect(project: model.project, output: view.bounds.size, atSource: 5, viewScale: 1)
+                let edge = CGPoint(x: bubble.minX + 2, y: view.bounds.height - bubble.midY)
+                view.mouseDown(with: synthEvent(.leftMouseDown, edge))
+                view.mouseUp(with: synthEvent(.leftMouseUp, edge))
+                guard model.cameraInspectorRequested, model.selection.isEmpty else {
+                    throw Fail(description: "unzoomed camera edge did not select camera controls")
+                }
+                model.undo()
                 let layout = Layout(start: 0, end: 10, kind: .bubble, camera: Camera())
                 model.edit("Camera block fixture") { $0.layouts = [layout] }
                 model.playhead = 5
@@ -300,6 +410,17 @@ enum SelfTest {
         },
         "library": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
+            guard LibraryView.movedIndex(current: 1, count: 8, forward: true, step: 3) == 4,
+                  LibraryView.movedIndex(current: 4, count: 8, forward: false, step: 3) == 1,
+                  LibraryView.movedIndex(current: 6, count: 8, forward: true, step: 3) == 7,
+                  LibraryView.movedIndex(current: nil, count: 3, forward: true) == 0,
+                  LibraryView.movedIndex(current: nil, count: 3, forward: false) == 2,
+                  LibraryView.movedIndex(current: 0, count: 3, forward: false) == 0,
+                  LibraryView.movedIndex(current: 2, count: 3, forward: true) == 2,
+                  LibraryView.movedIndex(current: 1, count: 3, forward: true) == 2,
+                  LibraryView.movedIndex(current: nil, count: 0, forward: true) == nil else {
+                throw Fail(description: "keyboard selection bounds")
+            }
             func waitUntil(timeout: Double = 3, _ predicate: () -> Bool) async throws {
                 let deadline = Date().addingTimeInterval(timeout)
                 while !predicate() {
@@ -389,7 +510,7 @@ enum SelfTest {
             let store = ProjectStore(folder: tmp)
             let deadline = Date().addingTimeInterval(5)
             while store.items.count < 200 && Date() < deadline {
-                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+                try await Task.sleep(for: .milliseconds(5))
             }
             let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
             print("SELFTEST library-perf reload=\(elapsedMs) ms for \(store.items.count) items")
@@ -400,7 +521,7 @@ enum SelfTest {
         // §5.1 mockup (`Read` tool). Not a correctness test — kept as a standing look-check.
         "library-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard args.count >= 2 else { throw Fail(description: "usage: library-png <folder> <out.png>") }
+            guard args.count >= 2 else { throw Fail(description: "usage: library-png <folder> <out.png> [width height]") }
             let fm = FileManager.default
             let folder = URL(fileURLWithPath: args[0])
             let outURL = URL(fileURLWithPath: args[1])
@@ -414,49 +535,59 @@ enum SelfTest {
                 try fm.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
                 return url
             }
-            let now = Date()
-            _ = try makePackage("Onboarding", duration: 93, modified: now)
-            _ = try makePackage("Bug repro", duration: 12, modified: now.addingTimeInterval(-86_400))
-            let demoURL = try makePackage("Demo v2", duration: 724, modified: now.addingTimeInterval(-6 * 86_400))
+            let existing = args.contains("--existing")
+            if !existing {
+                let now = Date()
+                _ = try makePackage("Onboarding", duration: 93, modified: now)
+                _ = try makePackage("Bug repro", duration: 12, modified: now.addingTimeInterval(-86_400))
+                let demoURL = try makePackage("Demo v2", duration: 724, modified: now.addingTimeInterval(-6 * 86_400))
 
-            let thumb = NSImage(size: NSSize(width: 640, height: 400))
-            thumb.lockFocus()
-            NSColor(hex: "#5B3DF5").setFill()
-            NSRect(x: 0, y: 0, width: 640, height: 400).fill()
-            thumb.unlockFocus()
-            guard let tiff = thumb.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
-                  let thumbJPEG = rep.representation(using: .jpeg, properties: [:]) else {
-                throw Fail(description: "couldn't synthesize thumbnail")
+                let thumb = NSImage(size: NSSize(width: 640, height: 400))
+                thumb.lockFocus()
+                NSColor(hex: "#5B3DF5").setFill()
+                NSRect(x: 0, y: 0, width: 640, height: 400).fill()
+                thumb.unlockFocus()
+                guard let tiff = thumb.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                      let thumbJPEG = rep.representation(using: .jpeg, properties: [:]) else {
+                    throw Fail(description: "couldn't synthesize thumbnail")
+                }
+                try thumbJPEG.write(to: demoURL.appendingPathComponent("thumbnail.jpg"))
+                // Writing into the package bumps its directory mtime again — restore it (order is by mtime).
+                try fm.setAttributes([.modificationDate: now.addingTimeInterval(-6 * 86_400)], ofItemAtPath: demoURL.path)
+
             }
-            try thumbJPEG.write(to: demoURL.appendingPathComponent("thumbnail.jpg"))
-            // Writing into the package bumps its directory mtime again — restore it (order is by mtime).
-            try fm.setAttributes([.modificationDate: now.addingTimeInterval(-6 * 86_400)], ofItemAtPath: demoURL.path)
 
             let store = ProjectStore(folder: folder)
             let deadline = Date().addingTimeInterval(3)
-            while store.items.count < 3 && Date() < deadline {
-                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            while (existing ? store.items.isEmpty : store.items.count < 3) && Date() < deadline {
+                try await Task.sleep(for: .milliseconds(20))
             }
-            guard store.items.count == 3 else { throw Fail(description: "fixture scan incomplete: \(store.items.map(\.title))") }
+            guard existing || store.items.count == 3 else { throw Fail(description: "fixture scan incomplete: \(store.items.map(\.title))") }
 
             try await MainActor.run {
                 // `ImageRenderer` leaves `LazyVGrid` content inside `ScrollView` empty (its lazy
                 // instantiation needs a real `NSScrollView` viewport). Host in an actual (offscreen,
                 // never ordered front) window instead so layout happens exactly as on screen.
-                let size = NSSize(width: 900, height: 600)
+                let size = NSSize(width: args[safe: 2].flatMap(Double.init) ?? 900,
+                                  height: args[safe: 3].flatMap(Double.init) ?? 600)
                 let hostingView = NSHostingView(rootView: LibraryView(store: store).frame(width: size.width, height: size.height))
                 hostingView.frame = NSRect(origin: .zero, size: size)
-                let window = NSWindow(contentRect: hostingView.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                let window = NSWindow(contentRect: hostingView.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
                 window.contentView = hostingView
+                Library.configure(window)
+                guard hostingView.focusRingType == .none else {
+                    throw Fail(description: "library hosting view must not draw a window-sized focus ring")
+                }
                 window.layoutIfNeeded()
                 hostingView.layoutSubtreeIfNeeded()
                 for _ in 0..<5 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
                 hostingView.layoutSubtreeIfNeeded()
 
-                guard let rep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
+                let capture = hostingView.superview ?? hostingView
+                guard let rep = capture.bitmapImageRepForCachingDisplay(in: capture.bounds) else {
                     throw Fail(description: "no bitmap rep")
                 }
-                hostingView.cacheDisplay(in: hostingView.bounds, to: rep)
+                capture.cacheDisplay(in: capture.bounds, to: rep)
                 guard let png = rep.representation(using: .png, properties: [:]) else { throw Fail(description: "png encode failed") }
                 try png.write(to: outURL)
             }
@@ -525,6 +656,18 @@ enum SelfTest {
                 throw Fail(description: "round trip mismatch: \(roundTripped) vs \(originalNorm)")
             }
 
+            var shifted = Clip(sourceStart: 10, sourceEnd: 20, speed: 2)
+            shifted.clockSpeed = 1
+            shifted.mediaStart = 30
+            var timing = Project(title: "Crop timing", clips: [shifted])
+            guard CropSheet.frameTime(project: timing, outputTime: 3) == 36 else {
+                throw Fail(description: "crop did not follow unlinked media time")
+            }
+            timing.clips[0].isGap = true
+            guard CropSheet.frameTime(project: timing, outputTime: 3) == nil else {
+                throw Fail(description: "crop invented source footage inside a gap")
+            }
+
             // (b) confirm = one undo step via a real EditorModel; discard = no mutation.
             let fm = FileManager.default
             let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-crop-\(UUID().uuidString)")
@@ -543,7 +686,17 @@ enum SelfTest {
 
             // Discard: nothing calls `model.edit`, so the project is simply whatever it already was.
             let beforeDiscard = await model.project
-            // (no-op — discard's entire contract is "don't call confirm")
+            try await MainActor.run {
+                var confirmed = false
+                let window = CropSheetWindow(initialCrop: newCrop, sourceSize: CGSize(width: 1920, height: 1080),
+                                             image: nil, onConfirm: { _ in confirmed = true })
+                window.makeKeyAndOrderFront(nil)
+                let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                    isARepeat: false, keyCode: 53)!
+                window.sendEvent(escape)
+                guard !confirmed, !window.isVisible else { throw Fail(description: "Escape did not discard the crop sheet") }
+            }
             guard await model.project == beforeDiscard else { throw Fail(description: "discard mutated the project") }
         },
         // T-601: `MaskRectOverlay` — visibility follows selection, a drag on its `view` maps
@@ -552,7 +705,7 @@ enum SelfTest {
         // undo step. See "mask-overlay" below for the padding/letterbox-aware mapping itself.
         "mask-rect": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
+            @Sendable func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
                 NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: 0,
                                     context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
             }
@@ -583,6 +736,26 @@ enum SelfTest {
             await MainActor.run { model.selection = [maskID] }
             try await Task.sleep(nanoseconds: 200_000_000)
             guard await !overlay.view.isHidden else { throw Fail(description: "overlay should show once the mask is selected") }
+
+            let beforeKeyboard = await model.undoStepCount
+            try await MainActor.run {
+                guard let rectangle = overlay.view.subviews.first as? SelectionRectView else { throw Fail(description: "missing rectangle") }
+                let right = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .shift,
+                    timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
+                    isARepeat: false, keyCode: 124)!
+                rectangle.keyDown(with: right)
+                guard abs(model.project.masks[0].rect.x - 0.11) < 1e-6,
+                      model.undoStepCount == beforeKeyboard + 1 else { throw Fail(description: "keyboard move did not commit once") }
+                model.undo()
+                model.selection = [maskID]
+            }
+            try await Task.sleep(for: .milliseconds(200))
+            await MainActor.run { model.previewShowsResult = true }
+            try await Task.sleep(for: .milliseconds(200))
+            guard await overlay.view.isHidden else { throw Fail(description: "result mode left mask handles visible") }
+            await MainActor.run { model.previewShowsResult = false }
+            try await Task.sleep(for: .milliseconds(200))
+            guard await !overlay.view.isHidden else { throw Fail(description: "edit mode did not restore mask handles") }
 
             // The initial rect (top-left-origin NormRect(0.1,0.1,0.3,0.3), bottom-left-origin
             // view space) is (100, 600, 300, 300): its interior contains (150, 650).
@@ -626,7 +799,7 @@ enum SelfTest {
             // 16:9 source into a portrait mount (pillarboxed AND letterboxed by the aspect mismatch),
             // default `Frame().padding == 0.08` — unlike "mask-rect", this project's padding is left
             // untouched on purpose.
-            let project = Project(title: "Mask overlay padding", source: Source(pixelWidth: 1920, pixelHeight: 1080, duration: 10))
+            let project = Project(title: "Mask overlay padding", source: Source(kind: .window, pixelWidth: 1920, pixelHeight: 1080, duration: 10))
             let mountSize = CGSize(width: 500, height: 1000)
             let content = ZoomTargetMapping.contentRect(viewBounds: mountSize, project: project)
             guard content.width > 0, content.height > 0, content.width <= mountSize.width, content.height <= mountSize.height else {
@@ -701,7 +874,7 @@ enum SelfTest {
         // T-404: offscreen render of a fixture Project (3 clips incl. one sped-up, 2 zooms, one
         // torn by a cut, a camera layout, playhead mid-way) to PNG, so the static drawing can be
         // eyeballed against SPEC §7.1 without a running editor window (T-307 isn't built yet).
-        "timeline-png": { args in
+        "timeline-png": { @MainActor args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let outPath = args.first else { throw Fail(description: "usage: timeline-png <out.png>") }
 
@@ -718,7 +891,7 @@ enum SelfTest {
                 Zoom(start: 5, end: 9, scale: 2, mode: .auto),          // fully inside clip 0
                 Zoom(start: 30, end: 38, scale: 1.6, mode: .manual),    // torn: 35...38 falls in the cut
             ]
-            project.layouts = [Layout(start: 0, end: 15, kind: .cameraFull)]
+            project.keystrokeClips = [Layout(start: 0, end: 15, kind: .settings, keys: Keys(show: true))]
             project.masks = [Mask(start: 20, end: 26, kind: .highlight, rect: NormRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5), opacity: 0.6)]
 
             let fm = FileManager.default
@@ -729,12 +902,12 @@ enum SelfTest {
             // T-416: a short synthetic mic track so the clip lane actually has a waveform to draw.
             try synthesizeSineM4A(at: tmp.appendingPathComponent("mic.m4a"), duration: 15)
 
-            let model = await EditorModel(packageURL: tmp, project: project, events: EventLog())
-            let outputDuration = await model.timeMap.outputDuration
-            await MainActor.run { model.playhead = outputDuration / 2 }
+            let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+            let outputDuration = model.timeMap.outputDuration
+            model.playhead = outputDuration / 2
 
             let zoom0ID = UUID(uuidString: project.zooms[0].id)!
-            let layout0ID = UUID(uuidString: project.layouts[0].id)!
+            let layout0ID = UUID(uuidString: project.keystrokeClips[0].id)!
             let mask0ID = UUID(uuidString: project.masks[0].id)!
 
             let view = await MainActor.run { () -> TimelineView in
@@ -759,28 +932,110 @@ enum SelfTest {
                     let got = view.hitTest(at: p)
                     if got != wanted { errors.append("\(name): expected \(wanted), got \(got)") }
                 }
-                expect(CGPoint(x: 430, y: 10), .playhead, "playhead")
-                expect(CGPoint(x: 150, y: 40), .clipBody(0), "clipBody")
-                expect(CGPoint(x: 290, y: 40), .clipEdge(0, .trailing), "clipEdge")
-                expect(CGPoint(x: 140, y: 80), .blockBody(zoom0ID), "zoomBody")
-                expect(CGPoint(x: 150, y: 110), .blockBody(layout0ID), "layoutBody")
-                // mask [20, 26) source, inside the 2× clip1 -> output [17.5, 20.5); mid ≈ 366, mask
+                @MainActor func x(_ output: Double) -> CGFloat {
+                    TimelineView.gutter + CGFloat(view.geometry.x(forOutput: output))
+                }
+                expect(CGPoint(x: x(model.playhead), y: 10), .playhead, "playhead")
+                expect(CGPoint(x: x(5), y: 40), .clipBody(0), "clipBody")
+                expect(CGPoint(x: x(15), y: 40), .clipEdge(0, .trailing), "clipEdge")
+                expect(CGPoint(x: x(7), y: view.laneMidY(.zoom)), .blockBody(zoom0ID), "zoomBody")
+                expect(CGPoint(x: x(7.5), y: view.laneMidY(.keys)), .blockBody(layout0ID), "layoutBody")
+                // mask [20, 26) source, inside the 2× clip1 -> output [17.5, 20.5); mask
                 // row is the 4th (ruler 22 + clip 44 + zoom 32 + layout 28 = 98...126, mask 126...154).
-                expect(CGPoint(x: 366, y: 140), .blockBody(mask0ID), "maskBody")
-                expect(CGPoint(x: 200, y: 10), .ruler, "ruler")
-                expect(CGPoint(x: 476, y: 18), .cutBubble(afterClip: 1), "cutBubble")
-                if case .emptyLane(.zoom, _) = view.hitTest(at: CGPoint(x: 700, y: 80)) {} else {
-                    errors.append("emptyLane: got \(view.hitTest(at: CGPoint(x: 700, y: 80)))")
+                expect(CGPoint(x: x(19), y: view.laneMidY(.mask)), .blockBody(mask0ID), "maskBody")
+                expect(CGPoint(x: x(3), y: 10), .ruler, "ruler")
+                expect(CGPoint(x: x(25), y: 18), .cutBubble(afterClip: 1), "cutBubble")
+                if case .emptyLane(.zoom, _) = view.hitTest(at: CGPoint(x: x(40), y: view.laneMidY(.zoom))) {} else {
+                    errors.append("emptyLane: got \(view.hitTest(at: CGPoint(x: x(40), y: view.laneMidY(.zoom))))")
                 }
 
+                let width = args.count > 1 ? Double(args[1]) ?? 900 : 900
+                view.setFrameSize(NSSize(width: width, height: 218))
+                view.fit()
+                model.selection = [zoom0ID]
+                if args.contains("--zoomed") { view.menuZoomToSelection() }
+                if args.contains("--gaps") {
+                    model.edit("Gap fixture") { project in
+                        project.liftClip(1)
+                        project.cameraClips = [CameraClip(start: 0, end: 12), CameraClip(start: 20, end: 50)]
+                    }
+                }
+                if args.contains("--empty-layers") {
+                    model.edit("Clear layers") { $0.zooms = []; $0.keystrokeClips = [] }
+                    view.needsLayout = true
+                }
+                if args.contains("--empty") {
+                    model.update { $0.clips = []; $0.cameraClips = []; $0.keystrokeClips = []; $0.zooms = []; $0.layouts = []; $0.masks = [] }
+                    model.selection = []
+                    model.playhead = 0
+                }
+                let toolbar = TimelineToolbar(frame: .zero)
+                toolbar.timelineView = view
+                let container = TimelineContainerView(toolbar: toolbar, timeline: view)
+                container.frame = CGRect(x: 0, y: 0, width: width, height: args.contains("--tall") ? 420 : 250)
+                container.layoutSubtreeIfNeeded()
                 view.needsDisplay = true
-                guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return (nil, errors) }
-                view.cacheDisplay(in: view.bounds, to: rep)
+                guard let rep = container.bitmapImageRepForCachingDisplay(in: container.bounds) else { return (nil, errors) }
+                container.cacheDisplay(in: container.bounds, to: rep)
                 return (rep.representation(using: .png, properties: [:]), errors)
             }
             guard hitErrors.isEmpty else { throw Fail(description: "hitTest: \(hitErrors.joined(separator: "; "))") }
             guard let png else { throw Fail(description: "no PNG data") }
             try png.write(to: URL(fileURLWithPath: outPath))
+            if args.contains("--motion") {
+                let window = await MainActor.run { () -> NSWindow in
+                    let toolbar = TimelineToolbar(frame: .zero)
+                    toolbar.timelineView = view
+                    let content = TimelineContainerView(toolbar: toolbar, timeline: view)
+                    let window = NSWindow(contentRect: CGRect(x: 100, y: 100, width: 900, height: args.contains("--tall") ? 420 : 250),
+                                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                    window.isReleasedWhenClosed = false
+                    window.appearance = NSAppearance(named: .darkAqua)
+                    window.title = "Timeline interaction verification"
+                    window.contentView = content
+                    window.makeKeyAndOrderFront(nil)
+                    content.layoutSubtreeIfNeeded()
+                    view.fit()
+                    model.selection = []
+                    return window
+                }
+                for step in 0..<7 {
+                    try await Task.sleep(for: .milliseconds(step == 6 ? 400 : 80))
+                    try await MainActor.run {
+                        let point = CGPoint(x: TimelineView.gutter + view.geometry.x(forOutput: step < 3 ? 7 : 10), y: view.laneMidY(.zoom))
+                        let p = view.convert(point, to: nil)
+                        switch step {
+                        case 0: view.mouseMoved(with: synthMouse(.mouseMoved, p))
+                        case 1: view.mouseDown(with: synthMouse(.leftMouseDown, p))
+                        case 3:
+                            view.mouseDragged(with: synthMouse(.leftMouseDragged, p, modifiers: .command))
+                            guard abs(model.project.zooms[0].start - 8) < 0.01 else {
+                                throw Fail(description: "native-window drag did not follow the pointer: start=\(model.project.zooms[0].start), gesture=\(view.debugDragKind ?? "none")")
+                            }
+                        case 4: view.cancelOperation(nil)
+                        case 5:
+                            model.selectedClip = 1
+                            model.selection = []
+                        default: break
+                        }
+                        guard let content = window.contentView,
+                              let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
+                            throw Fail(description: "motion capture failed")
+                        }
+                        view.displayIfNeeded()
+                        content.displayIfNeeded()
+                        content.cacheDisplay(in: content.bounds, to: rep)
+                        let path = URL(fileURLWithPath: outPath).deletingPathExtension().path + "-motion-\(step).png"
+                        try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                    }
+                }
+                try await MainActor.run {
+                    defer { window.orderOut(nil) }
+                    guard model.project == project, !view.debugIsAnimating, view.debugDragKind == nil else {
+                        throw Fail(description: "motion must settle; Escape must restore the project")
+                    }
+                }
+            }
         },
         // T-308: exercises the exact closures `BackgroundTab`'s controls call — `fieldBinding`
         // (drag: beginGesture → update × N → commitGesture) for the Padding slider, and
@@ -842,6 +1097,133 @@ enum SelfTest {
         // `args[1]` picks the variant (T-414): a `Background.Kind` raw value (unchanged default
         // behaviour), or "zoom"/"clip" (selects a fixture block so `ZoomPanel`/`ClipPanel` render
         // in place of the tabs) or "cursor" (opens the Cursor tab).
+        "inspector-scope": { _ in
+            enum Failure: Error { case navigation, followSelection, history }
+            try await MainActor.run {
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-inspector-scope-" + UUID().uuidString)
+                let model = EditorWorkspaceGallery.makeModel(at: url)
+                defer { model.saveNow(); try? FileManager.default.removeItem(at: url) }
+                let original = model.project
+                for step in EditorWorkspaceGallery.workflowStages.indices {
+                    EditorWorkspaceGallery.showWorkflowStep(step, model: model)
+                    if step == 2 || step == 4 {
+                        guard model.selection.count == 1, !model.inspectorShowsProject,
+                              model.playhead > 0 else { throw Failure.navigation }
+                    }
+                    if step == 3 {
+                        guard model.isPlaying, model.previewShowsResult, model.previewPlaybackEnd != nil else { throw Failure.navigation }
+                    }
+                }
+                guard !model.isPlaying, model.project == original, model.undoStepCount == 0,
+                      model.inspectorShowsProject, model.inspectorTab == .background else { throw Failure.history }
+                model.selectedClips = [0, 1]
+                model.showProjectInspector(.camera)
+                guard model.inspectorShowsProject, model.inspectorTab == .camera,
+                      model.selectedClips == [0, 1] else { throw Failure.navigation }
+                model.selectedClips = [2]
+                guard !model.inspectorShowsProject else { throw Failure.followSelection }
+                model.showProjectInspector(.background)
+                model.selection = [UUID(uuidString: model.project.zooms[0].id)!]
+                guard !model.inspectorShowsProject else { throw Failure.followSelection }
+                model.showProjectInspector(.cursor)
+                model.selection = model.selection // an unchanged selection must not steal scope
+                guard model.inspectorShowsProject else { throw Failure.followSelection }
+                guard model.project == original, model.undoStepCount == 0 else { throw Failure.history }
+                model.showProjectInspector(.animations)
+                model.isPlaying = true
+                guard let added = model.addZoom(atSource: 12),
+                      model.selection == [added], model.selectedClips.isEmpty,
+                      !model.inspectorShowsProject, !model.isPlaying,
+                      model.undoStepCount == 1 else { throw Failure.followSelection }
+                guard model.addZoom(atSource: 13) == nil, model.undoStepCount == 1,
+                      model.selection == [added] else { throw Failure.history }
+                model.undo()
+                guard model.project == original else { throw Failure.history }
+                model.selection = [UUID(uuidString: original.zooms[0].id)!]
+                model.replayEffect(start: 4, end: 9)
+                guard model.isPlaying, model.previewShowsResult, abs(model.playhead - 3.4) < 1e-9,
+                      model.previewPlaybackEnd == 10.5 else { throw Failure.navigation }
+                model.advancePlayback(to: 11)
+                guard !model.isPlaying, model.playhead == 10.5, model.previewPlaybackEnd == nil else { throw Failure.navigation }
+                model.replayEffect(start: 4, end: 9)
+                model.selection = []
+                guard !model.isPlaying, model.previewPlaybackEnd == nil else { throw Failure.followSelection }
+                model.selection = [UUID(uuidString: model.project.zooms[0].id)!]
+                model.previewShowsResult = true
+                let selected = model.selection
+                model.selection = selected
+                guard model.previewShowsResult, model.previewTime(start: 4, end: 9) == 6.5,
+                      model.previewTime(start: 40, end: 45) == nil else { throw Failure.navigation }
+                model.selection = []
+                guard !model.previewShowsResult else { throw Failure.followSelection }
+                model.edit("Trim fixture") { $0.clips = [Clip(sourceStart: 10, sourceEnd: 20, speed: 2)] }
+                model.replayEffect(start: 5, end: 15)
+                guard model.playhead == 0, model.previewPlaybackEnd == 4 else { throw Failure.navigation }
+                model.stopEffectPreview()
+                guard model.previewTime(start: 5, end: 15) == 1.25,
+                      model.previewTime(start: 0, end: 10) == nil else { throw Failure.navigation }
+                model.undo()
+                try original.save(to: url.appendingPathComponent("project.json"))
+                guard let window = EditorWindowController.makeOffscreen(package: url),
+                      let controller = window.windowController as? EditorWindowController,
+                      let root = window.contentView else { throw Failure.navigation }
+                defer { window.close() }
+                window.setContentSize(NSSize(width: 1100, height: 700))
+                root.layoutSubtreeIfNeeded()
+                @MainActor func event(_ type: NSEvent.EventType, y: CGFloat) -> NSEvent {
+                    NSEvent.mouseEvent(with: type, location: root.convert(CGPoint(x: 200, y: y), to: nil),
+                        modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                        clickCount: 1, pressure: 1)!
+                }
+                root.mouseDown(with: event(.leftMouseDown, y: 243))
+                root.mouseDragged(with: event(.leftMouseDragged, y: 690))
+                root.mouseUp(with: event(.leftMouseUp, y: 690))
+                root.layoutSubtreeIfNeeded()
+                guard controller.timelineView.frame.height > 240,
+                      controller.previewView.frame.height >= 136,
+                      controller.inspectorView.frame.maxY <= root.bounds.height - 88 else { throw Failure.navigation }
+            }
+        },
+        "placement": { _ in
+            enum Failure: Error { case mapping, undo, cancel }
+            try await MainActor.run {
+                let size = CGSize(width: 288, height: 108)
+                guard PlacementPad.point(at: CGPoint(x: 18, y: 18), in: size) == NormPoint(x: 0, y: 0),
+                      PlacementPad.point(at: CGPoint(x: 144, y: 54), in: size) == NormPoint(x: 0.5, y: 0.5),
+                      PlacementPad.point(at: CGPoint(x: 999, y: -20), in: size) == NormPoint(x: 1, y: 0),
+                      PlacementPad.point(at: CGPoint(x: 3, y: 8), in: .zero) == NormPoint(x: 0.5, y: 0.5)
+                else { throw Failure.mapping }
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-placement-" + UUID().uuidString)
+                let model = EditorWorkspaceGallery.makeModel(at: url)
+                defer { model.saveNow(); try? FileManager.default.removeItem(at: url) }
+                let original = model.project
+                model.beginGesture()
+                for x in stride(from: 18.0, through: 270.0, by: 12) {
+                    model.update { $0.camera.position = PlacementPad.point(at: CGPoint(x: x, y: 54), in: size) }
+                }
+                model.commitGesture("Camera position")
+                guard model.undoStepCount == 1, model.project.camera.position == NormPoint(x: 1, y: 0.5) else { throw Failure.undo }
+                model.undo()
+                guard model.project == original else { throw Failure.undo }
+                model.beginGesture()
+                model.update { $0.camera.position = NormPoint(x: 0, y: 0) }
+                model.cancelGesture()
+                guard model.project == original, model.undoStepCount == 0 else { throw Failure.cancel }
+            }
+        },
+        "inspector-scroll": { args in try await EditorWorkspaceGallery.checkInspectorScroll(to: URL(fileURLWithPath: args.first ?? "build/inspector-scroll")) },
+        "workspace-replay": { _ in try await EditorWorkspaceGallery.checkWorkflowReplay() },
+        "preview-recovery": { args in
+            try await EditorWorkspaceGallery.checkPreviewRecovery(to: URL(fileURLWithPath: args.first ?? "build/preview-recovery"))
+        },
+        "inspector-motion-png": { args in
+            try await EditorWorkspaceGallery.renderInspectorMotion(to: URL(fileURLWithPath: args.first ?? "build/inspector-motion"))
+        },
+        "workspace-png": { args in
+            try await EditorWorkspaceGallery.render(to: URL(fileURLWithPath: args.first ?? "build/editor-workspace.png"),
+                width: CGFloat(Double(args.dropFirst().first ?? "1120") ?? 1120))
+        },
         "inspector-png": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let outPath = args.first else {
@@ -867,7 +1249,7 @@ enum SelfTest {
                 let variant = args[safe: 1]
                 var initialTab: InspectorView.Tab = .background
                 switch variant {
-                case "zoom", "clip", "layout", "mask": break
+                case "zoom", "clip", "layout", "mask", "group", "camera-clip": break
                 case "cursor": initialTab = .cursor
                 case "camera": initialTab = .camera; project.source.hasCamera = true
                 case "camera-empty": initialTab = .camera
@@ -883,13 +1265,24 @@ enum SelfTest {
                 let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
                 if variant == "zoom" { model.selection = [UUID(uuidString: zoom.id)!] }
                 if variant == "clip" { model.selectedClip = 1 }
+                if variant == "group" { model.selectedClips = [0, 1] }
+                if variant == "camera-clip" {
+                    let id = UUID()
+                    model.edit("Fixture camera") {
+                        $0.source.hasCamera = true
+                        var clip = CameraClip(start: 0, end: 10)
+                        clip.id = id.uuidString
+                        $0.cameraClips = [clip]
+                    }
+                    model.selection = [id]
+                }
                 if variant == "layout" { model.selection = [UUID(uuidString: layout.id)!] }
                 if variant == "mask" { model.selection = [UUID(uuidString: mask.id)!] }
 
                 let height: CGFloat = 760
                 let hosting = NSHostingView(rootView: InspectorView(model: model, initialTab: initialTab))
                 hosting.appearance = NSAppearance(named: .darkAqua)
-                hosting.frame = NSRect(x: 0, y: 0, width: 300, height: height)
+                hosting.frame = NSRect(x: 0, y: 0, width: InspectorView.width, height: height)
 
                 let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
                 window.appearance = NSAppearance(named: .darkAqua)
@@ -1190,19 +1583,93 @@ enum SelfTest {
         // reports `NSView.noIntrinsicMetric` for width until it becomes the field editor, so the top
         // bar's `NSStackView` collapsed it to ~0 pt; `EditorWindowController.TitleField` now starts
         // non-editable (real intrinsic width) and flips editable only for the click-to-rename gesture.)
-        "editor-png": { args in
+        "project-navigation": { @MainActor _ in
+            struct Fail: Error { let message: String }
+            let package = FileManager.default.temporaryDirectory.appendingPathComponent("navigation-\(UUID()).recorder")
+            try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: package); Library.window?.orderOut(nil) }
+            try Project(title: "Navigation", source: Source(pixelWidth: 128, pixelHeight: 96, duration: 1),
+                        clips: [Clip(sourceStart: 0, sourceEnd: 1)]).save(to: package.appendingPathComponent("project.json"))
+            try await synthesizeMovie(at: package.appendingPathComponent("screen.mov"), width: 128, height: 96, fps: 30, frameCount: 30)
+            let original = try Data(contentsOf: package.appendingPathComponent("project.json"))
+            let canceled = EditorWindowController.open(package: package)
+            guard let loadingWindow = NSApp.windows.first(where: { $0.isVisible && $0.title == "\(package.deletingPathExtension().lastPathComponent)" }),
+                  EditorWindowController.allOpen.isEmpty else { throw Fail(message: "loading shell must appear synchronously") }
+            @MainActor func captureLoading(_ window: NSWindow, name: String) throws {
+                window.layoutIfNeeded()
+                guard let capture = window.contentView?.superview,
+                      let rep = capture.bitmapImageRepForCachingDisplay(in: capture.bounds) else {
+                    throw Fail(message: "loading shell must be capturable")
+                }
+                capture.cacheDisplay(in: capture.bounds, to: rep)
+                try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "build/\(name).png"))
+            }
+            try captureLoading(loadingWindow, name: "editor-loading")
+            loadingWindow.setContentSize(NSSize(width: 1100, height: 700))
+            try captureLoading(loadingWindow, name: "editor-loading-minimum")
+            loadingWindow.performClose(nil)
+            guard await canceled.value == nil,
+                  try Data(contentsOf: package.appendingPathComponent("project.json")) == original else {
+                throw Fail(message: "closing during load must cancel without saving")
+            }
+            try Data("invalid project".utf8).write(to: package.appendingPathComponent("project.json"))
+            guard await EditorWindowController.open(package: package).value == nil,
+                  let failedWindow = NSApp.windows.first(where: { $0.isVisible && $0.title == package.deletingPathExtension().lastPathComponent }) else {
+                throw Fail(message: "invalid projects must keep a visible error window")
+            }
+            try captureLoading(failedWindow, name: "editor-loading-error")
+            failedWindow.performClose(nil)
+            try original.write(to: package.appendingPathComponent("project.json"))
+            let opening = EditorWindowController.open(package: package)
+            let shell = NSApp.windows.first(where: { $0.isVisible && $0.title == package.deletingPathExtension().lastPathComponent })
+            let repeated = EditorWindowController.open(package: package)
+            guard let editor = await opening.value, await repeated.value === editor, editor.window === shell else {
+                throw Fail(message: "repeated clicks must share one opening editor")
+            }
+            defer { editor.close() }
+            await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+            editor.model.edit("Rename") { $0.title = "Kept session" }
+            editor.model.playhead = 0.4
+            editor.model.isPlaying = true
+            editor.backTapped()
+            guard editor.window?.isVisible == false, Library.window?.isVisible == true,
+                  !editor.model.isPlaying else { throw Fail(message: "Back must show Projects and hide editor") }
+            guard await EditorWindowController.open(package: package).value === editor,
+                  editor.model.project.title == "Kept session", editor.model.playhead == 0.4,
+                  editor.model.undoStepCount == 1 else { throw Fail(message: "reopen lost editing session") }
+            await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+            guard editor.window?.isVisible == true else { throw Fail(message: "editor did not reopen") }
+        },
+        "editor-review-png": { args in try await EditorWorkspaceGallery.renderNativeEditor(to: URL(fileURLWithPath: args.first ?? "build/editor-final")) },
+        "editor-png": { @MainActor args in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png>") }
+            guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png> [width height]") }
             let packageURL = URL(fileURLWithPath: args[0])
             let outURL = URL(fileURLWithPath: args[1])
             try await MainActor.run {
                 guard let window = EditorWindowController.makeOffscreen(package: packageURL) else {
                     throw Fail(description: "couldn't load project.json at \(packageURL.path)")
                 }
+                if args.count >= 4, let width = Double(args[2]), let height = Double(args[3]) {
+                    window.setContentSize(NSSize(width: width, height: height))
+                }
                 window.appearance = NSAppearance(named: .darkAqua)
                 let capture = window.contentView?.superview ?? window.contentView
                 guard let capture else { throw Fail(description: "no capturable view") }
                 capture.layoutSubtreeIfNeeded()
+                for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                    guard let button = window.standardWindowButton(kind), let parent = button.superview,
+                          parent.bounds.contains(button.frame) else {
+                        throw Fail(description: "window control clipped by its native titlebar")
+                    }
+                    let center = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: capture)
+                    guard abs(capture.bounds.maxY - center.y - 24) < 1 else {
+                        throw Fail(description: "window controls must align with the 48-point document row")
+                    }
+                    guard capture.hitTest(center) === button else {
+                        throw Fail(description: "window control cannot receive clicks")
+                    }
+                }
                 guard let rep = capture.bitmapImageRepForCachingDisplay(in: capture.bounds) else {
                     throw Fail(description: "no bitmap rep")
                 }
@@ -1231,7 +1698,7 @@ enum SelfTest {
         "menu-actions": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
 
-            func findItem(_ menu: NSMenu, _ menuTitle: String, _ itemTitle: String) throws -> NSMenuItem {
+            @Sendable func findItem(_ menu: NSMenu, _ menuTitle: String, _ itemTitle: String) throws -> NSMenuItem {
                 guard let item = menu.item(withTitle: menuTitle)?.submenu?.item(withTitle: itemTitle) else {
                     throw Fail(description: "no \(menuTitle) ▸ \(itemTitle) item")
                 }
@@ -1277,8 +1744,8 @@ enum SelfTest {
                     ("Edit", "Undo"), ("Edit", "Redo"), ("Edit", "Split"), ("Edit", "Remove"),
                     ("Edit", "Add Zoom"), ("Edit", "Regenerate Auto Zooms"), ("Edit", "Remove All Zooms"),
                     ("Edit", "Restore All Cuts"), ("Edit", "Speed Up Typing"), ("Edit", "Hide Cursor in Selected Clip"),
-                    ("View", "Background"), ("View", "Cursor"), ("View", "Camera"), ("View", "Audio"),
-                    ("View", "Animations"), ("View", "Keys"), ("View", "Zoom In"), ("View", "Zoom Out"),
+                    ("View", "Canvas"), ("View", "Cursor"), ("View", "Camera"), ("View", "Sound"),
+                    ("View", "Motion"), ("View", "Keystrokes"), ("View", "Zoom In"), ("View", "Zoom Out"),
                     ("View", "Fit"), ("View", "Crop…"),
                     ("Export", "Export…"), ("Export", "Copy Frame as Image"),
                 ]
@@ -1410,7 +1877,7 @@ enum SelfTest {
                 guard !controller.validateMenuItem(items["Hide Cursor in Selected Clip"]!) else {
                     throw Fail(description: "Hide Cursor shouldn't validate with nothing selected")
                 }
-                for tabTitle in ["Background", "Cursor", "Camera", "Audio", "Animations", "Keys"] {
+                for tabTitle in ["Canvas", "Cursor", "Camera", "Sound", "Motion", "Keystrokes"] {
                     guard controller.validateMenuItem(items[tabTitle]!) else { throw Fail(description: "\(tabTitle) tab should always validate") }
                 }
                 for alwaysOn in ["Save", "Save As…", "Show Raw Files", "Split", "Add Zoom", "Regenerate Auto Zooms",
@@ -1428,7 +1895,7 @@ enum SelfTest {
                 controller.timelineZoomOut(nil)
                 controller.timelineFit(nil)
                 controller.saveDocument(nil)
-                guard fm.fileExists(atPath: packageURL.appendingPathComponent("project.json").path) else {
+                guard FileManager.default.fileExists(atPath: packageURL.appendingPathComponent("project.json").path) else {
                     throw Fail(description: "Save didn't write project.json")
                 }
 
@@ -1566,7 +2033,25 @@ enum SelfTest {
         },
         // T-606: `ProjectStore.importMovie` on a synthesized movie living outside the library folder,
         // like one dragged in from Finder.
-        "import": { _ in
+        "project-names": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let fm = FileManager.default
+            let folder = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: folder) }
+            // More projects than word pairs forces the collision path to run.
+            for _ in 0..<300 {
+                let url = ProjectStore.newProjectURL(in: folder)
+                let words = url.deletingPathExtension().lastPathComponent.split(separator: " ")
+                guard url.pathExtension == "recorder", words.count >= 2,
+                      words.prefix(2).allSatisfy({ $0.allSatisfy(\.isLetter) }),
+                      !fm.fileExists(atPath: url.path) else {
+                    throw Fail(description: "invalid or colliding project name: \(url.lastPathComponent)")
+                }
+                try fm.createDirectory(at: url, withIntermediateDirectories: false)
+            }
+        },
+        "import": { @MainActor _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
             let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-import-\(UUID().uuidString)")
@@ -1580,9 +2065,21 @@ enum SelfTest {
             let originalData = try Data(contentsOf: sourceMovie)
 
             let store = ProjectStore(folder: libraryFolder)
-            let packageURL = try await store.importMovie(sourceMovie)
+            // A Finder-style URL-only provider must reach the same importer as a direct URL.
+            let provider = NSItemProvider(object: sourceMovie as NSURL)
+            guard LibraryView.dropTypes.contains(where: { provider.hasItemConformingToTypeIdentifier($0.identifier) }) else {
+                throw Fail(description: "drop target rejects Finder file URLs")
+            }
+            let droppedURL = try await LibraryView.droppedFileURL(provider)
+            guard droppedURL == sourceMovie else { throw Fail(description: "drop changed the file URL") }
+            do {
+                _ = try await LibraryView.droppedFileURL(NSItemProvider(object: URL(string: "https://example.com/video.mov")! as NSURL))
+                throw Fail(description: "drop accepted a remote URL")
+            } catch is CocoaError { }
+            let packageURL = try await store.importMovie(droppedURL)
 
-            guard packageURL.lastPathComponent == "My Clip.recorder" else {
+            guard packageURL.pathExtension == "recorder",
+                  packageURL.deletingPathExtension().lastPathComponent.split(separator: " ").count == 2 else {
                 throw Fail(description: "unexpected package name \(packageURL.lastPathComponent)")
             }
             guard fm.fileExists(atPath: packageURL.appendingPathComponent("screen.mov").path) else {
@@ -1595,6 +2092,9 @@ enum SelfTest {
             guard events.events.isEmpty else { throw Fail(description: "events.json not empty") }
 
             let project = try Project.load(from: packageURL.appendingPathComponent("project.json"))
+            guard project.title == packageURL.deletingPathExtension().lastPathComponent else {
+                throw Fail(description: "project title does not match its generated package name")
+            }
             guard project.source.pixelWidth == width, project.source.pixelHeight == height else {
                 throw Fail(description: "size \(project.source.pixelWidth)x\(project.source.pixelHeight) != \(width)x\(height)")
             }
@@ -1715,8 +2215,9 @@ enum SelfTest {
         },
         "record-perf": { args in try await PerfSelfTest.runRecordPerf(args) },
         "idle-perf": { args in try await PerfSelfTest.runIdlePerf(args) },
+        "recording-dismissal": { @MainActor _ in try ToolbarController.runDismissalSelfTest() },
         "permission-return": { _ in try await ToolbarController.runPermissionReturnSelfTest() },
-        "recording-ui": { _ in
+        "recording-ui": { @MainActor _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             try await MainActor.run {
                 _ = NSApplication.shared
@@ -1740,6 +2241,14 @@ enum SelfTest {
                       !bubble.isOpaque, bubble.backgroundColor.alphaComponent == 0,
                       previewLayer.cornerRadius == 40, previewLayer.masksToBounds else {
                     throw Fail(description: "camera corners have a panel backing instead of transparency")
+                }
+                guard let backing = previewLayer.superlayer,
+                      backing.backgroundColor?.alpha == 1,
+                      backing.cornerRadius == previewLayer.cornerRadius,
+                      backing.cornerCurve == previewLayer.cornerCurve,
+                      backing.masksToBounds, backing.bounds == previewLayer.frame,
+                      bubble.hasShadow else {
+                    throw Fail(description: "camera shadow silhouette does not match the preview")
                 }
                 guard panel.level.rawValue < NSWindow.Level.modalPanel.rawValue else {
                     throw Fail(description: "floating controls cover modal dialogs")
@@ -1777,22 +2286,22 @@ enum SelfTest {
                 }
             }
         },
-        "pickers": { _ in
+        "pickers": { @MainActor _ in
             // T-107/T-108 bug fix regression coverage: `SelectionRectView`'s create/resize drag math
             // (AC-AREA-1/2) and `SourcePickerOverlay`'s window hit-test ordering (AC-WIN-1), both driven
             // with synthetic data so they run without Screen Recording permission or a real window.
             struct Fail: Error, CustomStringConvertible { let description: String }
 
-            func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
+            @Sendable func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
                 NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: 0,
                                     context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
             }
-            func drag(_ view: SelectionRectView, from a: CGPoint, to b: CGPoint) {
+            @MainActor func drag(_ view: SelectionRectView, from a: CGPoint, to b: CGPoint) {
                 view.mouseDown(with: synthEvent(.leftMouseDown, a))
                 view.mouseDragged(with: synthEvent(.leftMouseDragged, b))
                 view.mouseUp(with: synthEvent(.leftMouseUp, b))
             }
-            func freshView() -> SelectionRectView {
+            @MainActor func freshView() -> SelectionRectView {
                 let v = SelectionRectView(frame: NSRect(x: 0, y: 0, width: 1000, height: 1000))
                 v.limit = v.bounds
                 return v
@@ -1851,7 +2360,7 @@ enum SelfTest {
         // T-207b/T-204: builds the status menu in both states and the global hotkey table (no live
         // status item / window needed) and checks them against SPEC §4.7/§8's titles, order and key
         // equivalents, that no two hotkeys share a binding, and every menu item has a target and action.
-        "menus": { _ in
+        "menus": { @MainActor _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
 
             // SPEC §4.7 global hotkey table (T-204).
@@ -1942,7 +2451,7 @@ enum SelfTest {
         // suite (never `.standard`, so this never touches the user's real saved shortcuts) — table
         // reflects an override, a duplicate combo is rejected, reset restores defaults, and the
         // status-menu key equivalents built from `Hotkeys.table` (`AppDelegate.hotkeyKey`) follow.
-        "hotkeys": { _ in
+        "hotkeys": { @MainActor _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let suiteName = "recorder-selftest-hotkeys-\(UUID().uuidString)"
             guard let defaults = UserDefaults(suiteName: suiteName) else { throw Fail(description: "no UserDefaults suite") }
@@ -2020,7 +2529,7 @@ enum SelfTest {
         "waveform": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }
-            let peaks = try Waveform.peaks(for: URL(fileURLWithPath: path))
+            let peaks = try await Waveform.peaks(for: URL(fileURLWithPath: path))
             let max = peaks.max() ?? 0
             print("peaks=\(peaks.count) max=\(max)")
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
@@ -2189,6 +2698,307 @@ enum SelfTest {
         // real (synthesized) `NSEvent`s — no window, no TCC — asserting the invariants CLAUDE.md
         // calls out: invariants hold after every op, each gesture is exactly one undo step, `Esc`
         // mid-drag/mid-split-mode reverts, split refuses near edges, snapping lands on/off candidates.
+        "timeline-gap": { @MainActor args in
+            struct Fail: Error { let message: String }
+            guard let path = args.first else { throw Fail(message: "usage: timeline-gap <package>") }
+            let package = URL(fileURLWithPath: path)
+            let original = try Project.load(from: package.appendingPathComponent("project.json"))
+            guard let gapIndex = original.clips.indices.first(where: { original.clips[$0].isEmpty && $0 > 0 && $0 + 1 < original.clips.count }) else {
+                throw Fail(message: "fixture needs an internal gap")
+            }
+            let selected = Set(original.clips.indices.dropFirst(gapIndex + 1).prefix(while: { !original.clips[$0].isEmpty }))
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("gap-move-\(UUID())")
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            for linked in [false, true] {
+                for ripple in [false, true] {
+                    var fixture = original
+                    fixture.linkVideoEdits = linked; fixture.rippleDelete = ripple
+                    let model = EditorModel(packageURL: tmp, project: fixture, events: EventLog())
+                    let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 1400, height: 260))
+                    view.model = model; view.geometry.pxPerSecond = 100
+                    model.selectedClips = selected
+                    let start = fixture.clips.prefix(gapIndex + 1).reduce(0) { $0 + $1.outputDuration }
+                    let anchor = start + fixture.clips[gapIndex + 1].outputDuration / 2
+                    @MainActor func point(_ time: Double) -> CGPoint { CGPoint(x: TimelineView.gutter + time * 100, y: 260 - view.laneMidY(.clip)) }
+                    let destination = anchor - fixture.clips[gapIndex].outputDuration
+                    view.mouseDown(with: synthMouse(.leftMouseDown, point(anchor)))
+                    view.mouseDragged(with: synthMouse(.leftMouseDragged, point(destination), modifiers: .command))
+                    view.mouseUp(with: synthMouse(.leftMouseUp, point(destination)))
+                    guard let moved = model.selectedClips.min(), moved > 0,
+                          !model.project.clips[moved - 1].isEmpty, model.undoStepCount == 1 else {
+                        throw Fail(message: "drag did not close gap as one undoable edit")
+                    }
+                    let result = model.project
+                    model.undo()
+                    guard model.project == fixture else { throw Fail(message: "undo changed original") }
+                    model.saveNow()
+                    let (composition, _, _, _) = try await makeComposition(package: package, project: result)
+                    guard abs(composition.duration.seconds - TimeMap(fixture.clips).outputDuration) < 0.02 else {
+                        throw Fail(message: "move changed playback duration")
+                    }
+                }
+            }
+        },
+        "timeline-clipboard": { _ in
+            struct Fail: Error { let message: String }
+            try await MainActor.run {
+                let pasteboard = NSPasteboard(name: NSPasteboard.Name("recorder-clipboard-test-\(UUID().uuidString)"))
+                defer { pasteboard.releaseGlobally() }
+                for lane in Lane.allCases {
+                    var project = Project(source: Source(duration: 12, hasCamera: true), clips: [Clip(sourceStart: 0, sourceEnd: 12)])
+                    project.linkVideoEdits = false
+                    project.zooms = [Zoom(start: 2, end: 6, scale: 3)]
+                    project.keystrokeClips = [Layout(start: 2, end: 6, kind: .settings, keys: Keys(show: true))]
+                    project.layouts = [Layout(start: 2, end: 6, kind: .bubble)]
+                    project.masks = [Mask(start: 2, end: 6, kind: .blur)]
+                    let model = EditorModel(packageURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+                                            project: project, events: EventLog())
+                    let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 250))
+                    view.model = model
+                    view.clipboardPasteboard = pasteboard
+                    let ids: [Lane: String] = [.camera: project.cameraClips[0].id, .zoom: project.zooms[0].id,
+                        .keys: project.keystrokeClips[0].id, .layout: project.layouts[0].id, .mask: project.masks[0].id]
+                    if lane == .clip { model.selectedClips = [0] }
+                    else { model.selection = [UUID(uuidString: ids[lane]!)!] }
+                    model.playhead = 10 // Cut must ignore the playhead, including outside the selection.
+                    view.keyDown(with: synthKey("x", keyCode: 7, modifiers: .command))
+                    guard view.canPasteSelection, model.undoName == "Cut", model.selection.isEmpty,
+                          model.selectedClips.isEmpty else { throw Fail(message: "Cut clipboard/selection: \(lane)") }
+                    var expectedCut = project
+                    if lane == .clip { expectedCut.deleteClips([0]) }
+                    else { expectedCut.removeBlock(UUID(uuidString: ids[lane]!)!) }
+                    guard model.project == expectedCut else { throw Fail(message: "Cut only selected item: \(lane)") }
+                    model.playhead = 8
+                    view.keyDown(with: synthKey("v", keyCode: 9, modifiers: .command))
+                    guard model.undoName == "Paste", model.undoStepCount == 2,
+                          model.project.checkInvariants() == nil else { throw Fail(message: "Paste: \(lane)") }
+                    if lane == .clip {
+                        guard let index = model.selectedClip, model.project.clips[index].sourceStart == 8,
+                              model.project.clips[index].mediaIn == 0 else { throw Fail(message: "Pasted video position") }
+                    } else {
+                        let blocks = model.project.cameraClips.map { ($0.id, $0.start) } + model.project.zooms.map { ($0.id, $0.start) }
+                            + model.project.keystrokeClips.map { ($0.id, $0.start) } + model.project.layouts.map { ($0.id, $0.start) }
+                            + model.project.masks.map { ($0.id, $0.start) }
+                        guard blocks.contains(where: { UUID(uuidString: $0.0).map(model.selection.contains) == true && $0.1 == 8 })
+                        else { throw Fail(message: "Pasted layer position: \(lane)") }
+                    }
+                    let pasted = model.project
+                    model.undo()
+                    guard model.project == expectedCut else { throw Fail(message: "Undo paste") }
+                    model.undo()
+                    guard model.project == project else { throw Fail(message: "Undo cut") }
+                    model.redo(); model.redo()
+                    guard model.project == pasted else { throw Fail(message: "Redo cut/paste") }
+                    pasteboard.clearContents(); pasteboard.setString("plain text", forType: .string)
+                    guard !view.canPasteSelection else { throw Fail(message: "Stale clipboard") }
+                }
+            }
+        },
+        "timeline-full-layers": { _ in
+            struct Fail: Error { let message: String }
+            try await MainActor.run {
+                let project = Project(source: Source(duration: 12), clips: [Clip(sourceStart: 4, sourceEnd: 8)])
+                let model = EditorModel(packageURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+                                        project: project, events: EventLog())
+                let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 250))
+                view.model = model
+                view.layoutSubtreeIfNeeded()
+                for name in ["Zoom", "Keys"] {
+                    guard let button = view.subviews.compactMap({ $0 as? NSButton }).first(where: { $0.toolTip == "Add full-length \(name) layer" }),
+                          !button.isHidden else { throw Fail(message: "Missing full-length button") }
+                    button.performClick(nil)
+                }
+                guard model.project.zooms.count == 1, model.project.zooms[0].start == 4, model.project.zooms[0].end == 8,
+                      model.project.keystrokeClips.count == 1, model.project.keystrokeClips[0].start == 4,
+                      model.project.keystrokeClips[0].end == 8 else { throw Fail(message: "Full-length ranges") }
+                model.undo()
+                guard model.project.keystrokeClips.isEmpty, model.project.zooms.count == 1 else { throw Fail(message: "Undo full-length layer") }
+            }
+        },
+        "timeline-selection": { @MainActor args in
+            struct Fail: Error { let message: String }
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-selection-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            try await MainActor.run {
+                var project = Project(source: Source(duration: 12, hasCamera: true),
+                                      clips: [Clip(sourceStart: 0, sourceEnd: 12)], zooms: [Zoom(start: 0, end: 12)])
+                _ = project.split(atOutput: 4); _ = project.split(atOutput: 8)
+                _ = project.moveClips([0, 1, 2], byOutput: 2)
+                let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+                let view = TimelineView(frame: .zero)
+                view.model = model
+                let toolbar = TimelineToolbar(frame: .zero)
+                toolbar.timelineView = view
+                let container = TimelineContainerView(toolbar: toolbar, timeline: view)
+                let window = NSWindow(contentRect: CGRect(x: 100, y: 100, width: 900, height: 250),
+                                      styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.appearance = NSAppearance(named: .darkAqua)
+                window.contentView = container
+                window.makeKeyAndOrderFront(nil)
+                defer { window.orderOut(nil) }
+                container.layoutSubtreeIfNeeded()
+                view.geometry.pxPerSecond = 45
+                @MainActor func point(_ t: Double, _ dy: Double = 0) -> CGPoint {
+                    view.convert(CGPoint(x: TimelineView.gutter + view.geometry.x(forOutput: t), y: view.laneMidY(.clip) + dy), to: nil)
+                }
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(1, -8)))
+                view.mouseDragged(with: synthMouse(.leftMouseDragged, point(13, 8)))
+                guard model.selectedClips == [1, 2, 3] else { throw Fail(message: "marquee selection") }
+                if let path = args.first {
+                    view.displayIfNeeded(); container.displayIfNeeded()
+                    guard let rep = container.bitmapImageRepForCachingDisplay(in: container.bounds) else { throw Fail(message: "capture") }
+                    container.cacheDisplay(in: container.bounds, to: rep)
+                    try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                }
+                view.mouseUp(with: synthMouse(.leftMouseUp, point(13, 8)))
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(3), modifiers: .shift))
+                view.mouseUp(with: synthMouse(.leftMouseUp, point(3)))
+                guard model.selectedClips == [2, 3] else { throw Fail(message: "shift deselection") }
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(1)))
+                view.mouseDragged(with: synthMouse(.leftMouseDragged, point(5)))
+                guard model.selectedClips == [1] else { throw Fail(message: "horizontal marquee") }
+                view.cancelOperation(nil)
+                guard model.selectedClips == [2, 3] else { throw Fail(message: "cancel marquee") }
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(3), modifiers: .shift))
+                view.mouseUp(with: synthMouse(.leftMouseUp, point(3)))
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(7)))
+                view.mouseDragged(with: synthMouse(.leftMouseDragged, point(8), modifiers: .command))
+                guard model.project.cameraClips.map(\.start) == [3, 7, 11] else { throw Fail(message: "linked group drag") }
+                view.cancelOperation(nil)
+                guard model.project == project, model.selectedClips == [1, 2, 3] else { throw Fail(message: "cancel group") }
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(7)))
+                view.mouseDragged(with: synthMouse(.leftMouseDragged, point(8), modifiers: .command))
+                view.mouseUp(with: synthMouse(.leftMouseUp, point(8)))
+                guard model.undoStepCount == 1 else { throw Fail(message: "one undo per group") }
+                model.undo()
+                guard model.project == project else { throw Fail(message: "undo group") }
+                model.selectedClips = [2]
+                view.keyDown(with: synthKey("", keyCode: 51))
+                guard model.timeMap.outputDuration == 10, model.project.cameraClips.count == 2 else { throw Fail(message: "ripple delete") }
+                model.undo()
+                view.toggleRippleDelete()
+                model.selectedClips = [2]
+                view.keyDown(with: synthKey("", keyCode: 51))
+                guard model.timeMap.outputDuration == 14, model.project.clips[2].isEmpty else { throw Fail(message: "lift delete") }
+                model.saveNow()
+            }
+        },
+        "timeline-tracks": { @MainActor _ in
+            enum Fail: Error { case tracks, composition, rendering, undo }
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-tracks-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            try await synthesizeMovie(at: tmp.appendingPathComponent("screen.mov"), width: 128, height: 96, fps: 30, frameCount: 360)
+            try await synthesizeMovie(at: tmp.appendingPathComponent("camera.mov"), width: 64, height: 48, fps: 30, frameCount: 360)
+            let project = Project(source: Source(pixelWidth: 128, pixelHeight: 96, duration: 12, hasCamera: true),
+                                  clips: [Clip(sourceStart: 0, sourceEnd: 12)],
+                                  keystrokeClips: [Layout(start: 2, end: 10, kind: .settings, keys: Keys(show: true))])
+            let edited = try await MainActor.run { () throws -> Project in
+                let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+                let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 190))
+                view.model = model
+                view.geometry.pxPerSecond = 50
+                @MainActor func point(_ t: Double, _ y: Double) -> CGPoint { CGPoint(x: TimelineView.gutter + t * 50, y: 190 - y) }
+                view.toggleLinkedVideoEdits()
+                view.toggleRippleDelete()
+                view.toggleSplitModeSticky()
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(5, view.laneMidY(.camera))))
+                guard model.project.cameraClips.count == 2, model.project.clips.count == 1,
+                      model.project.keystrokeClips == project.keystrokeClips else { throw Fail.tracks }
+                view.selectTool()
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(2, view.laneMidY(.camera))))
+                view.mouseUp(with: synthMouse(.leftMouseUp, point(2, view.laneMidY(.camera))))
+                view.keyDown(with: synthKey("", keyCode: 51))
+                guard model.project.cameraClips.count == 1 else { throw Fail.tracks }
+                view.toggleSplitModeSticky()
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(5, 40)))
+                view.selectTool()
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(2, 40)))
+                view.mouseUp(with: synthMouse(.leftMouseUp, point(2, 40)))
+                view.keyDown(with: synthKey("", keyCode: 51))
+                guard model.project.clips[0].isEmpty, model.timeMap.outputDuration == 12 else { throw Fail.tracks }
+                let edited = model.project
+                model.undo(); model.redo()
+                guard model.project == edited else { throw Fail.undo }
+                let camera = UUID(uuidString: model.project.cameraClips[0].id)!
+                model.edit("Move camera") { $0.moveCamera(camera, toStart: 2) }
+                guard let device = MTLCreateSystemDefaultDevice(),
+                      let texture = device.makeTexture(descriptor: .texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 8, height: 8, mipmapped: false)) else { throw Fail.rendering }
+                let media = FrameState.Texture(luma: texture)
+                let gap = makeFrameState(model: model, outputTime: 3, screen: media, camera: media, size: CGSize(width: 128, height: 96))
+                guard gap.screen == nil, gap.camera != nil else { throw Fail.rendering }
+                let empty = makeFrameState(model: model, outputTime: 1, screen: media, camera: media, size: CGSize(width: 128, height: 96))
+                guard empty.screen == nil, empty.camera == nil else { throw Fail.rendering }
+                view.setFrameSize(NSSize(width: 640, height: 400))
+                guard abs(view.overviewRect.maxY - 395) < 0.1 else { throw Fail.tracks }
+                return model.project
+            }
+            let linked = try await MainActor.run { () throws -> Project in
+                let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
+                let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 190))
+                view.model = model
+                view.geometry.pxPerSecond = 50
+                model.playhead = 6
+                view.keyDown(with: synthKey("c", keyCode: 8))
+                guard model.project.clips.count == 2, model.project.cameraClips.count == 2,
+                      model.project.keystrokeClips.count == 2 else { throw Fail.tracks }
+                let before = model.project, undoCount = model.undoStepCount
+                @MainActor func point(_ t: Double) -> CGPoint { CGPoint(x: TimelineView.gutter + t * 50, y: 190 - view.laneMidY(.clip)) }
+                view.mouseDown(with: synthMouse(.leftMouseDown, point(8)))
+                view.mouseDragged(with: synthMouse(.leftMouseDragged, point(10), modifiers: .command))
+                view.mouseDragged(with: synthMouse(.leftMouseDragged, point(11), modifiers: .command))
+                view.mouseUp(with: synthMouse(.leftMouseUp, point(11)))
+                guard model.project.clips.count == 3, model.project.clips[1].isEmpty,
+                      model.project.clips[2].sourceStart == 9, model.project.cameraClips[1].start == 9,
+                      model.timeMap.outputDuration == 15, model.undoStepCount == undoCount + 1 else { throw Fail.tracks }
+                let moved = model.project
+                model.undo()
+                guard model.project == before else { throw Fail.undo }
+                model.redo()
+                guard model.project == moved else { throw Fail.undo }
+                return moved
+            }
+            let (movedComposition, _, _, _) = try await makeComposition(package: tmp, project: linked)
+            guard abs(movedComposition.duration.seconds - 15) < 0.01,
+                  let movedCamera = movedComposition.tracks(withMediaType: .video).last?.segments.last,
+                  abs(movedCamera.timeMapping.source.start.seconds - 6) < 0.01,
+                  abs(movedCamera.timeMapping.target.start.seconds - 9) < 0.01 else { throw Fail.composition }
+            for isLinked in [false, true] {
+                var sped = project
+                sped.linkVideoEdits = isLinked
+                sped.setSpeed(0, 2)
+                let (composition, _, _, _) = try await makeComposition(package: tmp, project: sped)
+                guard abs(composition.duration.seconds - (isLinked ? 6 : 12)) < 0.01,
+                      let camera = composition.tracks(withMediaType: .video).last,
+                      abs(camera.timeRange.duration.seconds - (isLinked ? 6 : 12)) < 0.01 else { throw Fail.composition }
+            }
+            for isLinked in [false, true] {
+                var mixed = project
+                mixed.clips = [Clip(sourceStart: 0, sourceEnd: 2, speed: 0.5),
+                               Clip(sourceStart: 2, sourceEnd: 3, speed: 0.5),
+                               Clip(sourceStart: 3, sourceEnd: 6),
+                               Clip(sourceStart: 6, sourceEnd: 12, speed: 1.5)]
+                mixed.clips[1].isGap = true
+                mixed.linkVideoEdits = isLinked
+                _ = mixed.moveClips([2, 3], byOutput: -2)
+                let (composition, _, _, _) = try await makeComposition(package: tmp, project: mixed)
+                guard abs(composition.duration.seconds - 13) < 0.01,
+                      let camera = composition.tracks(withMediaType: .video).last,
+                      let segment = camera.segments.first(where: { abs($0.timeMapping.source.start.seconds - 6) < 0.01 }),
+                      abs(segment.timeMapping.target.start.seconds - (isLinked ? 7 : 9)) < 0.01,
+                      abs(segment.timeMapping.source.duration.seconds - 6) < 0.01,
+                      abs(segment.timeMapping.target.duration.seconds - 4) < 0.01 else { throw Fail.composition }
+            }
+            let (composition, _, _, _) = try await makeComposition(package: tmp, project: edited)
+            let tracks = composition.tracks(withMediaType: .video)
+            guard tracks.count == 2, abs(composition.duration.seconds - 12) < 0.01,
+                  let camera = tracks[1].segments.first(where: { !$0.isEmpty }),
+                  abs(camera.timeMapping.source.start.seconds - 5) < 0.01,
+                  abs(camera.timeMapping.target.start.seconds - 2) < 0.01 else { throw Fail.composition }
+        },
         "timeline-ops": { _ in try await runTimelineOpsSelfTest() },
         // T-415: manual zoom target overlay — mapping round trip + synthetic drag (see
         // `Render/ZoomTargetMapping.swift`).
@@ -2240,7 +3050,7 @@ enum SelfTest {
         // T-610: `StateSnapshot.dump(to:pasteboard:)` over a real offscreen editor (one edit + a
         // selected zoom) — everything is injected (a tmp "Snapshots" directory, a private named
         // pasteboard) so this never touches the user's real Logs folder or clipboard.
-        "snapshot": { _ in
+        "snapshot": { @MainActor _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
             let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-snapshot-\(UUID().uuidString)")
@@ -2526,14 +3336,54 @@ private func runTimelineOpsSelfTest() async throws {
     do {
         let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
         defer { cleanup() }
-        for y in [py(82), py(140)] {
+        view.geometry.scrollX = 200
+        guard view.hitTest(at: CGPoint(x: 30, y: 40)) == .none else {
+            throw TimelineOpsFail(description: "scrolled clips intercepted track labels")
+        }
+        view.geometry.scrollX = 0
+        model.edit("Add Zoom") { _ = $0.addZoom(atSource: 6, length: 3, mode: .auto) }
+        model.selection = [UUID(uuidString: model.project.zooms[0].id)!]
+        view.menuZoomToSelection()
+        guard view.geometry.x(forOutput: 6) >= 0, view.geometry.x(forOutput: 9) <= view.geometry.width else {
+            throw TimelineOpsFail(description: "Focus failed to contain the selected effect")
+        }
+        view.fit()
+        view.keyDown(with: synthKey("n", keyCode: 45))
+        guard !view.snappingEnabled else { throw TimelineOpsFail(description: "N did not toggle snapping") }
+        view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(6.5), y: py(view.laneMidY(.zoom)))))
+        view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.05), y: py(view.laneMidY(.zoom)))))
+        view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5.05), y: py(view.laneMidY(.zoom)))))
+        guard abs(model.project.zooms[0].start - 4.55) < 0.01 else {
+            throw TimelineOpsFail(description: "Snap off still snapped a move")
+        }
+        view.setFrameSize(NSSize(width: 900, height: 182))
+        view.setZoom(sliderValue: 0.5)
+        let before = model.project
+        let r = view.overviewRect
+        func overviewPoint(_ x: CGFloat) -> CGPoint { CGPoint(x: x, y: view.bounds.height - r.midY) }
+        view.mouseDown(with: synthMouse(.leftMouseDown, overviewPoint(r.maxX - 2)))
+        view.mouseDragged(with: synthMouse(.leftMouseDragged, overviewPoint(r.maxX + 100)))
+        view.mouseUp(with: synthMouse(.leftMouseUp, overviewPoint(r.maxX + 100)))
+        let maxScroll = model.timeMap.outputDuration * view.geometry.pxPerSecond - view.geometry.width
+        guard abs(view.geometry.scrollX - maxScroll) < 0.01, model.project == before else {
+            throw TimelineOpsFail(description: "overview must clamp navigation without editing project")
+        }
+        view.mouseDown(with: synthMouse(.leftMouseDown, overviewPoint(r.minX)))
+        view.mouseDragged(with: synthMouse(.leftMouseDragged, overviewPoint(r.maxX)))
+        view.cancelOperation(nil)
+        guard abs(view.geometry.scrollX - maxScroll) < 0.01 else { throw TimelineOpsFail(description: "overview Escape failed") }
+    }
+    do {
+        let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+        defer { cleanup() }
+        for y in [py(view.laneMidY(.zoom)), py(view.laneMidY(.mask))] {
             for (start, end) in [(2.0, 8.0), (8.0, 2.0)] {
                 let before = model.project
                 let count = model.undoStepCount
                 view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(start), y: y)))
                 view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(end), y: y), modifiers: .command))
                 view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(end), y: y)))
-                let range = y == py(82) ? model.project.zooms.map { ($0.start, $0.end) } : model.project.masks.map { ($0.start, $0.end) }
+                let range = y == py(view.laneMidY(.zoom)) ? model.project.zooms.map { ($0.start, $0.end) } : model.project.masks.map { ($0.start, $0.end) }
                 guard range.count == 1, abs(range[0].0 - 2) < 0.01, abs(range[0].1 - 8) < 0.01,
                       model.undoStepCount == count + 1, model.project.checkInvariants() == nil else {
                     throw TimelineOpsFail(description: "drag-to-create range / undo failed")
@@ -2591,9 +3441,10 @@ private func runAccessibilitySelfTest(model: EditorModel, view: TimelineView) th
     model.edit("setup") { $0.zooms = [Zoom(start: 3, end: 8, scale: 2, mode: .manual)] }
     let zoomID = UUID(uuidString: model.project.zooms[0].id)!
 
-    guard let children = view.accessibilityChildren() as? [NSAccessibilityElement] else {
+    guard let allChildren = view.accessibilityChildren()?.compactMap({ $0 as? NSAccessibilityElement }) else {
         throw TimelineOpsFail(description: "accessibilityChildren() returned nil or the wrong element type")
     }
+    let children = allChildren.filter { $0.accessibilityRole() == .button }
     // One element for the clip, one for the zoom (no camera ⇒ no layout lane; no masks in the fixture).
     guard children.count == 2 else { throw TimelineOpsFail(description: "expected 2 accessibility children, got \(children.count)") }
 
@@ -2626,7 +3477,7 @@ private func runAccessibilitySelfTest(model: EditorModel, view: TimelineView) th
     guard model.undoStepCount == undoBefore + 1 else { throw TimelineOpsFail(description: "increment should push exactly one undo step") }
 
     // Decrement moves it back by one frame, one more undo step.
-    guard let freshChildren = view.accessibilityChildren() as? [NSAccessibilityElement],
+    guard let freshChildren = view.accessibilityChildren()?.compactMap({ $0 as? NSAccessibilityElement }),
           let freshZoom = freshChildren.first(where: { $0.accessibilityLabel()?.hasPrefix("Zoom") == true }) else {
         throw TimelineOpsFail(description: "no Zoom accessibility element after increment")
     }
@@ -2638,7 +3489,7 @@ private func runAccessibilitySelfTest(model: EditorModel, view: TimelineView) th
 
     // A clip's increment nudges its trailing edge forward one frame (SPEC §7.2: clip body drag
     // doesn't move the block, only edge-drag/trim does — the nudge reuses that exact path).
-    guard let clipUndoElement = (view.accessibilityChildren() as? [NSAccessibilityElement])?.first(where: { $0.accessibilityLabel()?.hasPrefix("Clip") == true }) else {
+    guard let clipUndoElement = (view.accessibilityChildren()?.compactMap({ $0 as? NSAccessibilityElement }))?.first(where: { $0.accessibilityLabel()?.hasPrefix("Clip") == true }) else {
         throw TimelineOpsFail(description: "no Clip accessibility element for the trim nudge")
     }
     let undoBeforeClip = model.undoStepCount
@@ -2742,9 +3593,9 @@ private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Doubl
     let undoBeforeSnap = model.undoStepCount
     view.keyDown(with: synthKey("s", keyCode: 1))
     let hoverX = px(10.08) // well within the 6 pt / 40 px-per-s = 0.15 s snap threshold of the playhead
-    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: hoverX, y: py(60))))
-    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: hoverX, y: py(60))))
-    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: hoverX, y: py(60))))
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: hoverX, y: py(view.laneMidY(.clip)))))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: hoverX, y: py(view.laneMidY(.clip)))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: hoverX, y: py(view.laneMidY(.clip)))))
     guard model.project.clips.count == beforeSnap.clips.count + 1 else {
         throw TimelineOpsFail(description: "split-mode click didn't split")
     }
@@ -2765,10 +3616,10 @@ private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Doubl
     // Unsnapped: far from every candidate (playhead 10, clip edges 0/10/20), the split lands at
     // the raw (unsnapped) hover time, not clamped to a candidate.
     let farX = px(15.5)
-    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: farX, y: py(60))))
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: farX, y: py(view.laneMidY(.clip)))))
     view.keyDown(with: synthKey("s", keyCode: 1)) // re-enter sticky mode (Esc above exited it)
-    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: farX, y: py(60))))
-    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: farX, y: py(60))))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: farX, y: py(view.laneMidY(.clip)))))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: farX, y: py(view.laneMidY(.clip)))))
     guard let farClip = model.project.clips.first(where: { abs($0.sourceEnd - 15.5) < 0.05 }) else {
         throw TimelineOpsFail(description: "unsnapped split didn't land near 15.5: \(model.project.clips.map(\.sourceEnd))")
     }
@@ -2780,9 +3631,9 @@ private func runSplitSelfTest(model: EditorModel, view: TimelineView, px: (Doubl
     guard model.project.clips.count == 1 else { throw TimelineOpsFail(description: "setup: expected a single clip before the ⌥ test") }
     view.flagsChanged(with: synthFlags(.option))
     let optionX = px(10)
-    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: optionX, y: py(60)), modifiers: .option))
-    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: optionX, y: py(60)), modifiers: .option))
-    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: optionX, y: py(60)), modifiers: .option))
+    view.mouseMoved(with: synthMouse(.mouseMoved, CGPoint(x: optionX, y: py(view.laneMidY(.clip))), modifiers: .option))
+    view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: optionX, y: py(view.laneMidY(.clip))), modifiers: .option))
+    view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: optionX, y: py(view.laneMidY(.clip))), modifiers: .option))
     guard model.project.clips.count == 2 else { throw TimelineOpsFail(description: "⌥-held click should split") }
     view.flagsChanged(with: synthFlags([]))
     let beforeReleased = model.project
@@ -2830,7 +3681,7 @@ private func runTrimRemoveRestoreSpeedSelfTest(model: EditorModel, view: Timelin
     let undoBeforeEscDrag = model.undoStepCount
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(0) + 3, y: py(40))))
     view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5), y: py(40))))
-    guard model.project.clips[0].sourceStart == 5 else { throw TimelineOpsFail(description: "mid-drag trim didn't apply live") }
+    guard model.project.clips.first(where: { !$0.isEmpty })?.sourceStart == 5, model.timeMap.outputDuration == 20 else { throw TimelineOpsFail(description: "trim must leave a gap without changing duration") }
     view.cancelOperation(nil)
     guard model.project == beforeEscDrag else { throw TimelineOpsFail(description: "Esc mid-drag didn't restore the pre-drag project") }
     guard model.undoStepCount == undoBeforeEscDrag else { throw TimelineOpsFail(description: "a cancelled drag pushed an undo step") }
@@ -2841,15 +3692,16 @@ private func runTrimRemoveRestoreSpeedSelfTest(model: EditorModel, view: Timelin
     model.edit("setup") { $0.clips = [Clip(sourceStart: 0, sourceEnd: 10, speed: 1), Clip(sourceStart: 10, sourceEnd: 20, speed: 1)] }
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(2), y: py(40))))
     view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(2), y: py(40))))
+    view.toggleRippleDelete() // Explicitly exercise gap-preserving deletion; ripple is the default.
     let undoBeforeRemove = model.undoStepCount
     view.keyDown(with: synthKey("", keyCode: 51)) // ⌫
-    guard model.project.clips.count == 1 else { throw TimelineOpsFail(description: "⌫ didn't remove the selected clip") }
+    guard model.project.clips[0].isEmpty, model.project.clips.count == 2, model.timeMap.outputDuration == 20 else { throw TimelineOpsFail(description: "Delete must leave a gap") }
     guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after remove") }
     guard model.undoStepCount == undoBeforeRemove + 1 else { throw TimelineOpsFail(description: "remove should push exactly one undo step") }
 
     // Speed: the real context menu (right-click on the clip), invoking the "2×" item's actual
     // target/action — not a shortcut around it.
-    guard let menu = view.menu(for: synthMouse(.rightMouseDown, CGPoint(x: px(5), y: py(40)))),
+    guard let menu = view.menu(for: synthMouse(.rightMouseDown, CGPoint(x: px(15), y: py(40)))),
           let speedItem = menu.items.first(where: { $0.title == "Speed" })?.submenu,
           let twoX = speedItem.items.first(where: { $0.title.hasPrefix("2") }) else {
         throw TimelineOpsFail(description: "no clip context menu / Speed submenu / 2× item")
@@ -2857,7 +3709,7 @@ private func runTrimRemoveRestoreSpeedSelfTest(model: EditorModel, view: Timelin
     let undoBeforeSpeed = model.undoStepCount
     guard let speedAction = twoX.action else { throw TimelineOpsFail(description: "2× item has no action") }
     _ = twoX.target?.perform(speedAction, with: twoX)
-    guard model.project.clips[0].speed == 2 else { throw TimelineOpsFail(description: "Speed ▸ 2× menu item didn't set speed") }
+    guard model.project.clips[1].speed == 2 else { throw TimelineOpsFail(description: "Speed ▸ 2× menu item didn't set speed") }
     guard model.undoStepCount == undoBeforeSpeed + 1 else { throw TimelineOpsFail(description: "speed change should push exactly one undo step") }
 
     // Ripple's new code path (interpolating from the pre-change geometry) must not crash a render.
@@ -2874,7 +3726,7 @@ private func runTrimRemoveRestoreSpeedSelfTest(model: EditorModel, view: Timelin
 @MainActor
 private func runZoomBlockSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
     // The fixture has no camera, so the zoom lane is the second row: ruler(22) + clip(44) = 66...98.
-    let zoomLaneY = py(82)
+    let zoomLaneY = py(view.laneMidY(.zoom))
 
     // Empty-lane click adds a zoom; no click event within ±1 s of source 10 ⇒ manual.
     let undoBeforeAdd = model.undoStepCount
@@ -3022,7 +3874,7 @@ private func runZoomBlockSelfTest(model: EditorModel, view: TimelineView, px: (D
 @MainActor
 private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
     // With a camera, lane order is ruler(22) + clip(44) + zoom(32) + layout(28) = 98...126.
-    let layoutLaneY = py(112)
+    let layoutLaneY = py(view.laneMidY(.keys))
 
     // Empty-lane click adds a `bubble` layout block starting at the click's source time
     // (the gap [0, 20) is wide open, so `addLayout`'s default 3 s block starts exactly at 10:
@@ -3030,23 +3882,23 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
     let undoBeforeAdd = model.undoStepCount
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(10), y: layoutLaneY)))
     view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(10), y: layoutLaneY)))
-    guard model.project.layouts.count == 1, model.project.layouts[0].kind == .bubble else {
-        throw TimelineOpsFail(description: "empty-lane click didn't add a bubble layout: \(model.project.layouts)")
+    guard model.project.keystrokeClips.count == 1, model.project.keystrokeClips[0].kind == .settings else {
+        throw TimelineOpsFail(description: "empty-lane click didn't add a bubble layout: \(model.project.keystrokeClips)")
     }
     guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after addLayout") }
     guard model.undoStepCount == undoBeforeAdd + 1 else { throw TimelineOpsFail(description: "addLayout should push exactly one undo step") }
-    guard let layoutID = UUID(uuidString: model.project.layouts[0].id), model.selection == [layoutID] else {
+    guard let layoutID = UUID(uuidString: model.project.keystrokeClips[0].id), model.selection == [layoutID] else {
         throw TimelineOpsFail(description: "the new layout isn't selected")
     }
-    let layout = model.project.layouts[0] // [10, 13)
+    let layout = model.project.keystrokeClips[0] // [10, 13)
 
     // Body drag = move: grab mid-block, drag so its start lands exactly at source 1.
     let grabX = px((layout.start + layout.end) / 2)
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: grabX, y: layoutLaneY)))
     let undoBeforeMove = model.undoStepCount
     view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(1 + (layout.end - layout.start) / 2), y: layoutLaneY)))
-    guard let movedLive = model.project.layouts.first(where: { $0.id == layout.id }), abs(movedLive.start - 1) < 0.01 else {
-        throw TimelineOpsFail(description: "move didn't track the mouse: \(String(describing: model.project.layouts.first { $0.id == layout.id }))")
+    guard let movedLive = model.project.keystrokeClips.first(where: { $0.id == layout.id }), abs(movedLive.start - 1) < 0.01 else {
+        throw TimelineOpsFail(description: "move didn't track the mouse: \(String(describing: model.project.keystrokeClips.first { $0.id == layout.id }))")
     }
     guard model.undoStepCount == undoBeforeMove else { throw TimelineOpsFail(description: "an in-progress move shouldn't push an undo step yet") }
     view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(1 + (layout.end - layout.start) / 2), y: layoutLaneY)))
@@ -3054,7 +3906,7 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
     guard model.undoStepCount == undoBeforeMove + 1 else { throw TimelineOpsFail(description: "move should push exactly one undo step") }
 
     // Esc mid-drag (AC-TL-6): restores the pre-drag project, pushes no undo step.
-    let moved = model.project.layouts.first { $0.id == layout.id }!
+    let moved = model.project.keystrokeClips.first { $0.id == layout.id }!
     let beforeEscDrag = model.project
     let undoBeforeEscDrag = model.undoStepCount
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px((moved.start + moved.end) / 2), y: layoutLaneY)))
@@ -3066,13 +3918,13 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
     view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5), y: layoutLaneY))) // the real mouse-up AppKit still delivers
 
     // Edge drag = resize.
-    let beforeResize = model.project.layouts.first { $0.id == layout.id }!
+    let beforeResize = model.project.keystrokeClips.first { $0.id == layout.id }!
     let undoBeforeResize = model.undoStepCount
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(beforeResize.end) - 3, y: layoutLaneY)))
     view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(beforeResize.start + 4), y: layoutLaneY)))
     view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(beforeResize.start + 4), y: layoutLaneY)))
-    guard let resized = model.project.layouts.first(where: { $0.id == layout.id }), abs(resized.end - (beforeResize.start + 4)) < 0.01 else {
-        throw TimelineOpsFail(description: "trailing-edge drag didn't resize: \(String(describing: model.project.layouts.first { $0.id == layout.id }))")
+    guard let resized = model.project.keystrokeClips.first(where: { $0.id == layout.id }), abs(resized.end - (beforeResize.start + 4)) < 0.01 else {
+        throw TimelineOpsFail(description: "trailing-edge drag didn't resize: \(String(describing: model.project.keystrokeClips.first { $0.id == layout.id }))")
     }
     guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after resize") }
     guard model.undoStepCount == undoBeforeResize + 1 else { throw TimelineOpsFail(description: "resize should push exactly one undo step") }
@@ -3081,7 +3933,7 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
     // menus" list has no entry for the layout lane, so there's no right-click item to exercise).
     let undoBeforeRemove = model.undoStepCount
     model.edit("Remove layout") { $0.removeBlock(layoutID) }
-    guard model.project.layouts.isEmpty else { throw TimelineOpsFail(description: "removeBlock didn't remove the layout") }
+    guard model.project.keystrokeClips.isEmpty else { throw TimelineOpsFail(description: "removeBlock didn't remove the layout") }
     guard model.project.checkInvariants() == nil else { throw TimelineOpsFail(description: "invariants broken after remove") }
     guard model.undoStepCount == undoBeforeRemove + 1 else { throw TimelineOpsFail(description: "remove should push exactly one undo step") }
 
@@ -3093,7 +3945,7 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
     guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
         throw TimelineOpsFail(description: "no bitmap rep with a hidden-kind layout block + ghost hovered")
     }
-    guard let children = view.accessibilityChildren() as? [NSAccessibilityElement],
+    guard let children = view.accessibilityChildren()?.compactMap({ $0 as? NSAccessibilityElement }),
           children.contains(where: { $0.accessibilityLabel() == "Layout, Hidden, 0.0 to 3.0 seconds" }) else {
         throw TimelineOpsFail(description: "no Layout accessibility element for the hidden-kind block")
     }
@@ -3106,7 +3958,7 @@ private func runLayoutBlockSelfTest(model: EditorModel, view: TimelineView, px: 
 @MainActor
 private func runMaskBlockSelfTest(model: EditorModel, view: TimelineView, px: (Double) -> CGFloat, py: (CGFloat) -> CGFloat) throws {
     // No camera ⇒ layout lane is 0 pt, so mask is the third lane: ruler(22) + clip(44) + zoom(32) = 98...126.
-    let maskLaneY = py(140)
+    let maskLaneY = py(view.laneMidY(.mask))
 
     // Empty-lane click adds a `mask`-kind block at the click's source time (the gap [0, 20) is
     // wide open, so `addMask`'s default 3 s block starts exactly at 10: [10, 13)), selects it,
@@ -3165,7 +4017,7 @@ private func runMaskBlockSelfTest(model: EditorModel, view: TimelineView, px: (D
     // `hitTest(at:)` takes a point directly in the view's own (flipped) local space — unlike the
     // `synthMouse`-fed events above, which go through `mouseDown`'s `convert(_:from: nil)` and so
     // need the pre-flipped `maskLaneY`; a direct `hitTest` call uses the un-converted local y (140).
-    let bodyPoint = CGPoint(x: px((resized.start + resized.end) / 2), y: 140)
+    let bodyPoint = CGPoint(x: px((resized.start + resized.end) / 2), y: view.laneMidY(.mask))
     guard case .blockBody(let hitID) = view.hitTest(at: bodyPoint), hitID == maskID else {
         throw TimelineOpsFail(description: "hitTest over the mask body didn't return .blockBody(maskID): \(view.hitTest(at: bodyPoint))")
     }
@@ -3186,7 +4038,7 @@ private func runMaskBlockSelfTest(model: EditorModel, view: TimelineView, px: (D
     guard view.bitmapImageRepForCachingDisplay(in: view.bounds) != nil else {
         throw TimelineOpsFail(description: "no bitmap rep with a highlight-kind mask block + ghost hovered")
     }
-    guard let children = view.accessibilityChildren() as? [NSAccessibilityElement],
+    guard let children = view.accessibilityChildren()?.compactMap({ $0 as? NSAccessibilityElement }),
           children.contains(where: { $0.accessibilityLabel() == "Highlight, opacity 50%, 0.0 to 3.0 seconds" }) else {
         throw TimelineOpsFail(description: "no Mask accessibility element for the highlight-kind block")
     }

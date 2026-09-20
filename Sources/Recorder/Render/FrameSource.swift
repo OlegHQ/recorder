@@ -47,7 +47,7 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
 
     var cameraTrack: AVMutableCompositionTrack?
     var cameraSource: AVAssetTrack?
-    if project.source.hasCamera {
+    if project.source.hasCamera && !project.cameraClips.isEmpty {
         let cameraAsset = AVURLAsset(url: package.appendingPathComponent("camera.mov"))
         cameraAssetKeepAlive = cameraAsset
         cameraSource = try await cameraAsset.loadTracks(withMediaType: .video).first
@@ -81,22 +81,43 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
     let timescale: CMTimeScale = 600
     var cursor = CMTime.zero
     for clip in project.clips {
-        let sourceRange = CMTimeRange(
-            start: CMTime(seconds: clip.sourceStart, preferredTimescale: timescale),
-            end: CMTime(seconds: clip.sourceEnd, preferredTimescale: timescale))
-        guard sourceRange.duration > .zero else { continue }
-
-        try screenTrack.insertTimeRange(sourceRange, of: screenSource, at: cursor)
-        if let cameraTrack, let cameraSource { try cameraTrack.insertTimeRange(sourceRange, of: cameraSource, at: cursor) }
-        if let micTrack, let micSource { try micTrack.insertTimeRange(sourceRange, of: micSource, at: cursor) }
-        if let systemTrack, let systemSource { try systemTrack.insertTimeRange(sourceRange, of: systemSource, at: cursor) }
-
         let outputDuration = CMTime(seconds: clip.outputDuration, preferredTimescale: timescale)
-        if clip.speed != 1 {
-            composition.scaleTimeRange(CMTimeRange(start: cursor, duration: sourceRange.duration), toDuration: outputDuration)
+        guard outputDuration > .zero else { continue }
+        // Gaps decode one valid placeholder frame; the compositor draws only the background.
+        let mediaDuration = clip.isEmpty ? min(project.source.duration, 1.0 / 30) : clip.mediaDuration
+        let range = CMTimeRange(start: CMTime(seconds: clip.isEmpty ? 0 : clip.mediaIn, preferredTimescale: timescale),
+                                duration: CMTime(seconds: mediaDuration, preferredTimescale: timescale))
+        try screenTrack.insertTimeRange(range, of: screenSource, at: cursor)
+        screenTrack.scaleTimeRange(CMTimeRange(start: cursor, duration: range.duration), toDuration: outputDuration)
+        for (track, source) in [(micTrack, micSource), (systemTrack, systemSource)] {
+            guard let track, let source else { continue }
+            if clip.isEmpty { track.insertEmptyTimeRange(CMTimeRange(start: cursor, duration: outputDuration)) }
+            else {
+                try track.insertTimeRange(range, of: source, at: cursor)
+                track.scaleTimeRange(CMTimeRange(start: cursor, duration: range.duration), toDuration: outputDuration)
+            }
         }
         cursor = cursor + outputDuration
     }
+
+    // Compose camera independently. Screen cuts and gaps never remove camera footage.
+    if let cameraTrack, let cameraSource {
+        let map = TimeMap(project.clips)
+        for camera in project.cameraClips {
+            for clip in project.clips {
+                let lo = max(camera.start, clip.sourceStart), hi = min(camera.end, clip.sourceEnd)
+                guard hi > lo, let out = map.outputTime(atSource: lo) else { continue }
+                let range = CMTimeRange(start: CMTime(seconds: camera.mediaStart + (lo - camera.start) * (camera.mediaRate ?? 1), preferredTimescale: timescale),
+                                        duration: CMTime(seconds: (hi - lo) * (camera.mediaRate ?? 1), preferredTimescale: timescale))
+                let at = CMTime(seconds: out, preferredTimescale: timescale)
+                try cameraTrack.insertTimeRange(range, of: cameraSource, at: at)
+                cameraTrack.scaleTimeRange(CMTimeRange(start: at, duration: range.duration),
+                                           toDuration: CMTime(seconds: (hi - lo) / clip.timeScale, preferredTimescale: timescale))
+            }
+        }
+    }
+
+    withExtendedLifetime((screenAssetKeepAlive, cameraAssetKeepAlive, micAssetKeepAlive, systemAssetKeepAlive)) {}
 
     let audioMix = makeAudioMix(project: project, micTrack: micTrack, systemTrack: systemTrack)
     // `audioTimePitchAlgorithm = .spectral` (SPEC §6.2) is a property of the AVPlayerItem/

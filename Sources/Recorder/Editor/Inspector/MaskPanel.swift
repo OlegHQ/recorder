@@ -16,27 +16,27 @@ struct MaskPanel: View {
             InspectorSelectionHeader(title: "Mask") { deselect() }
 
             if let mask {
+                EffectPreviewControls(model: model, start: mask.start, end: mask.end, editsRegion: true,
+                                      regionHint: "Mask hidden; preview unzoomed for positioning.")
+                Divider().padding(.vertical, 4)
                 HStack(spacing: 8) {
                     Text("Kind")
-                        .font(.system(size: 13))
+                        .font(Font(Theme.bodyFont))
                         .foregroundStyle(Theme.textSecondaryColor)
                         .frame(width: 60, alignment: .leading)
-                    Picker("", selection: kindBinding) {
-                        Text("Cover").tag(Mask.Kind.mask)
-                        Text("Blur").tag(Mask.Kind.blur)
-                        Text("Highlight").tag(Mask.Kind.highlight)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                    TechSegmentedControl(selection: kindBinding, options: [
+                        (.mask, "Cover"), (.blur, "Blur"), (.highlight, "Highlight"),
+                    ])
                 }
 
-                Text("Drag the rectangle in the preview to resize")
-                    .font(.system(size: 11))
+                Text(model.previewShowsResult ? "Switch to Edit region to resize the rectangle." : "Drag the rectangle in the preview to resize")
+                    .font(Font(Theme.captionFont))
                     .foregroundStyle(Theme.textSecondaryColor)
 
                 LabeledSlider(title: "Opacity", value: fieldBinding(\.opacity), range: 0...1, defaultValue: 0.8,
                               format: { String(format: "%.0f%%", $0 * 100) }, onEditingChanged: gesture("Mask opacity"))
 
+                Divider().padding(.vertical, 4)
                 Toggle("Smooth transition", isOn: Binding(
                     get: { mask.transition > 0 },
                     set: { enabled in edit { $0.transition = enabled ? 0.25 : 0 } }))
@@ -46,10 +46,11 @@ struct MaskPanel: View {
                 }
                 if mask.kind != .highlight {
                     Text("For complete redaction, choose Cover at 100% opacity with transitions off.")
-                        .font(.system(size: 11)).foregroundStyle(Theme.textSecondaryColor)
+                        .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
                 }
 
                 Button("Remove", role: .destructive, action: remove)
+                    .buttonStyle(TechButtonStyle(kind: .danger, compact: true))
             }
         }
     }

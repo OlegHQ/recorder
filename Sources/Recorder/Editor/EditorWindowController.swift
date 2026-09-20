@@ -10,8 +10,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 import RecorderCore
 
-/// The editor's main window (SPEC §6.1 mockup): a top bar over preview | 300 pt inspector over a
-/// timeline, laid out manually (no `NSSplitView`), timeline height draggable 160–420 pt, `window` is
+/// The editor's main window: document/navigation bars above preview + transport + timeline,
+/// with a full-height inspector alongside. The timeline fits its lanes and can be enlarged; `window` is
 /// `.fullSizeContentView` so that top bar draws under the native titlebar strip (T-307 fix).
 /// Opened by `RecordingController.finish` and the library through `open(package:)`.
 /// `inspectorView`/`timelineView` host `InspectorView` and `TimelineView` (+ its `TimelineToolbar`)
@@ -30,7 +30,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     private let rootView: EditorRootView
     private var titleField: NSTextField!
-    private var aspectPopUp: NSPopUpButton!
     private var saveStatusButton: NSButton!
     // Typed handles onto the two swappable views above, kept alongside them so the menu actions
     // (T-311) below can reach real API (`InspectorView.init(initialTab:)`, `TimelineView.setZoom`)
@@ -39,17 +38,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     // T-610: not `private` — the state snapshot dump (`StateSnapshot.swift`) reads its `geometry`/
     // debug accessors directly instead of duplicating a second way to reach the timeline.
     let coreTimelineView: TimelineView
-    /// T-610: which of the 6 inspector tabs `View ▸ 1–6`/`selectInspectorTab` last selected — a
-    /// ponytail-scoped stand-in for "the tab actually on screen": SwiftUI's own tab-button clicks
-    /// inside `InspectorView` are a private `@State` with no callback out, so a click made without
-    /// going through the menu isn't reflected here. Good enough for a debugging snapshot; the
-    /// selection panel case (clip/zoom/layout/mask) is computed separately in `StateSnapshot` from
-    /// `model.selection`/`selectedClip`, which IS always accurate.
-    private(set) var currentInspectorTab: InspectorView.Tab = .background
+    var currentInspectorTab: InspectorView.Tab { model.inspectorTab }
     // T-601: kept alive here (its own `view` is only weakly referenced by `PreviewView`'s subview
     // list) and re-laid-out on every preview resize (`preview.onResize` below).
     private let maskOverlay: MaskRectOverlay
 
+    private static var openingWindows: [URL: OpeningEditor] = [:]
     private static var openWindows: [URL: EditorWindowController] = [:]
     // T-610: every constructed controller, including ones from `makeOffscreen` (never added to
     // `openWindows` — that dict is only the URL-keyed "focus the existing window instead of
@@ -60,9 +54,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     /// T-610: every constructed, still-alive editor window controller — for the state snapshot dump.
     static var allOpen: [EditorWindowController] { liveControllers.compactMap(\.value) }
 
-    private init(packageURL: URL, project: Project, events: EventLog, orderFront: Bool = true) {
-        let model = EditorModel(packageURL: packageURL, project: project, events: events)
-        let preview = PreviewView(model: model)
+    private init(packageURL: URL, project: Project, events: EventLog, orderFront: Bool = true,
+                 loadingWindow: NSWindow? = nil, paths: (CursorPath, CameraPath)? = nil, compositor: Compositor? = nil) {
+        let model = EditorModel(packageURL: packageURL, project: project, events: events, paths: paths)
+        let preview = PreviewView(model: model, preparedCompositor: compositor)
         let transport = NSHostingView(rootView: TransportBar(model: model, preview: preview))
         let inspector = NSHostingView(rootView: InspectorView(model: model))
 
@@ -92,9 +87,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         self.timelineView = timeline
         self.inspectorHostingView = inspector
         self.coreTimelineView = timelineView
-        self.rootView = EditorRootView(topBar: NSView(), preview: preview, transport: transport, inspector: inspector, timeline: timeline)
+        self.rootView = EditorRootView(topBar: NSView(), navigation: NSHostingView(rootView: EditorCompositionNavigation(model: model)), preview: preview, transport: transport, inspector: inspector, timeline: timeline)
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
+        let window = loadingWindow ?? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
                                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                backing: .buffered, defer: false)
         window.minSize = NSSize(width: 1100, height: 700)
@@ -113,7 +108,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         rootView.topBar = buildTopBar()
 
         window.delegate = self
-        observeAspect()
         if orderFront {
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(preview)
@@ -127,25 +121,71 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     /// Opens (or focuses, if already open) the editor for `package`. Dev/HUMAN entry point:
     /// `Recorder --open <package>`; `RecordingController.finish`/the library call this too.
     @discardableResult
-    static func open(package: URL) -> EditorWindowController? {
+    static func open(package: URL) -> Task<EditorWindowController?, Never> {
         let key = package.standardizedFileURL
         if let existing = openWindows[key] {
             existing.focus()
-            return existing
+            return Task { existing }
         }
-        guard let project = try? Project.load(from: key.appendingPathComponent("project.json")) else { return nil }
-        let eventsURL = key.appendingPathComponent("events.json")
-        let events = (try? JSONDecoder().decode(EventLog.self, from: Data(contentsOf: eventsURL))) ?? EventLog()
-        let controller = EditorWindowController(packageURL: key, project: project, events: events)
-        openWindows[key] = controller
-        controller.focus()
-        return controller
+        if let opening = openingWindows[key] {
+            opening.window?.deminiaturize(nil)
+            opening.window?.makeKeyAndOrderFront(nil)
+            return opening.task!
+        }
+        let opening = OpeningEditor(package: key)
+        openingWindows[key] = opening
+        opening.onClose = { openingWindows.removeValue(forKey: key) }
+        opening.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+        // Disk access, JSON decoding and 240 Hz motion simulation never run on the UI thread.
+        let preparation = Task.detached(priority: .userInitiated) {
+            let project = try Project.load(from: key.appendingPathComponent("project.json"))
+            try Task.checkCancellation()
+            let eventsURL = key.appendingPathComponent("events.json")
+            let events = (try? JSONDecoder().decode(EventLog.self, from: Data(contentsOf: eventsURL))) ?? EventLog()
+            try Task.checkCancellation()
+            let paths = EditorModel.buildPaths(project: project, events: events)
+            try Task.checkCancellation()
+            guard let device = MTLCreateSystemDefaultDevice() else { throw CocoaError(.featureUnsupported) }
+            let compositor = try Compositor(device: device, package: key)
+            try Task.checkCancellation()
+            return (project, events, paths, compositor)
+        }
+        opening.task = Task { @MainActor [weak opening] in
+            do {
+                let (project, events, paths, compositor) = try await withTaskCancellationHandler {
+                    try await preparation.value
+                } onCancel: { preparation.cancel() }
+                try Task.checkCancellation()
+                guard let opening, let window = opening.window else { return nil }
+                let controller = EditorWindowController(packageURL: key, project: project, events: events,
+                                                        orderFront: false, loadingWindow: window, paths: paths, compositor: compositor)
+                openWindows[key] = controller
+                openingWindows.removeValue(forKey: key)
+                // Keep the same native window and its position; don't steal focus after loading.
+                if window.isKeyWindow { window.makeFirstResponder(controller.previewView) }
+                if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    controller.rootView.alphaValue = 0
+                    NSAnimationContext.runAnimationGroup({ context in
+                        context.duration = Theme.Motion.hover
+                        controller.rootView.animator().alphaValue = 1
+                    }, completionHandler: nil)
+                }
+                return controller
+            } catch is CancellationError {
+                return nil
+            } catch {
+                opening?.showError(error)
+                return nil
+            }
+        }
+        return opening.task!
     }
 
     private func focus() {
         // Activation-policy changes after Stop settle on the next run-loop turn.
         DispatchQueue.main.async { [self] in
-            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            NSRunningApplication.current.activate(options: [.activateAllWindows])
             window?.deminiaturize(nil)
             window?.makeKeyAndOrderFront(nil)
             window?.makeFirstResponder(previewView)
@@ -172,7 +212,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         Self.openWindows.removeValue(forKey: model.packageURL)
     }
 
-    // MARK: - Top bar (SPEC §6.1: ‹ Projects · title · Auto ▾ · ⌗ Crop · ⬆ Export)
+    // MARK: - Document bar (Projects, title, save status, Export)
 
     /// T-307 fix (coordinator report: the titlebar rendered completely empty, live and offscreen
     /// alike): `NSTitlebarAccessoryViewController` with `.layoutAttribute = .right` never reliably
@@ -192,21 +232,30 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     private func buildTopBar() -> NSView {
         let stack = buildTopBarStack()
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let bar = NSView()
+        let bar = EditorTitleBar()
+        TechAppKit.styleSurface(bar)
         bar.addSubview(stack)
+        let rule = TechAppKit.rule()
+        rule.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(rule)
         NSLayoutConstraint.activate([
-            // 78 pt clears the traffic lights (only floating over our content now that the window
-            // is `.fullSizeContentView`), matching the mockup's `● ● ●   ‹ Projects` spacing.
-            stack.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 78),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: bar.trailingAnchor, constant: -16),
+            stack.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 88),
+            stack.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -16),
             stack.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            rule.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            rule.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            rule.bottomAnchor.constraint(equalTo: bar.bottomAnchor),
+            rule.heightAnchor.constraint(equalToConstant: 1),
         ])
         return bar
     }
 
     private func buildTopBarStack() -> NSStackView {
-        let back = NSButton(title: "‹ Projects", target: self, action: #selector(backTapped))
-        styleAsText(back)
+        let back = TechAppKit.button("‹ Projects", kind: .quiet, compact: true,
+                                     target: self, action: #selector(backTapped))
+        let separator = TechAppKit.rule()
+        separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
+        separator.heightAnchor.constraint(equalToConstant: 18).isActive = true
 
         // Root cause of the top bar showing no title (T-506/T-609 investigation): `NSTextField`
         // only computes a real `intrinsicContentSize` while `isEditable == false` — an editable field
@@ -219,66 +268,49 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let title = TitleField(string: model.project.title)
         title.isBordered = false
         title.drawsBackground = false
-        title.font = Theme.bodyFont
+        title.font = Theme.headingFont(16)
         title.textColor = Theme.textPrimary
         title.isEditable = false
         title.target = self
         title.action = #selector(titleCommitted(_:))
         titleField = title
 
-        let aspect = NSPopUpButton(frame: .zero, pullsDown: false)
-        aspect.addItems(withTitles: Self.aspectTitles.map(\.1))
-        if let index = Self.aspectTitles.firstIndex(where: { $0.0 == model.project.output.aspect }) {
-            aspect.selectItem(at: index)
-        }
-        aspect.target = self
-        aspect.action = #selector(aspectChanged(_:))
-        aspectPopUp = aspect
-
-        let crop = NSButton(title: "⌗ Crop", target: self, action: #selector(cropTapped))
-        styleAsText(crop)
-
-        // T-506: wired directly to `self` (like the `⌗ Crop` button above) since it's this window's
+        // T-506: wired directly to `self` since it's this window's
         // own control; the Export menu's items reach the same `exportTapped(_:)` through the
         // responder chain instead (`target = nil`, `AppDelegate.buildMainMenu`).
-        let export = NSButton(title: "⬆ Export", target: self, action: #selector(exportTapped(_:)))
-        export.bezelStyle = .rounded
-        export.controlSize = .large
-        export.isBordered = false
-        export.wantsLayer = true
-        export.layer?.backgroundColor = Theme.accent.cgColor
-        export.layer?.cornerRadius = 8
-        export.contentTintColor = .white
-        export.font = .systemFont(ofSize: 14, weight: .semibold)
+        let export = TechAppKit.button("⬆ Export", kind: .primary,
+                                       target: self, action: #selector(exportTapped(_:)))
         export.widthAnchor.constraint(greaterThanOrEqualToConstant: 112).isActive = true
         export.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
-        let status = NSButton(title: model.saveStatus, target: self, action: #selector(saveDocument(_:)))
-        styleAsText(status)
-        status.font = .systemFont(ofSize: 11)
+        let status = TechAppKit.button(model.saveStatus, kind: .quiet, compact: true,
+                                       target: self, action: #selector(saveDocument(_:)))
+        status.font = Theme.captionFont
         saveStatusButton = status
-        observeSaveStatus()
-        let stack = NSStackView(views: [back, title, status, aspect, crop, export])
+        observeDocumentHeader()
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        spacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 8).isActive = true
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        title.lineBreakMode = .byTruncatingTail
+        let stack = NSStackView(views: [back, separator, title, spacer, status, export])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 14
+        stack.spacing = 16
         return stack
     }
 
-    private func observeSaveStatus() {
+    private func observeDocumentHeader() {
         withObservationTracking {
+            let title = model.project.title
+            if !titleField.isEditable { titleField.stringValue = title }
+            window?.title = title
             saveStatusButton.title = model.saveStatus
             saveStatusButton.contentTintColor = model.saveError == nil ? Theme.textSecondary : .systemRed
             saveStatusButton.toolTip = model.saveError ?? "Changes save automatically. Click to save now."
         } onChange: { [weak self] in
-            DispatchQueue.main.async { self?.observeSaveStatus() }
+            DispatchQueue.main.async { self?.observeDocumentHeader() }
         }
-    }
-
-    private func styleAsText(_ button: NSButton) {
-        button.isBordered = false
-        button.bezelStyle = .inline
-        button.contentTintColor = Theme.accentText
     }
 
     @objc private func titleCommitted(_ sender: NSTextField) {
@@ -290,7 +322,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         window?.title = newTitle
     }
 
-    @objc private func backTapped() { Library.show() }
+    @objc func backTapped() {
+        if model.isPlaying { previewView.togglePlayPause() }
+        model.saveNow()
+        window?.orderOut(nil)
+        Library.show()
+    }
 
     // Not `private`: also the View ▸ Crop… menu item's action (`buildMainMenu`, `AppDelegate.swift`).
     @objc func cropTapped() {
@@ -379,7 +416,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         }
         let screenTexture = current.flatMap { textureCache.texture(from: $0) }
 
-        let state = await makeFrameState(model: model, outputTime: outputTime, screen: screenTexture, camera: nil, size: outputSize)
+        let state = makeFrameState(model: model, outputTime: outputTime, screen: screenTexture, camera: nil, size: outputSize)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared
@@ -389,7 +426,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         }
         compositor.render(state, to: target, commandBuffer: commandBuffer)
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        await commandBuffer.completed()
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
 
@@ -410,40 +447,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         guard CGImageDestinationFinalize(dest) else { throw RenderFail(description: "PNG encode failed") }
         return data as Data
     }
-
-    /// T-309: the `Auto ▾` popup edits `project.output.aspect` through `model.edit` (one undo step);
-    /// `observeAspect` below keeps the popup's selection in sync when that value changes some other
-    /// way (undo/redo).
-    @objc private func aspectChanged(_ sender: NSPopUpButton) {
-        let index = sender.indexOfSelectedItem
-        guard Self.aspectTitles.indices.contains(index) else { return }
-        let aspect = Self.aspectTitles[index].0
-        guard aspect != model.project.output.aspect else { return }
-        model.edit("Aspect") { $0.output.aspect = aspect }
-    }
-
-    private func observeAspect() {
-        withObservationTracking {
-            _ = model.project.output.aspect
-        } onChange: { [weak self] in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.syncAspectPopUp()
-                self.observeAspect()
-            }
-        }
-    }
-
-    private func syncAspectPopUp() {
-        guard let index = Self.aspectTitles.firstIndex(where: { $0.0 == model.project.output.aspect }) else { return }
-        aspectPopUp.selectItem(at: index)
-    }
-
-    private static let aspectTitles: [(Output.Aspect, String)] = [
-        (.auto, "Auto · Source"), (.r16x9, "16:9 · Full HD / YouTube"),
-        (.r9x16, "9:16 · Stories / Reels"), (.r1x1, "1:1 · Social / X (Twitter)"),
-        (.r4x3, "4:3 · Classic"), (.r16x10, "16:10 · Mac display"),
-    ]
 
     // MARK: - Menu actions (T-311)
 
@@ -490,16 +493,21 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     @objc func performUndo(_ sender: Any?) { model.undo() }
     @objc func performRedo(_ sender: Any?) { model.redo() }
 
+    @objc func cut(_ sender: Any?) { coreTimelineView.cut(sender) }
+    @objc func copy(_ sender: Any?) { coreTimelineView.copy(sender) }
+    @objc func paste(_ sender: Any?) { coreTimelineView.paste(sender) }
+
     @objc func splitAtPlayhead(_ sender: Any?) {
-        model.edit("Split") { $0.split(atOutput: model.playhead) }
+        coreTimelineView.menuSplitAtPlayhead()
     }
 
     /// `⌫`: the selected clip, or every selected zoom/layout/mask block. Mirrors
     /// `TimelineView.removeSelection` (private there — this file can't call it, see T-311's file
     /// boundary — so the same few lines are reimplemented here for the menu/responder-chain path).
     @objc func removeSelected(_ sender: Any?) {
-        if let i = model.selectedClip {
-            model.edit("Remove Clip") { _ = $0.removeClip(i) }
+        if !model.selectedClips.isEmpty {
+            let indices = model.selectedClips
+            model.edit("Remove Clips") { $0.deleteClips(indices) }
             model.selectedClip = nil
         } else if !model.selection.isEmpty {
             let ids = model.selection
@@ -508,10 +516,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         }
     }
 
-    /// `Z`: adds a zoom at the playhead's SOURCE time (via `TimeMap`), mode `.auto`.
+    /// `Z`: adds and selects a zoom at the playhead’s source time.
     @objc func addZoomAtPlayhead(_ sender: Any?) {
         let s = model.timeMap.sourceTime(atOutput: model.playhead)
-        model.edit("Add Zoom") { _ = $0.addZoom(atSource: s, mode: .auto) }
+        model.addZoom(atSource: s)
     }
 
     /// T-410 wire: regenerates `project.zooms` from the recording's click events.
@@ -558,13 +566,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         return merged
     }
 
-    /// View ▸ 1–6: reconstructs `InspectorView` with a new `initialTab` (its existing public API,
-    /// the same one the `inspector-panels` selftest uses) — `tag` carries `Tab.rawValue`, set when
-    /// `AppDelegate.buildMainMenu` builds these items.
+    /// View ▸ 1–6 shares the visible navigation's state without clearing timeline selection.
     @objc func selectInspectorTab(_ sender: NSMenuItem) {
         guard let tab = InspectorView.Tab(rawValue: sender.tag) else { return }
-        inspectorHostingView.rootView = InspectorView(model: model, initialTab: tab)
-        currentInspectorTab = tab
+        model.showProjectInspector(tab)
     }
 
     /// View ▸ Zoom In/Out/Fit: `TimelineView`'s own public zoom API (its ⌘=/⌘- keyDown handling
@@ -594,6 +599,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         case #selector(performRedo):
             item.title = model.redoName.map { "Redo \($0)" } ?? "Redo"
             return model.redoName != nil
+        case #selector(cut(_:)), #selector(copy(_:)):
+            return !isTextEditing && coreTimelineView.canCopySelection
+        case #selector(paste(_:)):
+            return !isTextEditing && coreTimelineView.canPasteSelection
         case #selector(splitAtPlayhead), #selector(addZoomAtPlayhead), #selector(selectInspectorTab(_:)):
             return !isTextEditing
         case #selector(removeSelected):
@@ -626,25 +635,52 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 }
 
-/// The top bar's project title (SPEC §6.1: "`My Recording ▾` (click = rename)"). A plain
-/// `NSTextField` only reports a real `intrinsicContentSize` while non-editable (see the root-cause
-/// comment in `EditorWindowController.buildTopBarStack`), so this starts as a label and switches
-/// itself into edit mode on click, handing focus to the field editor with the text pre-selected.
-private final class TitleField: NSTextField {
+/// Empty titlebar space keeps native dragging and double-click window enlargement.
+private final class EditorTitleBar: NSView {
+    override func layout() {
+        super.layout()
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window?.standardWindowButton(kind), let parent = button.superview else { continue }
+            let center = convert(NSPoint(x: bounds.midX, y: bounds.midY), to: parent)
+            button.setFrameOrigin(NSPoint(x: button.frame.minX, y: center.y - button.frame.height / 2))
+        }
+    }
+
+    override var mouseDownCanMoveWindow: Bool { true }
     override func mouseDown(with event: NSEvent) {
-        guard isEditable else {
-            isEditable = true
-            window?.makeFirstResponder(self)
-            currentEditor()?.selectAll(nil)
+        if event.clickCount == 2 { window?.performZoom(nil) }
+        else { window?.performDrag(with: event) }
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit is NSControl ? hit : (hit == nil ? nil : self)
+    }
+}
+
+/// Delay rename until a second click can no longer turn the gesture into window enlargement.
+private final class TitleField: NSTextField {
+    private var pendingRename: DispatchWorkItem?
+    override func mouseDown(with event: NSEvent) {
+        pendingRename?.cancel()
+        if event.clickCount == 2 {
+            window?.performZoom(nil)
             return
         }
-        super.mouseDown(with: event)
+        guard !isEditable else { super.mouseDown(with: event); return }
+        let rename = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.isEditable = true
+            self.window?.makeFirstResponder(self)
+            self.currentEditor()?.selectAll(nil)
+        }
+        pendingRename = rename
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: rename)
     }
 }
 
 /// SPEC §7.1: the timeline's 32 pt toolbar row sits above the ruler/lanes. Manual layout (like
 /// `EditorRootView`) — the toolbar never resizes, the timeline fills the rest.
-private final class TimelineContainerView: NSView {
+final class TimelineContainerView: NSView {
     static let toolbarHeight: CGFloat = 32
 
     let toolbar: TimelineToolbar
@@ -674,29 +710,38 @@ private final class TimelineContainerView: NSView {
     }
 }
 
-/// Manual layout (no `NSSplitView`): a top bar (SPEC §6.1's `‹ Projects … ⬆ Export` row, drawn under
-/// the native titlebar — `window` is `.fullSizeContentView`, see `EditorWindowController
-/// .configureFullSizeTitlebar`) over preview + transport bar | 300 pt inspector, over the timeline;
-/// the divider between them drags the timeline's height (160–420 pt).
+/// Manual workspace layout: a full-height inspector alongside preview, transport and a lane-fitted
+/// timeline. The divider enlarges the timeline without moving the inspector.
 private final class EditorRootView: NSView {
-    static let inspectorWidth: CGFloat = 300
-    static let topBarHeight: CGFloat = 44
+    static let inspectorWidth: CGFloat = InspectorView.width
+    static let topBarHeight: CGFloat = 48
+    static let navigationHeight: CGFloat = 36
     static let transportHeight: CGFloat = 44
     static let dividerHeight: CGFloat = 6
     static let timelineRange: ClosedRange<CGFloat> = 160...420
 
     var topBar: NSView { didSet { swap(oldValue, for: topBar) } }
+    let navigation: NSView
     let preview: NSView
     let transport: NSView
     var inspector: NSView { didSet { swap(oldValue, for: inspector) } }
     var timeline: NSView { didSet { swap(oldValue, for: timeline) } }
 
-    private var timelineHeight: CGFloat = 220
+    private var timelineUpperBound: CGFloat {
+        max(Self.timelineRange.lowerBound, min(Self.timelineRange.upperBound,
+            bounds.height - Self.topBarHeight - Self.navigationHeight - Self.dividerHeight - 180))
+    }
+    private var timelineHeight: CGFloat?
+    private var fittedTimelineHeight: CGFloat {
+        (timeline as? TimelineContainerView).map { $0.timeline.contentHeight + TimelineContainerView.toolbarHeight + 26 } ?? 200
+    }
+    private var resolvedTimelineHeight: CGFloat { timelineHeight ?? fittedTimelineHeight }
     private var dragStartHeight: CGFloat?
     private var dragStartY: CGFloat?
 
-    init(topBar: NSView, preview: NSView, transport: NSView, inspector: NSView, timeline: NSView) {
+    init(topBar: NSView, navigation: NSView = NSView(), preview: NSView, transport: NSView, inspector: NSView, timeline: NSView) {
         self.topBar = topBar
+        self.navigation = navigation
         self.preview = preview
         self.transport = transport
         self.inspector = inspector
@@ -704,7 +749,7 @@ private final class EditorRootView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = Theme.bgWindow.cgColor
-        for view in [topBar, preview, transport, inspector, timeline] { addSubview(view) }
+        for view in [topBar, navigation, preview, transport, inspector, timeline] { addSubview(view) }
     }
 
     @available(*, unavailable)
@@ -723,31 +768,40 @@ private final class EditorRootView: NSView {
 
     override func layout() {
         super.layout()
-        let clampedTimeline = min(max(timelineHeight, Self.timelineRange.lowerBound), Self.timelineRange.upperBound)
+        let clampedTimeline = min(max(resolvedTimelineHeight, max(Self.timelineRange.lowerBound, fittedTimelineHeight)), timelineUpperBound)
         let available = max(0, bounds.height - clampedTimeline - Self.dividerHeight)
-        let rowHeight = max(0, available - Self.topBarHeight)
+        let rowHeight = max(0, available - Self.topBarHeight - Self.navigationHeight)
         let previewHeight = max(0, rowHeight - Self.transportHeight)
         let previewWidth = max(0, bounds.width - Self.inspectorWidth)
         let rowY = clampedTimeline + Self.dividerHeight
 
-        topBar.frame = NSRect(x: 0, y: rowY + rowHeight, width: bounds.width, height: Self.topBarHeight)
-        timeline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: clampedTimeline)
+        topBar.frame = NSRect(x: 0, y: rowY + rowHeight + Self.navigationHeight, width: bounds.width, height: Self.topBarHeight)
+        navigation.frame = NSRect(x: 0, y: rowY + rowHeight, width: bounds.width, height: Self.navigationHeight)
+        timeline.frame = NSRect(x: 0, y: 0, width: previewWidth, height: clampedTimeline)
         transport.frame = NSRect(x: 0, y: rowY, width: previewWidth, height: Self.transportHeight)
         preview.frame = NSRect(x: 0, y: rowY + Self.transportHeight, width: previewWidth, height: previewHeight)
-        inspector.frame = NSRect(x: previewWidth, y: rowY, width: Self.inspectorWidth, height: rowHeight)
+        inspector.frame = NSRect(x: previewWidth, y: 0, width: Self.inspectorWidth, height: rowHeight + rowY)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let y = min(max(resolvedTimelineHeight, max(Self.timelineRange.lowerBound, fittedTimelineHeight)), timelineUpperBound)
+        Theme.strokeStrong.setFill()
+        NSRect(x: 0, y: y + Self.dividerHeight / 2, width: max(0, bounds.width - Self.inspectorWidth), height: 1).fill()
     }
 
     // MARK: - Divider drag (timeline height, 160–420 pt)
 
     private func dividerHitRange() -> ClosedRange<CGFloat> {
-        let clamped = min(max(timelineHeight, Self.timelineRange.lowerBound), Self.timelineRange.upperBound)
+        let clamped = min(max(resolvedTimelineHeight, max(Self.timelineRange.lowerBound, fittedTimelineHeight)), timelineUpperBound)
         return (clamped - 3)...(clamped + Self.dividerHeight + 3)
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard dividerHitRange().contains(point.y) else { super.mouseDown(with: event); return }
-        dragStartHeight = min(max(timelineHeight, Self.timelineRange.lowerBound), Self.timelineRange.upperBound)
+        guard point.x < bounds.width - Self.inspectorWidth, dividerHitRange().contains(point.y) else { super.mouseDown(with: event); return }
+        dragStartHeight = min(max(resolvedTimelineHeight, max(Self.timelineRange.lowerBound, fittedTimelineHeight)), timelineUpperBound)
         dragStartY = point.y
     }
 
@@ -755,7 +809,7 @@ private final class EditorRootView: NSView {
         guard let dragStartHeight, let dragStartY else { super.mouseDragged(with: event); return }
         let point = convert(event.locationInWindow, from: nil)
         let proposed = dragStartHeight + (point.y - dragStartY)
-        timelineHeight = min(max(proposed, Self.timelineRange.lowerBound), Self.timelineRange.upperBound)
+        timelineHeight = min(max(proposed, max(Self.timelineRange.lowerBound, fittedTimelineHeight)), timelineUpperBound)
         needsLayout = true
     }
 
@@ -766,11 +820,85 @@ private final class EditorRootView: NSView {
 
     override func resetCursorRects() {
         let range = dividerHitRange()
-        addCursorRect(NSRect(x: 0, y: range.lowerBound, width: bounds.width, height: range.upperBound - range.lowerBound), cursor: .resizeUpDown)
+        addCursorRect(NSRect(x: 0, y: range.lowerBound, width: max(0, bounds.width - Self.inspectorWidth), height: range.upperBound - range.lowerBound), cursor: .resizeUpDown)
     }
 }
 
 /// T-610: a weak box so `EditorWindowController.liveControllers` doesn't keep closed windows alive.
 private struct WeakEditorWindowController {
     weak var value: EditorWindowController?
+}
+
+/// A real editor-sized window exists before any project data is read. It owns cancellation until
+/// the ready editor takes over the same window; no placeholder project can ever be autosaved.
+@MainActor private final class OpeningEditor: NSWindowController, NSWindowDelegate {
+    var task: Task<EditorWindowController?, Never>?
+    var onClose: (() -> Void)?
+    private let package: URL
+
+    init(package: URL) {
+        self.package = package
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.minSize = NSSize(width: 1100, height: 700)
+        window.isReleasedWhenClosed = false
+        window.title = package.deletingPathExtension().lastPathComponent
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = Theme.bgWindow
+        window.appearance = NSAppearance(named: .darkAqua)
+        super.init(window: window)
+        window.delegate = self
+        showStatus(error: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func windowWillClose(_ notification: Notification) {
+        task?.cancel()
+        onClose?()
+    }
+
+    func showError(_ error: Error) { showStatus(error: error.localizedDescription) }
+
+    private func showStatus(error: String?) {
+        let back = NSHostingView(rootView: HStack(spacing: 20) {
+            Button("‹ Projects") { [weak self] in self?.close(); Library.show() }
+                .buttonStyle(TechButtonStyle(kind: .quiet, compact: true))
+            Text(package.deletingPathExtension().lastPathComponent).font(Font(Theme.headingFont(20)))
+                .lineLimit(1)
+            Spacer()
+            Text(error == nil ? "Opening…" : "Couldn’t open project").font(Font(Theme.captionFont))
+                .foregroundStyle(Theme.textSecondaryColor)
+        }.padding(.leading, 78).padding(.trailing, 20).frame(maxHeight: .infinity)
+            .background(Theme.bgWindowColor).signalWindow())
+        let status = NSHostingView(rootView: VStack(spacing: 14) {
+            Text(error == nil ? "Loading project" : "Couldn’t open project")
+                .font(Font(Theme.headingFont(28)))
+            Text(error ?? "Preparing your edit…")
+                .font(Font(Theme.labelFont)).foregroundStyle(Theme.textSecondaryColor)
+                .multilineTextAlignment(.center)
+            if error != nil {
+                Button("Try again") { [weak self] in
+                    guard let self else { return }
+                    self.close()
+                    EditorWindowController.open(package: self.package)
+                }.buttonStyle(TechButtonStyle(kind: .primary))
+            }
+        }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.bgWindowColor).signalWindow())
+        func placeholder(_ title: String) -> NSView {
+            NSHostingView(rootView: VStack(alignment: .leading, spacing: 16) {
+                Text(title).font(Font(Theme.headingFont(24))).foregroundStyle(Theme.textSecondaryColor)
+                Rectangle().fill(Theme.strokeColor).frame(height: 1)
+                Spacer()
+            }.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.bgPanelColor).signalWindow())
+        }
+        window?.contentView = EditorRootView(topBar: back, navigation: NSHostingView(rootView: EditorCompositionNavigation(model: nil)), preview: status,
+                                             transport: placeholder(""), inspector: placeholder("Inspector"),
+                                             timeline: placeholder("Timeline"))
+    }
 }

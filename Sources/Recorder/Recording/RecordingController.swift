@@ -75,8 +75,7 @@ import RecorderCore
 
         if let camera { CameraBubblePanel.show(previewLayer: camera.previewLayer) }
 
-        let name = "Recording \(RecordingController.folderFormatter.string(from: Date()))"
-        let packageURL = settings.projectsFolder.appendingPathComponent("\(name).recorder")
+        let packageURL = ProjectStore.newProjectURL(in: settings.projectsFolder)
 
         // Both registered with `FloatingPanel` *before* `CaptureSession` reads the exclusion list below
         // (its `SCContentFilter` is a fixed snapshot, not updated afterward), so neither ever leaks into
@@ -246,12 +245,6 @@ import RecorderCore
         guard RecordingSettings.shared.hideDockIcon else { return }
         NSApp.setActivationPolicy(hiddenWhileRecording ? .accessory : .regular)
     }
-
-    private static let folderFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return f
-    }()
 
     /// `thumbnail.jpg`, 640 px wide, frame at 1 s (0 for clips shorter than that) — SPEC §5, written once
     /// here; `ProjectStore`/the library only ever read it (T-301).

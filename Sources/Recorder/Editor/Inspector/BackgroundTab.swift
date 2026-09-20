@@ -12,49 +12,108 @@ struct BackgroundTab: View {
     private var background: Background { model.project.background }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker("", selection: kindBinding) {
-                Text("Wallpaper").tag(Background.Kind.wallpaper)
-                Text("Gradient").tag(Background.Kind.gradient)
-                Text("Color").tag(Background.Kind.color)
-                Text("Image").tag(Background.Kind.image)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Output shape").font(Font(Theme.headingFont(22)))
+                Spacer()
+                Button("Crop source…") {
+                    if let window = NSApp.keyWindow { CropSheet.present(for: model, on: window) }
+                }.buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            switch background.kind {
-            case .wallpaper:
-                WallpaperGrid(model: model)
-            case .gradient:
-                HStack {
-                    ColorPicker("Start", selection: gradientBinding(0))
-                    ColorPicker("End", selection: gradientBinding(1))
+            HStack(spacing: 4) {
+                ForEach([Output.Aspect.auto, .r16x9, .r9x16, .r1x1, .r4x3, .r16x10], id: \.self) { aspect in
+                    shapeButton(aspect)
                 }
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.textSecondaryColor)
-            case .color:
-                ColorPicker("Color", selection: colorBinding)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.textSecondaryColor)
-            case .image:
-                imageChooser
             }
+            Divider().padding(.vertical, 4)
+            Toggle("Background and frame", isOn: Binding(
+                get: { model.project.framingEnabled },
+                set: { enabled in model.edit("Background and frame") { $0.frame.enabled = enabled } }
+            ))
 
-            Divider().overlay(Theme.strokeColor)
+            if model.project.framingEnabled {
+                LabeledSlider(title: "Padding", value: fieldBinding(\.frame.padding),
+                              range: 0...0.3, defaultValue: 0.08, onEditingChanged: gesture("Padding"))
+                DisclosureGroup("Corners, inset & shadow") {
+                    VStack(spacing: 8) {
+                LabeledSlider(title: "Corners", value: fieldBinding(\.frame.cornerRadius),
+                              range: 0...0.1, defaultValue: 0.02, onEditingChanged: gesture("Corners"))
+                LabeledSlider(title: "Inset", value: fieldBinding(\.frame.inset),
+                              range: 0...0.05, defaultValue: 0, format: { "\(Int(($0 * 100).rounded()))" },
+                              onEditingChanged: gesture("Inset"))
+                LabeledSlider(title: "Shadow", value: fieldBinding(\.frame.shadow),
+                              range: 0...1, defaultValue: 0.5, onEditingChanged: gesture("Shadow"))
 
-            LabeledSlider(title: "Blur", value: fieldBinding(\.background.blur),
-                          range: 0...1, defaultValue: 0, format: { "\(Int(($0 * 100).rounded()))" },
-                          onEditingChanged: gesture("Blur"))
-            LabeledSlider(title: "Padding", value: fieldBinding(\.frame.padding),
-                          range: 0...0.3, defaultValue: 0.08, onEditingChanged: gesture("Padding"))
-            LabeledSlider(title: "Corners", value: fieldBinding(\.frame.cornerRadius),
-                          range: 0...0.1, defaultValue: 0.02, onEditingChanged: gesture("Corners"))
-            LabeledSlider(title: "Inset", value: fieldBinding(\.frame.inset),
-                          range: 0...0.05, defaultValue: 0, format: { "\(Int(($0 * 100).rounded()))" },
-                          onEditingChanged: gesture("Inset"))
-            LabeledSlider(title: "Shadow", value: fieldBinding(\.frame.shadow),
-                          range: 0...1, defaultValue: 0.5, onEditingChanged: gesture("Shadow"))
+                    }.padding(.top, 4)
+                }
+
+                Divider().overlay(Theme.strokeColor)
+                Text("Backdrop")
+                    .font(Font(Theme.headingFont(22)))
+                TechSegmentedControl(selection: kindBinding, options: [
+                    (.wallpaper, "Wallpaper"), (.gradient, "Gradient"),
+                    (.color, "Color"), (.image, "Image"),
+                ])
+
+                switch background.kind {
+                case .wallpaper:
+                    WallpaperGrid(model: model)
+                case .gradient:
+                    HStack {
+                        ColorPicker("Start", selection: gradientBinding(0))
+                        ColorPicker("End", selection: gradientBinding(1))
+                    }
+                    .font(Font(Theme.bodyFont))
+                    .foregroundStyle(Theme.textSecondaryColor)
+                case .color:
+                    ColorPicker("Color", selection: colorBinding)
+                        .font(Font(Theme.bodyFont))
+                        .foregroundStyle(Theme.textSecondaryColor)
+                case .image:
+                    imageChooser
+                }
+
+                if background.kind != .color {
+                LabeledSlider(title: "Blur", value: fieldBinding(\.background.blur),
+                              range: 0...1, defaultValue: 0, format: { "\(Int(($0 * 100).rounded()))" },
+                              onEditingChanged: gesture("Blur"))
+                }
+            } else {
+                Text("Edge to edge. Enable background and frame to add padding, corners, and shadow.")
+                    .font(Font(Theme.captionFont))
+                    .foregroundStyle(Theme.textSecondaryColor)
+            }
         }
+    }
+
+    private func shapeButton(_ aspect: Output.Aspect) -> some View {
+        let selected = model.project.output.aspect == aspect
+        let ratio: CGFloat = switch aspect {
+        case .auto: CGFloat(model.project.source.pixelWidth) * model.project.crop.w / max(1, CGFloat(model.project.source.pixelHeight) * model.project.crop.h)
+        case .r16x9: 16.0 / 9
+        case .r9x16: 9.0 / 16
+        case .r1x1: 1
+        case .r4x3: 4.0 / 3
+        case .r16x10: 16.0 / 10
+        }
+        return Button {
+            guard !selected else { return }
+            model.edit("Output shape") { $0.output.aspect = aspect }
+        } label: {
+            VStack(spacing: 4) {
+                Rectangle().strokeBorder(lineWidth: 1)
+                    .frame(width: min(28, 20 * ratio), height: min(20, 28 / ratio))
+                    .frame(height: 22)
+                Text(aspect == .auto ? "Source" : aspect.rawValue)
+                    .font(Font(Theme.timecodeFont(10)))
+            }
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .foregroundStyle(selected ? Theme.bgWindowColor : Theme.textPrimaryColor)
+            .background(selected ? Theme.accentColor : Theme.bgControlColor)
+            .overlay(Rectangle().strokeBorder(selected ? Theme.accentColor : Theme.strokeColor))
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain)
+        .help(aspect == .auto ? "Match the cropped recording" : "Set output shape to " + aspect.rawValue)
     }
 
     // MARK: - Bindings
@@ -101,12 +160,13 @@ struct BackgroundTab: View {
     private var imageChooser: some View {
         HStack {
             Text(background.imagePath.isEmpty ? "No image chosen" : background.imagePath)
-                .font(.system(size: 13))
+                .font(Font(Theme.bodyFont))
                 .foregroundStyle(Theme.textSecondaryColor)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
             Button("Choose…", action: chooseImage)
+                .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
         }
     }
 
@@ -180,11 +240,8 @@ private struct WallpaperGrid: View {
             }
             .frame(maxWidth: .infinity)
             .frame(height: 28)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
-            .overlay(RoundedRectangle(cornerRadius: 4)
-                .stroke(selected ? Theme.accentColor : Theme.strokeColor, lineWidth: selected ? 2 : 1))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TechSelectableTileStyle(selected: selected))
     }
 
     // ponytail: first display still decodes every thumbnail synchronously on the main thread

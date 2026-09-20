@@ -27,7 +27,7 @@ enum ZoomTargetMapping {
         let cropH = Double(project.source.pixelHeight) * project.crop.h
         let aspect = cropH > 0 ? cropW / cropH : 16.0 / 9.0
         let viewport = screenRect(output: viewBounds, cropAspect: aspect, padding: 0)
-        let content = screenRect(output: viewport.size, cropAspect: aspect, padding: project.frame.padding)
+        let content = screenRect(output: viewport.size, cropAspect: aspect, padding: project.renderedFrame.padding)
         return CGRect(x: viewport.minX + content.minX, y: viewport.minY + content.minY,
                        width: content.width, height: content.height)
     }
@@ -69,6 +69,7 @@ extension ZoomTargetMapping {
         // pillarboxed AND letterboxed by the aspect mismatch) view.
         var project = Project(source: Source(kind: .display, pixelWidth: 640, pixelHeight: 360, scale: 1, duration: 4))
         project.frame.padding = 0.08
+        project.frame.enabled = true
         let viewSize = CGSize(width: 500, height: 1000)
         let content = contentRect(viewBounds: viewSize, project: project)
         guard content.width > 0, content.height > 0, content.width <= viewSize.width, content.height <= viewSize.height else {
@@ -218,7 +219,7 @@ extension ZoomTargetMapping {
         state.prevView = .identity
         compositor.render(state, to: target, commandBuffer: commandBuffer)
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        await commandBuffer.completed()
 
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)

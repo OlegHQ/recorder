@@ -17,37 +17,40 @@ struct ZoomPanel: View {
             InspectorSelectionHeader(title: "Zoom") { deselect() }
 
             if let zoom {
+                EffectPreviewControls(model: model, start: zoom.start, end: zoom.end, editsRegion: zoom.mode == .manual)
+                    .modifier(InspectorReveal(identity: zoomID.uuidString, order: 0))
+                Divider().padding(.vertical, 4)
                 LabeledSlider(title: "Level", value: fieldBinding(\.scale), range: 1.2...5, defaultValue: 2,
                               format: { String(format: "%.1f×", $0) }, onEditingChanged: gesture("Zoom level"))
+                    .modifier(InspectorReveal(identity: zoomID.uuidString, order: 1))
 
                 HStack(spacing: 8) {
                     Text("Mode")
-                        .font(.system(size: 13))
+                        .font(Font(Theme.bodyFont))
                         .foregroundStyle(Theme.textSecondaryColor)
                         .frame(width: 60, alignment: .leading)
-                    Picker("", selection: modeBinding) {
-                        Text("Auto").tag(Zoom.Mode.auto)
-                        Text("Manual").tag(Zoom.Mode.manual)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                    TechSegmentedControl(selection: modeBinding, options: [
+                        (.auto, "Auto"), (.manual, "Manual"),
+                    ])
                 }
+                .modifier(InspectorReveal(identity: zoomID.uuidString, order: 2))
 
-                if zoom.mode == .manual {
-                    Text("Drag the frame in the preview to set the target")
-                        .font(.system(size: 11))
+                if zoom.mode == .manual && !model.previewShowsResult {
+                    Text("Drag the preview frame to set the target.")
+                        .font(Font(Theme.captionFont))
                         .foregroundStyle(Theme.textSecondaryColor)
                 }
 
                 Toggle("Instant (no animation)", isOn: instantBinding)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.textPrimaryColor)
+                    .modifier(InspectorReveal(identity: zoomID.uuidString, order: 3))
 
                 HStack {
                     Button(zoom.enabled ? "Disable" : "Enable", action: toggleEnabled)
+                        .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
                     Button("Remove", role: .destructive, action: remove)
+                        .buttonStyle(TechButtonStyle(kind: .danger, compact: true))
                 }
+                .modifier(InspectorReveal(identity: zoomID.uuidString, order: 3))
             }
         }
     }

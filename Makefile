@@ -7,8 +7,9 @@ TESTFLAGS := -Xswiftc -F -Xswiftc $(CLT)/Frameworks -Xlinker -F -Xlinker $(CLT)/
 # Stable identity keeps TCC grants (Screen Recording, Accessibility) across rebuilds. `-` = ad-hoc (grants reset every build).
 SIGN_ID  ?= $(shell security find-identity -p codesigning | grep -q "Recorder Dev" && echo "Recorder Dev" || echo -)
 CONFIG   ?= release
+GALLERY_PNG ?= build/signal-ui-gallery.png
 
-.PHONY: build test app run install uninstall clean cert
+.PHONY: build test app run gallery gallery-png install uninstall clean cert
 build:
 	swift build -c $(CONFIG)
 
@@ -22,6 +23,7 @@ app: build
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp .build/$(CONFIG)/Recorder $(APP)/Contents/MacOS/Recorder
 	cp Resources/Info.plist $(APP)/Contents/Info.plist
+	cp -R Resources/Fonts $(APP)/Contents/Resources/
 	@if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns $(APP)/Contents/Resources/; fi
 	@if [ -d Resources/Wallpapers ]; then cp -R Resources/Wallpapers $(APP)/Contents/Resources/; fi
 	@if [ -f Resources/click.caf ]; then cp Resources/click.caf $(APP)/Contents/Resources/; fi
@@ -29,6 +31,14 @@ app: build
 
 run: app
 	open $(APP)
+
+# Component gallery: interactive AppKit window, or a deterministic PNG for visual review.
+gallery: app
+	open -n $(APP) --args --ui-gallery
+
+gallery-png: app
+	$(APP)/Contents/MacOS/Recorder --selftest ui-kit-png $(GALLERY_PNG)
+	open $(GALLERY_PNG)
 
 install: app
 	-pkill -x Recorder

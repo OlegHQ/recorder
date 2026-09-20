@@ -7,7 +7,15 @@ import AVFoundation
 final class ToolbarController: NSObject {
     static let shared = ToolbarController()
 
-    private var panel: FloatingPanel?
+    private var panel: FloatingPanel? {
+        didSet {
+            oldValue?.onOrderOut = nil
+            panel?.onOrderOut = { [weak self] in
+                guard let self, !self.requestingDeviceAccess else { return }
+                self.close()
+            }
+        }
+    }
     private var deviceObservers: [NSObjectProtocol] = []
     /// Live while a camera is selected (SPEC §4.6): feeds `CameraBubblePanel`'s preview and, once
     /// recording actually starts, `camera.mov`. Retained here so its `AVCaptureSession` stays alive.
@@ -19,9 +27,13 @@ final class ToolbarController: NSObject {
         super.init()
         NotificationCenter.default.addObserver(self, selector: #selector(documentBecameKey(_:)),
                                                name: NSWindow.didBecomeKeyNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(applicationHidden(_:)),
+                                               name: NSApplication.didHideNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(applicationActivated(_:)),
                                                           name: NSWorkspace.didActivateApplicationNotification, object: nil)
     }
+
+    @objc private func applicationHidden(_ notification: Notification) { close() }
 
     @objc private func applicationActivated(_ notification: Notification) {
         // TCC and other system UI agents can announce activation after their dialog callback.
@@ -49,7 +61,7 @@ final class ToolbarController: NSObject {
         }
 
         let view = ToolbarHostingView(rootView: ToolbarView(
-            onClose: { [weak self] in self?.close() },
+            onClose: { [weak self] in self?.handleEscape() },
             onSelectMode: { [weak self] mode in self?.selectMode(mode) },
             onCamera: { [weak self] in self?.showCameraMenu() },
             onMicrophone: { [weak self] in self?.showMicrophoneMenu() },
@@ -57,7 +69,7 @@ final class ToolbarController: NSObject {
             onSettings: { [weak self] in self?.showSettingsMenu() }
         ))
 
-        let p = FloatingPanel(content: view, draggable: true)
+        let p = FloatingPanel(content: view, draggable: true, bordered: false)
         position(p)
         panel = p
         observeDevices()
@@ -68,21 +80,25 @@ final class ToolbarController: NSObject {
 
     private func presentPicker() {
         guard let panel, !requestingDeviceAccess else { return }
+        Library.window?.orderOut(nil)
+        panel.orderFrontRegardless()
+        panel.makeKeyAndOrderFront(nil)
+        guard self.panel === panel, panel.isVisible else { return }
         SourcePickerOverlay.show(mode: RecordingSettings.shared.mode)
         // Ordering windows delivers focus notifications synchronously; close() may run inside it.
-        guard self.panel === panel else { SourcePickerOverlay.close(); return }
-        panel.orderFrontRegardless()
+        guard self.panel === panel, panel.isVisible else { SourcePickerOverlay.close(); return }
         panel.makeKeyAndOrderFront(nil)
     }
 
-    /// `ⓧ` or `Esc`: close the toolbar and any overlay; the app keeps running (SPEC §4.2, AC-TB-4).
+    /// Tear down recording setup without changing document focus (also used when recording starts).
     func close() {
         guard panel != nil || SourcePickerOverlay.isOpen || AreaSelectionOverlay.isOpen else { return }
         deviceRequest = UUID()
         requestingDeviceAccess = false
+        let panel = self.panel
+        self.panel = nil // Release ownership before ordering windows can re-enter close().
         SourcePickerOverlay.close()
         panel?.orderOut(nil)
-        panel = nil
         deviceObservers.forEach(NotificationCenter.default.removeObserver)
         deviceObservers.removeAll()
         updateCameraBubble(deviceID: nil)
@@ -97,16 +113,10 @@ final class ToolbarController: NSObject {
         show()
     }
 
-    /// `Esc`, from any of our windows — the toolbar panel or any overlay (`SourcePickerWindow`,
-    /// `AreaSelectionWindow`, `AreaFieldsHostingView`) — routes here: closes the frontmost overlay first
-    /// and re-keys the toolbar so a second `Esc` reaches it; with no overlay open, closes the toolbar
-    /// (SPEC AC-TB-4). One shared handler instead of each window redoing the "close overlay, reshow
-    /// toolbar" logic keeps the order correct no matter which window happened to be key. Re-keys the
-    /// panel directly (not `show()`, which would also re-open the overlay we just closed).
+    /// Cancel the entire recording setup in one action, regardless of which panel has focus.
     func handleEscape() {
-        guard SourcePickerOverlay.isOpen || AreaSelectionOverlay.isOpen else { close(); return }
-        SourcePickerOverlay.close()
-        panel?.makeKeyAndOrderFront(nil)
+        close()
+        Library.show()
     }
 
     /// Bottom-centre of the display under the mouse, 40 pt above the Dock (`visibleFrame` already excludes it).
@@ -367,6 +377,61 @@ private final class ToolbarHostingView: NSHostingView<ToolbarView> {
 
 // Exercises real panel ordering and re-entrant notifications without changing the user's TCC grants.
 extension ToolbarController {
+    @MainActor static func runDismissalSelfTest() throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let toolbar = ToolbarController.shared
+        let previousMode = RecordingSettings.shared.mode
+        defer {
+            toolbar.close()
+            Library.window?.orderOut(nil)
+            RecordingSettings.shared.mode = previousMode
+        }
+        for mode in [RecordingSettings.Mode.display, .window, .area] {
+            for hideApplication in [false, true] {
+                let panel = FloatingPanel(content: NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 56)), draggable: true)
+                toolbar.panel = panel
+                panel.makeKeyAndOrderFront(nil)
+                SourcePickerOverlay.show(mode: mode)
+                if hideApplication {
+                    NotificationCenter.default.post(name: NSApplication.didHideNotification, object: NSApp)
+                } else {
+                    panel.orderOut(nil)
+                }
+                guard toolbar.panel == nil, !panel.isVisible,
+                      !SourcePickerOverlay.isOpen, !AreaSelectionOverlay.isOpen else {
+                    throw Fail(description: "hiding toolbar/app left an orphan picker (\(mode))")
+                }
+            }
+            for escapeFromOverlay in [false, true] {
+                Library.show()
+                let panel = FloatingPanel(content: ToolbarHostingView(rootView: ToolbarView(onClose: { toolbar.handleEscape() },
+                    onSelectMode: { _ in }, onCamera: {}, onMicrophone: {}, onSystemAudio: {}, onSettings: {})), draggable: true)
+                toolbar.panel = panel
+                RecordingSettings.shared.mode = mode
+                toolbar.presentPicker()
+                guard Library.window?.isVisible == false, panel.isVisible,
+                      SourcePickerOverlay.isOpen || AreaSelectionOverlay.isOpen else {
+                    throw Fail(description: "recording setup must hide Projects and show the toolbar and picker (\(mode))")
+                }
+                if escapeFromOverlay {
+                    guard let overlay = NSApp.windows.first(where: {
+                        $0.isVisible && $0 !== panel && FloatingPanel.allWindowIDs.contains(CGWindowID($0.windowNumber))
+                    }) else { throw Fail(description: "no overlay to receive Escape") }
+                    overlay.makeKeyAndOrderFront(nil)
+                    overlay.firstResponder?.tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: nil)
+                } else {
+                    panel.firstResponder?.tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: nil)
+                }
+                guard toolbar.panel == nil, !panel.isVisible,
+                      !SourcePickerOverlay.isOpen, !AreaSelectionOverlay.isOpen,
+                      Library.window?.isVisible == true else {
+                    throw Fail(description: "one Escape must dismiss all recording setup and show Projects (\(mode))")
+                }
+            }
+        }
+        print("Recording dismissal: hiding toolbar/app dismisses pickers; Escape returns to Projects in all modes")
+    }
+
     @MainActor static func runPermissionReturnSelfTest() async throws {
         struct Fail: Error, CustomStringConvertible { let description: String }
         let toolbar = ToolbarController()

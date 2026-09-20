@@ -20,6 +20,7 @@ final class SelectionRectView: NSView {
     /// crop sheet) is unaffected.
     var allowsResize = true
     var onChange: ((CGRect) -> Void)?
+    var onKeyboardEditingChanged: ((Bool) -> Void)?
     /// True between `mouseDown` and `mouseUp`. `AreaSelectionOverlay` checks this before applying a
     /// Size/Position field edit, so a field commit mid-drag (e.g. live-formatted `TextField` value updates)
     /// can't overwrite `rect` out from under the mouse.
@@ -219,6 +220,13 @@ final class SelectionRectView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
+        guard (123...126).contains(event.keyCode), !isHiddenOrHasHiddenAncestor else {
+            super.keyDown(with: event)
+            return
+        }
+        guard !isDragging else { return }
+        onKeyboardEditingChanged?(true)
+        defer { onKeyboardEditingChanged?(false) }
         let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
         switch event.keyCode {
         case 123: rect.origin.x -= step // left

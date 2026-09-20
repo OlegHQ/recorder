@@ -65,7 +65,7 @@ final class Exporter {
         // MP4 loop.
         guard settings.format == .mp4 else { return try await runGIF() }
 
-        let packageURL = await model.packageURL
+        let packageURL = model.packageURL
         let project = await model.project
         let outputDuration = await model.timeMap.outputDuration
         try? FileManager.default.removeItem(at: destination)
@@ -94,7 +94,7 @@ final class Exporter {
         // survives the clip cuts (export only; the preview plays it live via `NSSound`,
         // `PreviewView.playClickSoundIfCrossed`).
         if project.cursor.clickSound {
-            let clicks = await model.events.clicks()
+            let clicks = model.events.clicks()
             let timeMap = await model.timeMap
             try? await addClickTrack(to: composition, audioMix: audioMix, clicks: clicks, timeMap: timeMap)
         }
@@ -213,7 +213,7 @@ final class Exporter {
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
             commandBuffer.commit()
-            commandBuffer.waitUntilCompleted()
+            await commandBuffer.completed()
 
             let pts = CMTime(value: Int64(n), timescale: CMTimeScale(settings.fps))
             guard adaptor.append(pixelBuffer, withPresentationTime: pts) else {
@@ -351,7 +351,7 @@ private func addClickTrack(to composition: AVMutableComposition, audioMix: AVMut
 /// path, so it doesn't disturb that loop (which the render lane's camera work also touches).
 extension Exporter {
     private func runGIF() async throws {
-        let packageURL = await model.packageURL
+        let packageURL = model.packageURL
         let project = await model.project
         let outputDuration = await model.timeMap.outputDuration
         try? FileManager.default.removeItem(at: destination)
@@ -427,7 +427,7 @@ extension Exporter {
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
             commandBuffer.commit()
-            commandBuffer.waitUntilCompleted()
+            await commandBuffer.completed()
 
             var bytes = [UInt8](repeating: 0, count: width * height * 4)
             target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
@@ -658,7 +658,7 @@ enum ExporterSelfTest {
         let cameraHold = cameraExportOutput.map(FrameHold.init)
 
         func render(_ texture: FrameState.Texture?, camera: FrameState.Texture?, outputTime: Double) async throws -> [UInt8] {
-            let state = await makeFrameState(model: model, outputTime: outputTime, screen: texture, camera: camera, size: outputSize)
+            let state = makeFrameState(model: model, outputTime: outputTime, screen: texture, camera: camera, size: outputSize)
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .shared
@@ -668,7 +668,7 @@ enum ExporterSelfTest {
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
             commandBuffer.commit()
-            commandBuffer.waitUntilCompleted()
+            await commandBuffer.completed()
             var bytes = [UInt8](repeating: 0, count: width * height * 4)
             target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
             return bytes

@@ -11,48 +11,76 @@ struct OnboardingView: View {
     @State private var showRelaunch = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .frame(width: 64, height: 64)
+        VStack(spacing: 0) {
+            Rectangle().fill(Theme.accentColor).frame(height: 2)
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Recorder").font(Font(Theme.titleFont))
+                    Text("Capture permissions")
+                        .font(Font(Theme.captionFont))
+                        .foregroundStyle(Theme.textTertiaryColor)
+                }
+                Spacer()
+                Text(screenGranted && accessibilityGranted ? "02 granted" : "02 required")
+                    .font(Font(Theme.timecodeFont(11)))
+                    .foregroundStyle(Theme.textSecondaryColor)
+            }
+            .padding(.horizontal, 24).padding(.vertical, 16)
+            .background(Theme.bgPanelColor)
+            Rectangle().fill(Theme.strokeColor).frame(height: 1)
 
-            Text("Welcome to Recorder!")
-                .font(Font(Theme.titleFont))
-                .foregroundStyle(Theme.textPrimaryColor)
+            HStack(alignment: .top, spacing: 30) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Ready your capture workspace")
+                        .font(Font(Theme.headingFont(30)))
+                    Text("Recorder needs two macOS permissions before it can capture the screen and preserve pointer or shortcut activity.")
+                        .font(Font(Theme.bodyFont))
+                        .foregroundStyle(Theme.textSecondaryColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(width: 220, alignment: .leading)
 
-            Text("Before you can start recording, we need a few permissions.")
-                .font(Font(Theme.bodyFont))
-                .foregroundStyle(Theme.textSecondaryColor)
-
-            VStack(spacing: 16) {
-                row(title: "Screen Recording",
-                    detail: "Needed to capture your screen.\nYou may need to restart the app.",
+                VStack(spacing: 22) {
+                    row(index: "01", title: "Screen Recording",
+                    detail: "Captures the selected display, window or area. macOS may require an app relaunch after approval.",
                     granted: screenGranted,
                     buttonTitle: "Allow Screen Recording") {
                     Permissions.requestScreen()
                     screenRequestedAt = Date()
                 }
 
-                row(title: "Accessibility",
-                    detail: "Needed to capture mouse movement\nand shortcut keystrokes.",
+                    row(index: "02", title: "Accessibility",
+                    detail: "Preserves pointer movement and shortcut keystrokes in the recording.",
                     granted: accessibilityGranted,
                     buttonTitle: "Allow Accessibility") {
                     Permissions.requestAccessibility()
                 }
             }
-
-            if showRelaunch {
-                Button("Relaunch", action: relaunch)
-                    .foregroundStyle(Theme.accentTextColor)
             }
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            Button("Continue", action: onContinue)
-                .keyboardShortcut(.defaultAction)
-                .disabled(!(screenGranted && accessibilityGranted))
+            Rectangle().fill(Theme.strokeColor).frame(height: 1)
+            HStack {
+                Text(screenGranted && accessibilityGranted ? "Setup complete" : "Complete both permissions to continue")
+                    .font(Font(Theme.captionFont))
+                    .foregroundStyle(Theme.textSecondaryColor)
+                Spacer()
+                if showRelaunch {
+                    Button("Relaunch", action: relaunch)
+                        .buttonStyle(TechButtonStyle(kind: .secondary))
+                }
+                Button("Continue", action: onContinue)
+                    .buttonStyle(TechButtonStyle(kind: .primary))
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!(screenGranted && accessibilityGranted))
+            }
+            .padding(.horizontal, 24).frame(height: 62)
+            .background(Theme.bgPanelColor)
         }
-        .padding(32)
         .frame(width: 660, height: 470)
-        .background(Theme.bgWindowColor)
+        .background { ZStack { Theme.bgWindowColor; TechGridBackground(step: 40).opacity(0.3) } }
+        .signalWindow()
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
             screenGranted = Permissions.screen
             accessibilityGranted = Permissions.accessibility
@@ -63,28 +91,27 @@ struct OnboardingView: View {
         }
     }
 
-    private func row(title: String, detail: String, granted: Bool, buttonTitle: String,
+    private func row(index: String, title: String, detail: String, granted: Bool, buttonTitle: String,
                       request: @escaping () -> Void) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(Font(Theme.bodyFont))
-                    .foregroundStyle(Theme.textPrimaryColor)
-                Text(detail)
-                    .font(Font(Theme.captionFont))
-                    .foregroundStyle(Theme.textSecondaryColor)
-            }
-            Spacer()
-            if granted {
-                Label("Granted", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Button(buttonTitle, action: request)
+        VStack(alignment: .leading, spacing: 10) {
+            TechSectionLabel(index: index, title: title)
+            Text(detail)
+                .font(Font(Theme.captionFont))
+                .foregroundStyle(Theme.textSecondaryColor)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                TechStatus(title: granted ? "Granted" : "Required",
+                           color: granted ? Theme.layoutColor : Theme.warningColor)
+                Spacer()
+                if !granted {
+                    Button(buttonTitle, action: request)
+                        .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
+                }
             }
         }
-        .padding(12)
+        .padding(14)
         .background(Theme.bgPanelColor)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+        .overlay(Rectangle().stroke(Theme.strokeColor))
     }
 
     private func relaunch() {

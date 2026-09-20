@@ -10,10 +10,84 @@ import RecorderCore
     private(set) var project: Project
     let events: EventLog
     var playhead: Double = 0            // OUTPUT seconds
-    var isPlaying = false
-    var selection: Set<UUID> = []       // zoom/layout/mask ids
+    var isPlaying = false {
+        didSet { if !isPlaying { previewPlaybackEnd = nil } }
+    }
+    private(set) var previewPlaybackEnd: Double?
+    var selection: Set<UUID> = [] {
+        didSet { if selection != oldValue { inspectorShowsProject = false; previewShowsResult = false; stopEffectPreview() } }
+    }
+    var inspectorTab: InspectorView.Tab = .background
+    var previewShowsResult = false
+    var inspectorShowsProject = false
+
+    func showProjectInspector(_ tab: InspectorView.Tab) {
+        inspectorTab = tab
+        inspectorShowsProject = true
+    }
+    /// Create from any editor entry point and open the new interval for editing.
+    @discardableResult
+    func addZoom(atSource time: Double, length: Double = 3) -> UUID? {
+        let mode: Zoom.Mode = events.clicks().contains { abs($0.t - time) <= 1 } ? .auto : .manual
+        var updated = project
+        guard let id = updated.addZoom(atSource: time, length: length, mode: mode) else { return nil }
+        edit("Add Zoom") { $0 = updated }
+        isPlaying = false
+        selectedClips = []
+        selection = [id]
+        inspectorShowsProject = false
+        return id
+    }
+
+    /// Find a retained point inside an effect interval, accounting for cuts and clip speed.
+    func previewTime(start: Double, end: Double) -> Double? {
+        for clip in project.clips {
+            let lower = max(start, clip.sourceStart), upper = min(end, clip.sourceEnd)
+            if upper > lower { return timeMap.outputTime(atSource: (lower + upper) / 2) }
+        }
+        return nil
+    }
+
+    /// Replay the retained effect interval with context on both sides, using output time.
+    func replayEffect(start: Double, end: Double) {
+        var output = 0.0
+        var first: Double?
+        var last: Double?
+        for clip in project.clips {
+            let lower = max(start, clip.sourceStart), upper = min(end, clip.sourceEnd)
+            if upper > lower {
+                if first == nil { first = output + (lower - clip.sourceStart) / clip.timeScale }
+                last = output + (upper - clip.sourceStart) / clip.timeScale
+            }
+            output += clip.outputDuration
+        }
+        guard let first, let last else { return }
+        isPlaying = false
+        previewShowsResult = true
+        playhead = max(0, first - 0.6)
+        previewPlaybackEnd = min(timeMap.outputDuration, last + 1.5)
+        isPlaying = true
+    }
+
+    func stopEffectPreview() {
+        if previewPlaybackEnd != nil { isPlaying = false }
+    }
+
+    func advancePlayback(to time: Double) {
+        if let end = previewPlaybackEnd, time >= end {
+            playhead = end
+            isPlaying = false
+        } else { playhead = time }
+    }
+
     var cameraInspectorRequested = false
-    var selectedClip: Int?
+    var selectedClips: Set<Int> = [] {
+        didSet { if selectedClips != oldValue { inspectorShowsProject = false; previewShowsResult = false; stopEffectPreview() } }
+    }
+    var selectedClip: Int? {
+        get { selectedClips.min() }
+        set { selectedClips = newValue.map { [$0] } ?? [] }
+    }
     var timeMap: TimeMap { TimeMap(project.clips) }
 
     /// 240 Hz lookup tables for the render pipeline (SPEC §6.2, §6.3, §6.5) — simulated once here,
@@ -51,11 +125,11 @@ import RecorderCore
     var undoStepNames: [String] { undoNames }
     var redoStepNames: [String] { redoNames }
 
-    init(packageURL: URL, project: Project, events: EventLog) {
+    init(packageURL: URL, project: Project, events: EventLog, paths: (CursorPath, CameraPath)? = nil) {
         self.packageURL = packageURL
         self.project = project
         self.events = events
-        (cursorPath, cameraPath) = Self.buildPaths(project: project, events: events)
+        (cursorPath, cameraPath) = paths ?? Self.buildPaths(project: project, events: events)
     }
 
     /// The ONLY way to mutate `project` outside a gesture. One call = one undo step.
@@ -83,8 +157,9 @@ import RecorderCore
 
     func commitGesture(_ name: String) {
         guard let snapshot = gestureSnapshot else { return }
-        push(snapshot, name: name)
         gestureSnapshot = nil
+        guard snapshot != project else { return }
+        push(snapshot, name: name)
         redoStack.removeAll()
         redoNames.removeAll()
         rebuildPathsIfNeeded(from: snapshot)
@@ -104,6 +179,7 @@ import RecorderCore
         redoNames.append(name)
         let before = project
         project = previous
+        selectedClips = []; selection = []
         rebuildPathsIfNeeded(from: before)
         scheduleAutosave()
     }
@@ -114,6 +190,7 @@ import RecorderCore
         undoNames.append(name)
         let before = project
         project = next
+        selectedClips = []; selection = []
         rebuildPathsIfNeeded(from: before)
         scheduleAutosave()
     }
@@ -134,17 +211,30 @@ import RecorderCore
     /// Only `zooms`/`cursor`/`animation.screen`/`cursorHidden` feed `CursorPath`/`CameraPath`
     /// (T-413) — everything else (background, frame, camera tab, …) skips the resimulation.
     private func rebuildPathsIfNeeded(from before: Project) {
-        guard before.zooms != project.zooms || before.cursor != project.cursor
+        guard before.clips != project.clips || before.zooms != project.zooms || before.cursor != project.cursor
             || before.animation.screen != project.animation.screen || before.cursorHidden != project.cursorHidden
         else { return }
         (cursorPath, cameraPath) = Self.buildPaths(project: project, events: events)
     }
 
-    private static func buildPaths(project: Project, events: EventLog) -> (CursorPath, CameraPath) {
+    nonisolated static func buildPaths(project: Project, events: EventLog) -> (CursorPath, CameraPath) {
         let cursorPath = CursorPath(events: events, style: project.cursor, hidden: project.cursorHidden, duration: project.source.duration)
-        let cameraPath = CameraPath(zooms: project.zooms, cursor: cursorPath,
+        // Remap recorded pointer motion into the edited video clock for automatic zoom following.
+        let mappedEvents = project.clips.filter { !$0.isEmpty }.flatMap { clip -> [InputEvent] in
+            let initial = cursorPath.sample(atSource: clip.mediaIn)
+            var mapped = [InputEvent(t: clip.sourceStart, k: .move, x: initial.x, y: initial.y)]
+            mapped += events.events.filter { $0.t >= clip.mediaIn && $0.t < clip.mediaIn + clip.mediaDuration }.map { event in
+                var moved = event
+                moved.t = clip.sourceStart + (event.t - clip.mediaIn) * clip.timeScale / clip.speed
+                return moved
+            }
+            return mapped
+        }.sorted { $0.t < $1.t }
+        let timelineCursor = CursorPath(events: EventLog(events: mappedEvents), style: project.cursor,
+                                        hidden: [], duration: project.timelineSourceDuration)
+        let cameraPath = CameraPath(zooms: project.zooms, cursor: timelineCursor,
                                      spring: project.animation.screen == .focused ? .focused : .smooth,
-                                     duration: project.source.duration)
+                                     duration: project.timelineSourceDuration)
         return (cursorPath, cameraPath)
     }
 

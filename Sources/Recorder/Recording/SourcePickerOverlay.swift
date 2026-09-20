@@ -11,8 +11,7 @@ enum SourcePickerOverlay {
     private static var state: SourcePickerState?
     private static var refreshTimer: Timer?
 
-    /// Whether a display/window picker is currently up. Used by `ToolbarController.handleEscape()` to
-    /// decide whether `Esc` should close the overlay or the toolbar (AC-TB-4).
+    /// Whether a display/window picker is currently up.
     static var isOpen: Bool { !windows.isEmpty }
 
     /// Shows one overlay per screen for `.display`/`.window`; routes to `AreaSelectionOverlay` for `.area`.
@@ -28,7 +27,10 @@ enum SourcePickerOverlay {
         self.state = state
 
         windows = NSScreen.screens.map { SourcePickerWindow(screen: $0, mode: mode, state: state) }
-        windows.forEach { $0.orderFrontRegardless() }
+        for window in windows {
+            guard self.state === state else { return }
+            window.orderFrontRegardless()
+        }
         state.activeScreen.flatMap { active in windows.first { $0.targetScreen === active } }?.makeKeyAndOrderFront(nil)
 
         guard self.state === state else { return }
@@ -40,12 +42,13 @@ enum SourcePickerOverlay {
     }
 
     static func close() {
-        windows.forEach { $0.orderOut(nil) }
-        windows = []
+        let windows = self.windows
+        self.windows = []
         state = nil
         refreshTimer?.invalidate()
         refreshTimer = nil
         AreaSelectionOverlay.close()
+        windows.forEach { $0.orderOut(nil) }
     }
 
     /// `Start recording` hook (button or `Return`).
@@ -395,13 +398,19 @@ private struct SourcePickerContentView: View {
 
     @ViewBuilder private var displayContent: some View {
         if state.activeScreen === screen {
-            VStack(spacing: 16) {
-                Text(screen.localizedName)
-                    .font(Font(Theme.titleFont)).foregroundStyle(Theme.textPrimaryColor)
-                Text("\(Int(screen.frame.width))×\(Int(screen.frame.height)) · 60FPS")
-                    .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textSecondaryColor)
+            HStack(spacing: 20) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(screen.localizedName)
+                        .font(Font(Theme.titleFont)).foregroundStyle(Theme.textPrimaryColor)
+                    Text("\(Int(screen.frame.width)) × \(Int(screen.frame.height)) px")
+                        .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textSecondaryColor)
+                }
+                Rectangle().fill(Theme.strokeColor).frame(width: 1, height: 44)
                 StartRecordingButton(action: onStart)
             }
+            .padding(16)
+            .background(Theme.bgPanelColor.opacity(0.96))
+            .overlay(Rectangle().stroke(Theme.strokeColor))
         }
     }
 
@@ -415,23 +424,26 @@ private struct SourcePickerContentView: View {
                 .position(x: local.midX, y: local.midY)
                 .onTapGesture(perform: onStart)
 
-            VStack(spacing: 10) {
+            HStack(spacing: 16) {
                 if let icon = icon(for: window) {
-                    Image(nsImage: icon).resizable().frame(width: 64, height: 64)
+                    Image(nsImage: icon).resizable().frame(width: 40, height: 40)
                 }
-                Text(title(for: window))
-                    .font(Font(Theme.titleFont)).foregroundStyle(Theme.textPrimaryColor)
-                HStack(spacing: 8) {
-                    Text("\(Int(window.frame.width)) × \(Int(window.frame.height))")
-                        .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textSecondaryColor)
-                    Button("Resize", action: onResize)
-                        .buttonStyle(.plain)
-                        .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Theme.bgControlColor, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title(for: window))
+                        .font(Font(Theme.headingFont(24))).foregroundStyle(Theme.textPrimaryColor)
+                    HStack(spacing: 8) {
+                        Text("\(Int(window.frame.width)) × \(Int(window.frame.height)) px")
+                            .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textSecondaryColor)
+                        Button("Resize", action: onResize)
+                            .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
+                    }
                 }
+                Rectangle().fill(Theme.strokeColor).frame(width: 1, height: 44)
                 StartRecordingButton(action: onStart)
             }
+            .padding(16)
+            .background(Theme.bgPanelColor.opacity(0.96))
+            .overlay(Rectangle().stroke(Theme.strokeColor))
             .position(x: local.midX, y: local.midY)
             .allowsHitTesting(true)
         }
@@ -455,7 +467,7 @@ private struct SourcePickerContentView: View {
     }
 }
 
-/// Accent "Start recording" button with a `⌄` countdown submenu (SPEC §4.3/§4.4). Reuses
+/// Primary "Start recording" action plus a separate, labelled countdown setting (SPEC §4.3/§4.4). Reuses
 /// `RecordingSettings.countdown`, the same setting the toolbar's gear menu edits. Not private:
 /// reused by `AreaSelectionOverlay` (T-108).
 struct StartRecordingButton: View {
@@ -463,15 +475,16 @@ struct StartRecordingButton: View {
     private let options: [(String, Int)] = [("Off", 0), ("3 s", 3), ("5 s", 5), ("10 s", 10)]
 
     var body: some View {
-        HStack(spacing: 1) {
+        HStack(spacing: 8) {
             Button(action: action) {
                 HStack(spacing: 8) {
                     Image(systemName: "smallcircle.filled.circle")
-                    Text("Start recording").fontWeight(.semibold)
+                    Text("Start recording")
                 }
-                .padding(.horizontal, 16).padding(.vertical, 10)
+                .frame(minWidth: 144, minHeight: 32)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(TechButtonStyle(kind: .primary))
+            .keyboardShortcut(.return, modifiers: [])
 
             Menu {
                 ForEach(options, id: \.1) { title, value in
@@ -483,14 +496,17 @@ struct StartRecordingButton: View {
                     }
                 }
             } label: {
-                Image(systemName: "chevron.down").padding(.horizontal, 10).padding(.vertical, 10)
+                TechMenuLabel(title: countdownTitle, symbol: "timer")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
+            .help("Set recording countdown")
+            .accessibilityLabel("Recording countdown, \(countdownTitle)")
         }
-        .background(Theme.accentColor)
-        .foregroundStyle(.white)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
+    }
+
+    private var countdownTitle: String {
+        RecordingSettings.shared.countdown == 0 ? "No countdown" : "\(RecordingSettings.shared.countdown) s"
     }
 }
 

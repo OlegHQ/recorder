@@ -15,11 +15,13 @@ enum CropSheet {
     static func present(for model: EditorModel, on window: NSWindow) {
         let project = model.project
         let sourceSize = CGSize(width: project.source.pixelWidth, height: project.source.pixelHeight)
-        let sourceTime = model.timeMap.sourceTime(atOutput: model.playhead)
+        let sourceTime = frameTime(project: project, outputTime: model.playhead)
         let packageURL = model.packageURL
 
         Task { @MainActor in
-            let image = await Self.frame(at: sourceTime, in: packageURL)
+            let image: CGImage?
+            if let sourceTime { image = await Self.frame(at: sourceTime, in: packageURL) }
+            else { image = nil }
             let sheet = CropSheetWindow(initialCrop: project.crop, sourceSize: sourceSize, image: image,
                                          onConfirm: { [weak model] newCrop in
                 guard let model else { return }
@@ -27,6 +29,15 @@ enum CropSheet {
             })
             window.beginSheet(sheet) { _ in }
         }
+    }
+
+    /// Crop uses raw media, so an unlinked speed edit must map the timeline clock into media time.
+    static func frameTime(project: Project, outputTime: Double) -> Double? {
+        let time = TimeMap(project.clips).sourceTime(atOutput: outputTime)
+        let clip = project.clips.first { time >= $0.sourceStart && time < $0.sourceEnd }
+            ?? (outputTime >= TimeMap(project.clips).outputDuration ? project.clips.last : nil)
+        guard let clip, !clip.isEmpty else { return nil }
+        return clip.mediaTime(atSource: time)
     }
 
     /// The Confirm action, factored out so it can be driven directly (by tests, or anything else)
@@ -106,8 +117,8 @@ final class CropSheetWindow: NSWindow {
     private let onConfirm: (NormRect) -> Void
 
     private static let contentSize = NSSize(width: 920, height: 660)
-    private static let topBarHeight: CGFloat = 56
-    private static let bottomBarHeight: CGFloat = 76
+    private static let topBarHeight: CGFloat = 100
+    private static let bottomBarHeight: CGFloat = 60
 
     init(initialCrop: NormRect, sourceSize: CGSize, image: CGImage?, onConfirm: @escaping (NormRect) -> Void) {
         let size = Self.contentSize
@@ -172,6 +183,7 @@ final class CropSheetWindow: NSWindow {
         topBar.autoresizingMask = [.width, .minYMargin]
 
         let bottomBar = NSHostingView(rootView: CropBottomBarView(
+            hasPreview: image != nil,
             onConfirm: { [weak self] in self?.confirmTapped() },
             onDiscard: { [weak self] in self?.discardTapped() }))
         bottomBar.frame = NSRect(x: 0, y: 0, width: size.width, height: Self.bottomBarHeight)
@@ -263,6 +275,13 @@ private struct CropTopBarView: View {
     @State private var preset: CropPreset = .free
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Crop source").font(Font(Theme.headingFont(24)))
+                Spacer()
+                Text("Whole recording · dimensions in source pixels")
+                    .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+            }
         HStack(spacing: 16) {
             field("Size", "×", sizeMode: true)
             Menu {
@@ -270,8 +289,11 @@ private struct CropTopBarView: View {
                     Button(p.rawValue) { preset = p; state.applyAspect(p.ratio) }
                 }
             } label: {
-                Label("Select…", systemImage: "aspectratio")
+                TechMenuLabel(title: "Aspect · " + preset.rawValue, symbol: "aspectratio")
             }
+            .menuStyle(.borderlessButton)
+            .tint(Theme.textPrimaryColor)
+            .fixedSize()
             field("Position", nil, sizeMode: false)
             Button {
                 preset = .free
@@ -280,34 +302,35 @@ private struct CropTopBarView: View {
             } label: {
                 Label("Reset", systemImage: "crop")
             }
+            .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
             Spacer()
             Image(systemName: "keyboard")
                 .foregroundStyle(Theme.textSecondaryColor)
-                .help("Arrow keys nudge 1 px (⇧ 10 px)")
+                .help("Arrow keys move the selection; Shift moves it farther.")
+        }
         }
         .padding(.horizontal, 20)
         .frame(maxHeight: .infinity)
         .foregroundStyle(Theme.textPrimaryColor)
+        .background(Theme.bgPanelColor)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.strokeColor).frame(height: 1) }
     }
 
     private func field(_ title: String, _ separator: String?, sizeMode: Bool) -> some View {
         HStack(spacing: 8) {
             Text(title).font(Font(Theme.bodyFont)).foregroundStyle(Theme.textSecondaryColor)
-            numberField(sizeMode ? \CGRect.size.width : \CGRect.origin.x)
+            numberField(sizeMode ? \CGRect.size.width : \CGRect.origin.x, label: sizeMode ? "Crop width in pixels" : "Crop left in pixels")
             if let separator { Text(separator).foregroundStyle(Theme.textSecondaryColor) }
-            numberField(sizeMode ? \CGRect.size.height : \CGRect.origin.y)
+            numberField(sizeMode ? \CGRect.size.height : \CGRect.origin.y, label: sizeMode ? "Crop height in pixels" : "Crop top in pixels")
         }
     }
 
-    private func numberField(_ keyPath: WritableKeyPath<CGRect, CGFloat>) -> some View {
+    private func numberField(_ keyPath: WritableKeyPath<CGRect, CGFloat>, label: String) -> some View {
         TextField("", value: binding(keyPath), format: .number)
-            .textFieldStyle(.plain)
+            .textFieldStyle(TechFieldStyle())
+            .accessibilityLabel(label)
             .multilineTextAlignment(.trailing)
-            .foregroundStyle(Theme.textPrimaryColor)
-            .padding(6)
-            .frame(width: 56)
-            .background(Theme.bgControlColor)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .frame(width: 64)
     }
 
     private func binding(_ keyPath: WritableKeyPath<CGRect, CGFloat>) -> Binding<Int> {
@@ -325,21 +348,25 @@ private struct CropTopBarView: View {
 // MARK: - Bottom bar (Confirm/Discard)
 
 private struct CropBottomBarView: View {
+    let hasPreview: Bool
     let onConfirm: () -> Void
     let onDiscard: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
+            Text(hasPreview ? "Drag the edges to frame your recording." : "Source preview unavailable · use pixel fields or cancel.")
+                .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
             Spacer()
-            Button(action: onConfirm) {
-                Label("Confirm changes", systemImage: "return").padding(.horizontal, 6)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.accentColor)
-            Button("Discard changes", action: onDiscard)
-                .buttonStyle(.bordered)
-            Spacer()
+            Button("Cancel", action: onDiscard)
+                .buttonStyle(TechButtonStyle(kind: .quiet))
+                .keyboardShortcut(.cancelAction)
+            Button("Apply crop", action: onConfirm)
+                .buttonStyle(TechButtonStyle(kind: .primary))
+                .keyboardShortcut(.defaultAction)
         }
+        .padding(.horizontal, 20)
         .frame(maxHeight: .infinity)
+        .background(Theme.bgPanelColor)
+        .overlay(alignment: .top) { Rectangle().fill(Theme.strokeColor).frame(height: 1) }
     }
 }

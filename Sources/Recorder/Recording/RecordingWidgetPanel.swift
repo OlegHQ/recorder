@@ -45,14 +45,24 @@ import SwiftUI
     }
 }
 
-@Observable private final class WidgetState {
+@Observable final class WidgetState {
     var elapsed: Double = 0
     var isPaused = false
+
+    init(elapsed: Double = 0, isPaused: Bool = false) {
+        self.elapsed = elapsed
+        self.isPaused = isPaused
+    }
 }
 
 /// SPEC §4.7 mockup: `● 00:42 │ ■ Finish  ❙❙  ↺  🗑`.
-private struct RecordingWidgetView: View {
+struct RecordingWidgetView: View {
     var state: WidgetState
+    var onFinish: () -> Void = { RecordingController.shared.finish() }
+    var onPause: () -> Void = { RecordingController.shared.pause() }
+    var onResume: () -> Void = { RecordingController.shared.resume() }
+    var onRestart: () -> Void = { RecordingController.shared.restart() }
+    var onDelete: () -> Void = { RecordingController.shared.delete() }
 
     var body: some View {
         HStack(spacing: 16) {
@@ -62,18 +72,18 @@ private struct RecordingWidgetView: View {
             }
             divider
             HStack(spacing: 16) {
-                Button { RecordingController.shared.finish() } label: {
+                Button(action: onFinish) {
                     HStack(spacing: 4) {
                         Image(systemName: "stop.fill")
                         Text("Finish")
                     }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TechButtonStyle(kind: .primary, compact: true))
                 button(state.isPaused ? "play.fill" : "pause.fill", label: state.isPaused ? "Resume" : "Pause") {
-                    state.isPaused ? RecordingController.shared.resume() : RecordingController.shared.pause()
+                    state.isPaused ? onResume() : onPause()
                 }
-                button("arrow.counterclockwise", label: "Restart") { RecordingController.shared.restart() }
-                button("trash", label: "Delete") { RecordingController.shared.delete() }
+                button("arrow.counterclockwise", label: "Restart", action: onRestart)
+                button("trash", label: "Delete", action: onDelete)
             }
         }
         .foregroundStyle(Theme.textPrimaryColor)
@@ -84,8 +94,9 @@ private struct RecordingWidgetView: View {
 
     private func button(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) { Image(systemName: symbol) }
-            .buttonStyle(.plain)
+            .buttonStyle(TechButtonStyle(kind: .quiet, compact: true))
             .help(label)
+            .accessibilityLabel(label)
     }
 
     private var divider: some View {

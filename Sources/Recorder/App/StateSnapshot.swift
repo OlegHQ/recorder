@@ -206,6 +206,7 @@ enum StateSnapshot {
                 "preview": previewInfo(controller.previewView),
                 "timeline": timelineInfo(controller.coreTimelineView),
                 "inspectorPanel": inspectorPanelDescription(controller),
+                "previewShowsResult": model.previewShowsResult,
                 "exportSheet": controller.window?.attachedSheet != nil ? "open" : "closed",
             ]
         }
@@ -237,9 +238,14 @@ enum StateSnapshot {
     /// doc comment in `EditorWindowController`).
     private static func inspectorPanelDescription(_ controller: EditorWindowController) -> String {
         let model = controller.model
+        if model.inspectorShowsProject { return "\(model.inspectorTab.title) · whole project" }
+        let count = model.selectedClips.count + model.selection.count
+        if count > 1 { return "\(count) selected items" }
         if let i = model.selectedClip, model.project.clips.indices.contains(i) { return "Clip panel (clip \(i))" }
         if model.selection.count == 1, let id = model.selection.first {
             let key = id.uuidString
+            if model.project.cameraClips.contains(where: { $0.id == key }) { return "Camera footage panel" }
+            if model.project.keystrokeClips.contains(where: { $0.id == key }) { return "Keystroke clip panel" }
             if model.project.zooms.contains(where: { $0.id == key }) { return "Zoom panel" }
             if model.project.layouts.contains(where: { $0.id == key }) { return "Layout panel" }
             if model.project.masks.contains(where: { $0.id == key }) { return "Mask panel" }

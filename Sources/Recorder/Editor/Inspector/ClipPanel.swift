@@ -17,23 +17,26 @@ struct ClipPanel: View {
             InspectorSelectionHeader(title: "Clip") { deselect() }
 
             if let clip {
+                Text("Playback speed").font(Font(Theme.headingFont(22)))
                 presetPicker(current: clip.speed)
 
                 LabeledSlider(title: "Custom", value: speedBinding, range: 0.25...16, defaultValue: 1,
                               format: { String(format: "%.2f×", $0) }, onEditingChanged: gesture("Speed"))
 
+                Divider().padding(.vertical, 4)
                 HStack {
                     Text("Duration")
-                        .font(.system(size: 13))
+                        .font(Font(Theme.bodyFont))
                         .foregroundStyle(Theme.textSecondaryColor)
                     Spacer()
                     Text("\(timecode(clip.sourceEnd - clip.sourceStart)) → \(timecode(clip.outputDuration))")
-                        .font(.system(size: 13).monospacedDigit())
+                        .font(Font(Theme.timecodeFont(11)))
                         .foregroundStyle(Theme.textPrimaryColor)
                 }
 
                 Button("Remove clip", role: .destructive, action: removeClip)
-                    .disabled(model.project.clips.count <= 1)
+                    .buttonStyle(TechButtonStyle(kind: .danger, compact: true))
+
             }
         }
     }
@@ -44,13 +47,7 @@ struct ClipPanel: View {
                 Button(formatSpeed(preset) + "×") {
                     model.edit("Speed") { $0.setSpeed(clipIndex, preset) }
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(current == preset ? Theme.accentColor : Theme.bgControlColor)
-                .foregroundStyle(current == preset ? Color.white : Theme.textSecondaryColor)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
-                .font(.system(size: 12))
+                .buttonStyle(TechButtonStyle(kind: current == preset ? .primary : .secondary, compact: true))
             }
         }
     }
@@ -68,7 +65,7 @@ struct ClipPanel: View {
     }
 
     private func removeClip() {
-        model.edit("Remove clip") { _ = $0.removeClip(clipIndex) }
+        model.edit("Remove clip") { $0.deleteClips([clipIndex]) }
         deselect()
     }
 

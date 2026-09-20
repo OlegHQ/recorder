@@ -269,8 +269,7 @@ enum PerfSelfTest {
         var cpuPctSamples: [Double] = []
         var lastWall = Date()
         for _ in 0..<seconds {
-            let deadline = Date().addingTimeInterval(1)
-            while Date() < deadline { RunLoop.main.run(mode: .default, before: deadline) }
+            try await Task.sleep(for: .seconds(1))
             let now = Date()
             let (cpu, rss) = ProcStats.snapshot()
             let wallDelta = now.timeIntervalSince(lastWall)

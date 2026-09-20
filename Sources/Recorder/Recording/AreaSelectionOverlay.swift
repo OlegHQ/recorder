@@ -28,7 +28,11 @@ enum AreaSelectionOverlay {
         win.makeKeyAndOrderFront(nil)
         guard window === win else { return }
 
-        let panel = FloatingPanel(content: AreaFieldsHostingView(rootView: AreaFieldsView(state: state)), draggable: false)
+        let rectBinding = Binding(
+            get: { state.topLeft },
+            set: { state.topLeft = $0 }
+        )
+        let panel = FloatingPanel(content: AreaFieldsHostingView(rootView: AreaFieldsView(rect: rectBinding)), draggable: false)
         panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - panel.frame.width / 2,
                                       y: screen.visibleFrame.minY + 40 + 56 + 12)) // above the toolbar (SPEC §4.5 mockup)
         fieldsPanel = panel
@@ -42,10 +46,12 @@ enum AreaSelectionOverlay {
     }
 
     static func close() {
+        let window = self.window
+        let fieldsPanel = self.fieldsPanel
+        self.window = nil
+        self.fieldsPanel = nil
         window?.orderOut(nil)
-        window = nil
         fieldsPanel?.orderOut(nil)
-        fieldsPanel = nil
     }
 
     /// `Start recording` hook, mirroring `SourcePickerOverlay.startRecording(target:)`.
@@ -151,22 +157,28 @@ private final class AreaSelectionWindow: NSPanel {
 }
 
 /// SPEC §4.5 mockup: Size/Position numeric fields, two-way bound to the rect via `AreaSelectionState.topLeft`.
-private struct AreaFieldsView: View {
-    var state: AreaSelectionState
+struct AreaFieldsView: View {
+    @Binding var rect: CGRect
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Selection").font(Font(Theme.labelFont)).foregroundStyle(Theme.textPrimaryColor)
+                Spacer(minLength: 12)
+                Text("PX").font(Font(Theme.captionFont)).foregroundStyle(Theme.textTertiaryColor)
+            }
             row("Size", \.size.width, \.size.height, separator: "×")
             row("Position", \.origin.x, \.origin.y, separator: "")
         }
         .padding(16)
+        .signalWindow()
     }
 
     private func row(_ title: String, _ a: WritableKeyPath<CGRect, CGFloat>, _ b: WritableKeyPath<CGRect, CGFloat>,
                       separator: String) -> some View {
         HStack(spacing: 8) {
             Text(title).font(Font(Theme.bodyFont)).foregroundStyle(Theme.textSecondaryColor)
-                .frame(width: 56, alignment: .leading)
+                .frame(width: 70, alignment: .leading)
             field(a)
             if !separator.isEmpty { Text(separator).foregroundStyle(Theme.textSecondaryColor) }
             field(b)
@@ -176,22 +188,18 @@ private struct AreaFieldsView: View {
 
     private func field(_ keyPath: WritableKeyPath<CGRect, CGFloat>) -> some View {
         TextField("", value: binding(keyPath), format: .number)
-            .textFieldStyle(.plain)
+            .textFieldStyle(TechFieldStyle())
             .multilineTextAlignment(.trailing)
-            .foregroundStyle(Theme.textPrimaryColor)
-            .padding(6)
-            .frame(width: 52)
-            .background(Theme.bgControlColor)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .frame(width: 62)
     }
 
     private func binding(_ keyPath: WritableKeyPath<CGRect, CGFloat>) -> Binding<Int> {
         Binding(
-            get: { Int(state.topLeft[keyPath: keyPath].rounded()) },
+            get: { Int(rect[keyPath: keyPath].rounded()) },
             set: { newValue in
-                var r = state.topLeft
+                var r = rect
                 r[keyPath: keyPath] = CGFloat(newValue)
-                state.topLeft = r
+                rect = r
             }
         )
     }

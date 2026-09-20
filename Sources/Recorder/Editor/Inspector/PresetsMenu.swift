@@ -62,13 +62,10 @@ struct PresetsMenu: View {
             Divider()
             Button("Import…", action: importPreset)
         } label: {
-            HStack(spacing: 2) {
-                Text("Presets").font(.system(size: 11))
-                Image(systemName: "chevron.down").font(.system(size: 9))
-            }
-            .foregroundStyle(Theme.textSecondaryColor)
+            Text("Presets").font(Font(Theme.labelFont))
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
         .fixedSize()
     }
 
@@ -94,7 +91,7 @@ struct PresetsMenu: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-        try? PresetStore.save(Preset(name: name, from: model.project))
+        _ = try? PresetStore.save(Preset(name: name, from: model.project))
         presets = PresetStore.list()
     }
 
@@ -113,7 +110,7 @@ struct PresetsMenu: View {
         guard panel.runModal() == .OK, let url = panel.url,
               let data = try? Data(contentsOf: url),
               let preset = try? JSONDecoder().decode(Preset.self, from: data) else { return }
-        try? PresetStore.save(preset)
+        _ = try? PresetStore.save(preset)
         presets = PresetStore.list()
     }
 }
