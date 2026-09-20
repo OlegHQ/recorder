@@ -13,6 +13,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Check local installer without changing app or privacy grants
+        run: ruby scripts/test-install.rb
       - run: make test
       - run: make app
       - run: codesign --verify --deep --strict build/Recorder.app

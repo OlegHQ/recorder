@@ -2,13 +2,19 @@
   <img src="docs/images/hero.png" alt="Recorder — screen recording, with room to edit. Capture, edit and export." width="100%">
 </p>
 
+> **Release DMG currently has an unresolved permissions failure.** Users report
+> Recorder still cannot detect granted Screen Recording/Accessibility access, including
+> in v0.1.4. The previous permission fixes did **not** resolve this reported failure.
+> Do not treat the DMG as a working installation path. A self-signed local install is
+> available below, but is not yet verified to resolve this issue on affected Macs.
+
 <p align="center">
   Native macOS screen recording and non-destructive editing.<br>
   macOS 15+ · Apple Silicon &amp; Intel · Open source
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlegHQ/recorder/releases/latest"><strong>Download for macOS</strong></a>
+  <a href="https://github.com/OlegHQ/recorder/releases/latest">Release DMG — known permission issue</a>
   &nbsp;·&nbsp; <a href="#installation">Installation</a>
   &nbsp;·&nbsp; <a href="#build-from-source">Build from source</a>
   &nbsp;·&nbsp; <a href="https://github.com/OlegHQ/recorder/issues">Report an issue</a>
@@ -40,6 +46,10 @@ result with cuts, zooms, camera placement, cursor effects and keystroke overlays
 </p>
 
 ## Installation
+
+**The release DMG installation below is currently affected by the unresolved
+permission-detection failure described above.** Passing export/CI checks does not
+establish that permission grants work on an affected user's Mac.
 
 1. Download `Recorder-<version>-universal.dmg` from the
    [latest release](https://github.com/OlegHQ/recorder/releases/latest).
@@ -137,14 +147,35 @@ make app
 open build/Recorder.app
 ```
 
-There are no third-party Swift package dependencies. For repeated local installs,
-`make cert` creates a local **Recorder Dev** signing identity so permission grants
-can survive rebuilds; it does not notarize the app. `make install` installs the build
-in Applications and replaces an existing Recorder app.
+There are no third-party Swift package dependencies.
+
+### Self-signed local install and permission reset
+
+```sh
+make install
+open /Applications/Recorder.app
+```
+
+Run as your normal logged-in user, **not with sudo**. `make install` creates or reuses
+the local **Recorder Dev** certificate (Keychain may ask for access), builds with that
+identity, verifies the signature, quits running Recorder copies normally, and replaces
+`/Applications/Recorder.app`. It resets only Recorder's Screen Recording, Accessibility,
+Camera and Microphone grants for both `space.microapps.recorder` and legacy
+`sh.nexo.recorder`. Every `make install` intentionally resets these grants.
+
+Recordings, presets and preferences are not removed. Approve fresh macOS permissions
+after launching the installed copy; quit and reopen if macOS requires it. If Recorder
+cannot quit or signing fails, installation stops instead of force-killing it or falling
+back to ad-hoc signing. Errors resetting the current identity are reported as failures.
+
+`make cert` alone creates/reuses the certificate; `make app` builds without resetting
+permissions or replacing the installed app. Self-signing is **not** Apple notarization
+and is **not yet confirmed** to fix the reported grant-detection failure.
 
 ### Verify changes
 
 ```sh
+ruby scripts/test-install.rb # isolated installer/certificate tests; no real grants reset
 make test
 make app
 build/Recorder.app/Contents/MacOS/Recorder --selftest export-colors

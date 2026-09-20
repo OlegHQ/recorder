@@ -34,11 +34,10 @@ gallery-png: app
 	$(APP)/Contents/MacOS/Recorder --selftest ui-kit-png $(GALLERY_PNG)
 	open $(GALLERY_PNG)
 
-install: app
-	-pkill -x Recorder
-	rm -rf /Applications/Recorder.app
-	cp -R $(APP) /Applications/Recorder.app
-	@echo "Installed /Applications/Recorder.app (signed with: $(SIGN_ID))"
+install:
+	$(MAKE) cert
+	$(MAKE) app APP=build/Recorder.app SIGN_ID="Recorder Dev"
+	sh scripts/install-app.sh
 
 uninstall:
 	rm -rf /Applications/Recorder.app
@@ -49,10 +48,15 @@ clean:
 # One-time: self-signed code-signing identity in the login keychain (asks for the keychain password once).
 # Remove with: security delete-identity -c "Recorder Dev"
 cert:
-	@security find-identity -p codesigning | grep -q "Recorder Dev" && echo "Recorder Dev already exists" || ( \
-	T=$$(mktemp -d) && cd $$T && \
-	openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout k.pem -out c.pem -subj "/CN=Recorder Dev" \
-	  -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null && \
-	openssl pkcs12 -export -legacy -inkey k.pem -in c.pem -out id.p12 -passout pass:recorder -name "Recorder Dev" && \
-	security import id.p12 -k ~/Library/Keychains/login.keychain-db -P recorder -T /usr/bin/codesign && \
-	rm -rf $$T && echo "Created identity: Recorder Dev" )
+	@set -eu; \
+	if security find-identity -p codesigning | grep -q '"Recorder Dev"'; then \
+	  echo "Recorder Dev already exists"; \
+	else \
+	  cert_tmp=$$(mktemp -d); trap 'rm -rf "$$cert_tmp"' EXIT HUP INT TERM; cd "$$cert_tmp"; \
+	  /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout k.pem -out c.pem -subj "/CN=Recorder Dev" \
+	    -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=critical,codeSigning"; \
+	  /usr/bin/openssl pkcs12 -export -inkey k.pem -in c.pem -out id.p12 -passout pass:recorder -name "Recorder Dev" \
+	    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1; \
+	  security import id.p12 -k "$$HOME/Library/Keychains/login.keychain-db" -P recorder -T /usr/bin/codesign; \
+	  echo "Created identity: Recorder Dev"; \
+	fi
