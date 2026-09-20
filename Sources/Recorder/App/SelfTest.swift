@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
@@ -262,6 +263,10 @@ enum SelfTest {
                                                       userInfo: [NSLocalizedDescriptionKey: message]) }
             }
             try require(Bundle.main.bundleIdentifier == AppIdentity.bundleID, "Wrong bundle ID")
+            // CI executes the binary directly, bypassing the LaunchServices
+            // registration performed when a user opens the .app in Finder.
+            try require(LSRegisterURL(Bundle.main.bundleURL as CFURL, true) == noErr,
+                        "Could not register app document types with LaunchServices")
             try require(AppIdentity.projectTypes.map(\.identifier) ==
                          ["space.microapps.recorder.project", "sh.nexo.recorder.project"], "Wrong project types")
             try require(AppIdentity.projectTypes.allSatisfy { $0.conforms(to: .package) }, "Project types must conform to package")
