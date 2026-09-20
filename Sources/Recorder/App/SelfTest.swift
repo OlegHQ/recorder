@@ -268,7 +268,7 @@ enum SelfTest {
             try require(LSRegisterURL(Bundle.main.bundleURL as CFURL, true) == noErr,
                         "Could not register app document types with LaunchServices")
             try require(AppIdentity.projectTypes.map(\.identifier) ==
-                         ["space.microapps.recorder.project", "sh.nexo.recorder.project"], "Wrong project types")
+                         ["space.microapps.recorder.project", "sh.nexo.recorder.project"], "Wrong project types: \(AppIdentity.projectTypes.map(\.identifier))")
             try require(AppIdentity.projectTypes.allSatisfy { $0.conforms(to: .package) }, "Project types must conform to package")
             let defaults = UserDefaults.standard
             let old = "Recorder.migration-test.old.\(UUID().uuidString)"
