@@ -18,6 +18,7 @@ enum ExportSheet {
     static func present(for model: EditorModel, on window: NSWindow) {
         let sheet = ExportSheetWindow(model: ExportSheetModel(editorModel: model))
         window.beginSheet(sheet) { _ in }
+        sheet.monitorOutsideClicks()
     }
 }
 
@@ -39,6 +40,7 @@ enum ExportSheet {
     private(set) var phase: Phase = .idle
     private(set) var errorMessage: String?
     private(set) var copyStatus: String?
+    private(set) var isCancelling = false
 
     private var exporter: Exporter?
     private var exportStart: Date?
@@ -97,6 +99,7 @@ enum ExportSheet {
     func startExport(to destination: URL, copyToPasteboardWhenDone: Bool = false, pasteboard: NSPasteboard = .general) {
         guard !isExporting else { return }
         errorMessage = nil
+        isCancelling = false
         copyStatus = nil
         exportStart = Date()
         phase = .exporting(fraction: 0, frame: 0, total: 0)
@@ -118,6 +121,7 @@ enum ExportSheet {
                 await MainActor.run {
                     guard let self, self.exporter === exporter else { return }
                     self.exporter = nil
+                    self.isCancelling = false
                     if copyToPasteboardWhenDone { self.copyResult(destination, pasteboard: pasteboard) }
                     self.phase = .done(url: destination, sizeBytes: Self.fileSize(destination))
                 }
@@ -125,6 +129,7 @@ enum ExportSheet {
                 await MainActor.run {
                     guard let self, self.exporter === exporter else { return }
                     self.exporter = nil
+                    self.isCancelling = false
                     if case Exporter.ExportError.cancelled = error { self.errorMessage = nil }
                     else if let error = error as? Exporter.ExportError {
                         self.errorMessage = error.description
@@ -136,7 +141,11 @@ enum ExportSheet {
     }
 
     /// AC-EXP-3: cancel stops within 1 s; `Exporter.run()` itself deletes the partial file.
-    func cancel() { exporter?.cancel() }
+    func cancel() {
+        guard isExporting, !isCancelling else { return }
+        isCancelling = true
+        exporter?.cancel()
+    }
 
     func backToIdle() { phase = .idle }
 
@@ -206,12 +215,11 @@ extension ExportSettings {
 
 // MARK: - Window
 
-/// Fixed-size sheet window, same chrome recipe as `CropSheetWindow` (hidden title, hosted SwiftUI
-/// content, Esc/red-close = end the sheet — except mid-export, where the window just isn't closable:
-/// SPEC §6.8 "editing is locked during export" extends to the sheet itself, so there's nothing an
-/// early close should discard).
+/// Fixed-size sheet window, same chrome recipe as `CropSheetWindow`: hidden title, hosted SwiftUI
+/// content. Escape cancels an active export; otherwise Escape/Cancel dismisses the sheet.
 final class ExportSheetWindow: NSWindow {
     let model: ExportSheetModel
+    private var outsideClickMonitor: Any?
 
     private static let contentSize = NSSize(width: 620, height: 440)
 
@@ -240,15 +248,31 @@ final class ExportSheetWindow: NSWindow {
 
     override var canBecomeKey: Bool { true }
 
-    /// Esc: no-op mid-export (nothing to discard mid-write); otherwise ends the sheet like Crop's Discard.
-    override func cancelOperation(_ sender: Any?) { guard !model.isExporting else { return }; end() }
+    override func cancelOperation(_ sender: Any?) {
+        if model.isExporting { model.cancel() } else { end() }
+    }
+
+    func monitorOutsideClicks() {
+        outsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self, let parent = self.sheetParent, event.window === parent,
+                  self.attachedSheet == nil, !self.model.isExporting else { return event }
+            self.end()
+            return nil // Dismiss without activating an editor control underneath.
+        }
+    }
+
+    deinit {
+        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+    }
 
     override func close() {
-        guard !model.isExporting else { return }
+        guard !model.isExporting else { model.cancel(); return }
         if sheetParent != nil { end() } else { super.close() }
     }
 
     private func end() {
+        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        outsideClickMonitor = nil
         if let parent = sheetParent { parent.endSheet(self) } else { orderOut(nil) }
     }
 
@@ -368,27 +392,36 @@ struct ExportSheetView: View {
     private var bottomArea: some View {
         switch model.phase {
         case .idle:
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
                     Text("Estimated size  \(model.estimatedSizeText)")
+                    Spacer()
                     Text("Final size may vary").foregroundStyle(Theme.textSecondaryColor)
                 }
-                .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textPrimaryColor)
-                Spacer()
-                Button("Copy to clipboard", action: onCopyToClipboard)
-                    .buttonStyle(TechButtonStyle(kind: .secondary))
-                Button("Export…", action: onChooseDestination)
-                    .buttonStyle(TechButtonStyle(kind: .primary))
-                    .keyboardShortcut(.defaultAction)
+                .font(Font(Theme.captionFont)).foregroundStyle(Theme.textPrimaryColor)
+                HStack {
+                    Button("Cancel", action: onDone)
+                        .buttonStyle(TechButtonStyle(kind: .secondary))
+                        .keyboardShortcut(.cancelAction)
+                    Spacer()
+                    Button("Copy to clipboard", action: onCopyToClipboard)
+                        .buttonStyle(TechButtonStyle(kind: .secondary))
+                    Button("Export…", action: onChooseDestination)
+                        .buttonStyle(TechButtonStyle(kind: .primary))
+                        .keyboardShortcut(.defaultAction)
+                }
             }
         case let .exporting(fraction, _, _):
             VStack(alignment: .leading, spacing: 8) {
-                Text("Exporting…").foregroundStyle(Theme.textPrimaryColor)
+                Text(model.isCancelling ? "Cancelling…" : "Exporting…").foregroundStyle(Theme.textPrimaryColor)
                 ProgressView(value: fraction).tint(Theme.accentColor)
                 HStack {
                     Text(model.progressDetailText).foregroundStyle(Theme.textSecondaryColor).font(Font(Theme.captionFont))
                     Spacer()
-                    Button("Cancel") { model.cancel() }.buttonStyle(TechButtonStyle(kind: .danger))
+                    Button(model.isCancelling ? "Cancelling…" : "Cancel export") { model.cancel() }
+                        .buttonStyle(TechButtonStyle(kind: .secondary))
+                        .keyboardShortcut(.cancelAction)
+                        .disabled(model.isCancelling)
                 }
             }
         case let .done(url, sizeBytes):
@@ -530,7 +563,9 @@ enum ExportSheetSelfTest {
         cancelledModel.settings = ExportSettings(format: .mp4, shortEdge: 720, fps: 30, quality: .high, codec: .h264)
         let cancelURL = FileManager.default.temporaryDirectory.appendingPathComponent("export-sheet-cancel-\(UUID().uuidString).mp4")
         cancelledModel.startExport(to: cancelURL)
-        cancelledModel.cancel()
+        let cancelWindow = ExportSheetWindow(model: cancelledModel)
+        cancelWindow.cancelOperation(nil)
+        guard cancelledModel.isCancelling else { throw Fail(description: "Escape did not cancel export") }
         deadline = Date().addingTimeInterval(15)
         while cancelledModel.isExporting {
             if Date() > deadline { throw Fail(description: "cancel never settled") }
@@ -539,7 +574,7 @@ enum ExportSheetSelfTest {
         guard !FileManager.default.fileExists(atPath: cancelURL.path) else {
             throw Fail(description: "cancelled export left a partial file at \(cancelURL.path)")
         }
-        guard cancelledModel.phase == .idle, cancelledModel.errorMessage == nil else {
+        guard cancelledModel.phase == .idle, !cancelledModel.isCancelling, cancelledModel.errorMessage == nil else {
             throw Fail(description: "cancel presented as a failure")
         }
         print("export-sheet cancel OK")
@@ -561,6 +596,27 @@ enum ExportSheetSelfTest {
             throw Fail(description: "retry output is not playable")
         }
         print("export-sheet retry OK; settings retained and output playable")
+
+        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        parent.isReleasedWhenClosed = false
+        parent.orderFront(nil)
+        defer { parent.orderOut(nil) }
+        ExportSheet.present(for: editorModel, on: parent)
+        try await Task.sleep(for: .milliseconds(250))
+        guard parent.attachedSheet is ExportSheetWindow else { throw Fail(description: "export sheet not presented") }
+        let click = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 10, y: 10),
+                                       modifierFlags: [], timestamp: 0, windowNumber: parent.windowNumber,
+                                       context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        NSApp.sendEvent(click)
+        try await Task.sleep(for: .milliseconds(250))
+        guard parent.attachedSheet == nil else { throw Fail(description: "outside click did not dismiss export sheet") }
+        ExportSheet.present(for: editorModel, on: parent)
+        try await Task.sleep(for: .milliseconds(250))
+        (parent.attachedSheet as? ExportSheetWindow)?.cancelOperation(nil)
+        try await Task.sleep(for: .milliseconds(250))
+        guard parent.attachedSheet == nil else { throw Fail(description: "Escape did not dismiss idle sheet") }
+        print("export-sheet outside click and idle Escape dismissal OK")
     }
 
     /// Renders `ExportSheetView` offscreen (dark appearance, forced before the hosting view is

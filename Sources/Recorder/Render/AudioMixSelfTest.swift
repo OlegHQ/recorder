@@ -71,6 +71,26 @@ enum AudioMixSelfTest {
         }
         guard rmsMuted < rmsFull * 0.05 else { throw Fail(description: "muted export RMS \(rmsMuted) isn't ~silent (full=\(rmsFull))") }
 
+        // Cancellation after the old stall point must stop promptly and remove the partial MP4.
+        let cancelURL = tmp.appendingPathComponent("cancelled.mp4")
+        let cancelledExport = Exporter(model: model, settings: ExportSettings(shortEdge: 180, fps: 30), destination: cancelURL)
+        var cancelledAt: ContinuousClock.Instant?
+        cancelledExport.progress = { [weak cancelledExport] _, frame, _ in
+            if frame == 32 {
+                cancelledAt = ContinuousClock.now
+                cancelledExport?.cancel()
+            }
+        }
+        do {
+            try await cancelledExport.run()
+            throw Fail(description: "cancelled export unexpectedly completed")
+        } catch Exporter.ExportError.cancelled { }
+        guard let cancelledAt, ContinuousClock.now - cancelledAt < .seconds(1),
+              !fm.fileExists(atPath: cancelURL.path) else {
+            throw Fail(description: "mid-export cancellation was slow or left a partial file")
+        }
+        print("audio-mix: cancellation at frame 32 completed within 1 s and removed partial file")
+
         // (c) denoise: peak normalised to ≈ −1 dBFS (0.891 linear). Mic must be un-muted/full-volume
         // here — the last `exportAndMeasureRMS` call above (`muted`) left `audio.micMuted = true`.
         model.edit("Denoise") { $0.audio.denoise = true; $0.audio.micMuted = false; $0.audio.micVolume = 1 }
@@ -139,9 +159,30 @@ enum AudioMixSelfTest {
         try? FileManager.default.removeItem(at: destination)
         var settings = ExportSettings()
         settings.shortEdge = 180
-        settings.fps = 5   // a handful of output frames is enough for an audio-only check
+        settings.fps = 30  // 60 frames exceeds the writer queue that stalled at frame 32.
         let exporter = Exporter(model: model, settings: settings, destination: destination)
+        let watchdog = Task {
+            try await Task.sleep(nanoseconds: 30_000_000_000)
+            exporter.cancel()
+        }
+        defer { watchdog.cancel() }
         try await exporter.run()
+        let asset = AVURLAsset(url: destination)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+            throw SelfTestArgError.usage("audio-mix export has no video")
+        }
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        ])
+        reader.add(output)
+        guard reader.startReading() else { throw SelfTestArgError.usage("cannot read exported video") }
+        var frames = 0
+        while output.copyNextSampleBuffer() != nil { frames += 1 }
+        let expected = Int((model.timeMap.outputDuration * Double(settings.fps)).rounded())
+        guard reader.status == .completed, frames == expected else {
+            throw SelfTestArgError.usage("audio-mix video frames \(frames), expected \(expected)")
+        }
     }
 
     /// Decodes an exported file's audio track to mono Float32 PCM at a fixed 44.1 kHz (AVFoundation

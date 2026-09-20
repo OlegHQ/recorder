@@ -49,15 +49,15 @@ final class Exporter {
     /// the main actor itself if it touches UI state.
     var progress: (Double, Int, Int) -> Void = { _, _, _ in }
 
-    // ponytail: a plain flag, not an actor/lock — `cancel()` racing one extra frame past the check
-    // is harmless (AC-EXP-3 only asks for "within 1 s"), and language mode 5 doesn't require more.
-    nonisolated(unsafe) private var isCancelled = false
+    private let cancellationLock = NSLock()
+    private var cancelled = false
+    private var isCancelled: Bool { cancellationLock.withLock { cancelled } }
 
     init(model: EditorModel, settings: ExportSettings, destination: URL) {
         self.model = model; self.settings = settings; self.destination = destination
     }
 
-    func cancel() { isCancelled = true }
+    func cancel() { cancellationLock.withLock { cancelled = true } }
 
     func run() async throws {
         // T-507: GIF is a wholly separate encode path (ImageIO, not AVAssetWriter) — kept out of
@@ -179,25 +179,59 @@ final class Exporter {
             throw ExportError.failed("writer failed to start: \(writer.error?.localizedDescription ?? "?")")
         }
         writer.startSession(atSourceTime: .zero)
-
-        func failOrCancel(_ error: Error) throws -> Never {
-            reader.cancelReading()
-            writer.cancelWriting()
-            try? FileManager.default.removeItem(at: destination)
-            throw error
+        defer {
+            if writer.status != .completed {
+                reader.cancelReading()
+                writer.cancelWriting()
+                try? FileManager.default.removeItem(at: destination)
+            }
         }
 
-        // MARK: Video pass — one output frame every 1/fps, holding the last decoded frame for gaps.
+        // MARK: Feed both writer inputs so neither track stalls waiting for the other.
 
         let screenHold = FrameHold(output: screenOutput)
         let cameraHold = cameraOutput.map(FrameHold.init)
         let totalFrames = max(1, Int((outputDuration * Double(settings.fps)).rounded()))
 
-        for n in 0..<totalFrames {
-            if isCancelled { try failOrCancel(ExportError.cancelled) }
-            while !videoInput.isReadyForMoreMediaData {
-                if isCancelled { try failOrCancel(ExportError.cancelled) }
+        let clock = ContinuousClock()
+        var lastAppend = clock.now
+        var n = 0
+        var audioFinished = audioInput == nil
+        while n < totalFrames || !audioFinished {
+            if isCancelled || Task.isCancelled { throw ExportError.cancelled }
+            guard clock.now - lastAppend < .seconds(30) else {
+                throw ExportError.failed("The encoder stopped responding. Please try exporting again.")
+            }
+            guard writer.status == .writing else {
+                throw ExportError.failed("writer stopped: \(writer.error?.localizedDescription ?? "?")")
+            }
+            guard reader.status != .failed else {
+                throw ExportError.failed("reader failed: \(reader.error?.localizedDescription ?? "?")")
+            }
+
+            // AVAssetWriter applies backpressure across tracks. Feeding all video before audio
+            // fills its video queue (typically at frame 32) and waits forever for audio.
+            if let audioOutput, let audioInput, !audioFinished {
+                while audioInput.isReadyForMoreMediaData {
+                    if isCancelled { throw ExportError.cancelled }
+                    guard let sample = audioOutput.copyNextSampleBuffer() else {
+                        guard reader.status != .failed else {
+                            throw ExportError.failed("audio read failed: \(reader.error?.localizedDescription ?? "?")")
+                        }
+                        audioInput.markAsFinished()
+                        audioFinished = true
+                        break
+                    }
+                    guard audioInput.append(sample) else {
+                        throw ExportError.failed("audio append failed: \(writer.error?.localizedDescription ?? "?")")
+                    }
+                    lastAppend = clock.now
+                }
+            }
+            guard n < totalFrames, videoInput.isReadyForMoreMediaData else {
+                if n == totalFrames && audioFinished { break }
                 try await Task.sleep(nanoseconds: 2_000_000)
+                continue
             }
 
             let t = Double(n) / Double(settings.fps)
@@ -205,42 +239,35 @@ final class Exporter {
             let cameraTexture = cameraHold?.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) }
             let state = await makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
 
-            guard let pool = adaptor.pixelBufferPool else { try failOrCancel(ExportError.failed("no pixel buffer pool")) }
+            guard let pool = adaptor.pixelBufferPool else { throw ExportError.failed("no pixel buffer pool") }
             var pixelBuffer: CVPixelBuffer?
             CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
             guard let pixelBuffer, let target = textureCache.texture(from: pixelBuffer)?.luma,
                   let commandBuffer = commandQueue.makeCommandBuffer() else {
-                try failOrCancel(ExportError.failed("failed to set up a render target"))
+                throw ExportError.failed("failed to set up a render target")
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
-            do { try await commandBuffer.commitAndWait() }
-            catch { try failOrCancel(error) }
+            try await commandBuffer.commitAndWait()
 
             let pts = CMTime(value: Int64(n), timescale: CMTimeScale(settings.fps))
             guard adaptor.append(pixelBuffer, withPresentationTime: pts) else {
-                try failOrCancel(ExportError.failed("append failed: \(writer.error?.localizedDescription ?? "?")"))
+                throw ExportError.failed("append failed: \(writer.error?.localizedDescription ?? "?")")
             }
-            progress(Double(n + 1) / Double(totalFrames), n + 1, totalFrames)
-        }
-        videoInput.markAsFinished()
-
-        // MARK: Audio pass — straight passthrough (PCM in, AAC out); `AVAudioMix` already applied
-        // the per-track volumes (§6.2) inside the reader output. Not interleaved with video: a
-        // single MP4's sample tables don't need it, only progressive-download streaming does.
-
-        if let audioOutput, let audioInput {
-            while let sampleBuffer = audioOutput.copyNextSampleBuffer() {
-                if isCancelled { try failOrCancel(ExportError.cancelled) }
-                while !audioInput.isReadyForMoreMediaData {
-                    if isCancelled { try failOrCancel(ExportError.cancelled) }
-                    try await Task.sleep(nanoseconds: 2_000_000)
-                }
-                audioInput.append(sampleBuffer)
-            }
-            audioInput.markAsFinished()
+            lastAppend = clock.now
+            n += 1
+            progress(Double(n) / Double(totalFrames), n, totalFrames)
+            if n == totalFrames { videoInput.markAsFinished() }
         }
 
-        await writer.finishWriting()
+        writer.finishWriting {}
+        let finishStart = clock.now
+        while writer.status == .writing {
+            if isCancelled || Task.isCancelled { throw ExportError.cancelled }
+            guard clock.now - finishStart < .seconds(30) else {
+                throw ExportError.failed("The encoder could not finish the file. Please try exporting again.")
+            }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
         guard writer.status == .completed else {
             throw ExportError.failed("writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
         }
@@ -501,15 +528,19 @@ enum ExporterSelfTest {
     /// decodes and has the requested size (720p default short edge → the project's own aspect).
     @MainActor
     static func runExportSelfTest(_ args: [String]) async throws {
-        guard args.count >= 2 else { throw SelfTestArgError.usage("export <package> <out.mp4>") }
+        guard args.count >= 2 else { throw SelfTestArgError.usage("export <package> <out.mp4> [fps] [shortEdge] [h264|hevc]") }
         let packageURL = URL(fileURLWithPath: args[0])
         let outURL = URL(fileURLWithPath: args[1])
         let model = try loadEditorModel(package: packageURL)
         let expectedDuration = model.timeMap.outputDuration
 
         var settings = ExportSettings()
-        settings.shortEdge = 720
-        settings.fps = 30
+        settings.fps = args.count > 2 ? (Int(args[2]) ?? 30) : 30
+        settings.shortEdge = args.count > 3 ? (Int(args[3]) ?? 720) : 720
+        settings.codec = args.count > 4 ? (ExportSettings.Codec(rawValue: args[4]) ?? .h264) : .h264
+        guard [24, 30, 60].contains(settings.fps), [720, 1080, 2160].contains(settings.shortEdge) else {
+            throw SelfTestArgError.usage("unsupported fps or resolution")
+        }
         let exporter = Exporter(model: model, settings: settings, destination: outURL)
         var lastFrame = 0
         exporter.progress = { _, frame, _ in lastFrame = frame }
@@ -532,19 +563,25 @@ enum ExporterSelfTest {
         let unit = try Compositor(device: MTLCreateSystemDefaultDevice()!, package: packageURL)
             .outputSize(for: model.project, longEdge: 1_000_000)
         let ratio = unit.width / unit.height
-        let expectedLongEdge = ratio >= 1 ? (720.0 * ratio).rounded() : (720.0 / ratio).rounded()
+        let edge = Double(settings.shortEdge)
+        let expectedLongEdge = ratio >= 1 ? (edge * ratio).rounded() : (edge / ratio).rounded()
         print("export size=\(naturalSize) longEdgeExpected≈\(expectedLongEdge)")
         guard max(naturalSize.width, naturalSize.height) > 0 else { throw SelfTestArgError.usage("zero-size video track") }
 
-        // Decodable: pull one sample straight off the exported file.
+        // Decode the entire export: completing the writer must not silently drop frames.
         let reader = try AVAssetReader(asset: asset)
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         ])
         reader.add(output)
-        guard reader.startReading(), output.copyNextSampleBuffer() != nil else {
-            throw SelfTestArgError.usage("exported video track did not decode")
+        guard reader.startReading() else { throw SelfTestArgError.usage("exported video track did not decode") }
+        var decodedFrames = 0
+        while output.copyNextSampleBuffer() != nil { decodedFrames += 1 }
+        let expectedFrames = max(1, Int((expectedDuration * Double(settings.fps)).rounded()))
+        guard reader.status == .completed, decodedFrames == expectedFrames, lastFrame == expectedFrames else {
+            throw SelfTestArgError.usage("exported frames \(decodedFrames), progress \(lastFrame), expected \(expectedFrames)")
         }
+        print("export decoded all \(decodedFrames) frames")
     }
 
     /// AC-ED-2: the same output time, rendered via the live preview decode path

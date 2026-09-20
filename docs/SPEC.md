@@ -635,10 +635,10 @@ Reuses the same `SelectionRectView` as §4.5 (one implementation). Size/position
 ```
 
 - Bitrate (H.264, 30 fps, 1080p): Web 4 · Social 8 · High 16 · Studio 40 Mbps; scale ×(pixels/2.07 MP) ×(fps/30)^0.5; HEVC ×0.6.
-- Export loop: for each output frame *n*: `t = n/fps` → `FrameState` → `Compositor.render` into a `CVPixelBuffer` from the writer's pool → append. Audio: the same `AVMutableComposition` (§6.2) through `AVAssetReaderAudioMixOutput` with an `AVAudioMix` for volumes (`audioTimePitchAlgorithm = .spectral` so sped-up speech keeps pitch). Runs on a background queue; respects `isReadyForMoreMediaData`.
+- Export loop: for each output frame *n*: `t = n/fps` → `FrameState` → `Compositor.render` into a `CVPixelBuffer` from the writer's pool → append. Audio: the same `AVMutableComposition` (§6.2) through `AVAssetReaderAudioMixOutput` with an `AVAudioMix` for volumes (`audioTimePitchAlgorithm = .spectral` so sped-up speech keeps pitch). Runs on a background queue; feeds audio and video together as each input becomes ready, respecting `isReadyForMoreMediaData`. Writer backpressure and finalization waits fail after 30 seconds without progress; cancellation/failure removes partial MP4 files.
 - GIF: render at chosen fps, max 960 px long edge, `CGImageDestination` with per-frame delay, loop forever. Warn (non-blocking) if duration > 60 s.
 - Copy to clipboard: export to a temp file, put the file URL on `NSPasteboard`.
-- Settings persist as the default for next export. The sheet is modal to the editor window; editing is locked during export.
+- Settings persist as the default for next export. The sheet is modal to the editor window; editing is locked during export. Idle: visible Cancel and Escape dismiss; clicking outside on the editor dismisses idle/completed sheets without activating editor controls. During export: a bordered Cancel export button and Escape stop the export, show Cancelling… while cleaning up, and return to settings; outside clicks do not interrupt the export.
 
 **AC-EXP-1** 1-minute 1080p60 H.264 export finishes in < 30 s on an M-series Mac and plays in QuickTime, Safari and Chrome. **AC-EXP-2** A/V drift at the end of a 10-minute export < 1 frame. **AC-EXP-3** Cancel stops within 1 s and deletes the partial file. **AC-EXP-4** Export duration == `TimeMap.outputDuration` ± 1 frame, including sped-up and removed clips.
 
