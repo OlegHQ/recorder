@@ -7,16 +7,13 @@ struct OnboardingView: View {
 
     @State private var screenGranted = Permissions.screen
     @State private var accessibilityGranted = Permissions.accessibility
-    @State private var checking = false
     @State private var checkError: String?
-    @State private var requested = false
 
     init(onContinue: @escaping () -> Void, screenGranted: Bool = Permissions.screen,
-         accessibilityGranted: Bool = Permissions.accessibility, requested: Bool = false) {
+         accessibilityGranted: Bool = Permissions.accessibility) {
         self.onContinue = onContinue
         _screenGranted = State(initialValue: screenGranted)
         _accessibilityGranted = State(initialValue: accessibilityGranted)
-        _requested = State(initialValue: requested)
     }
 
     var body: some View {
@@ -45,7 +42,7 @@ struct OnboardingView: View {
                         .font(Font(Theme.bodyFont))
                         .foregroundStyle(Theme.textSecondaryColor)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("Already enabled? Quit other copies of Recorder. In Settings, remove the old entry with −, then add this app again with +.")
+                    Text("Already enabled after an update? The grant may belong to the old build. Repair access below, then enable this copy and relaunch.")
                         .font(Font(Theme.captionFont))
                         .foregroundStyle(Theme.textSecondaryColor)
                         .fixedSize(horizontal: false, vertical: true)
@@ -55,6 +52,11 @@ struct OnboardingView: View {
                         .textSelection(.enabled)
                         .lineLimit(3)
                         .help(Bundle.main.bundlePath)
+                    Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")")
+                        .font(Font(Theme.captionFont))
+                        .foregroundStyle(Theme.textTertiaryColor)
+                    Button("Repair access…", action: repairAccess)
+                        .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
                 }
                 .frame(width: 220, alignment: .leading)
 
@@ -62,8 +64,7 @@ struct OnboardingView: View {
                     row(index: "01", title: "Screen Recording",
                     detail: "Allows display, window and area capture. If macOS asks you to quit and reopen, do that after enabling access.",
                     granted: screenGranted,
-                    buttonTitle: "Open Settings") {
-                    requested = true
+                    buttonTitle: "Allow…") {
                     Permissions.requestScreen()
                     Permissions.openSettings(accessibility: false)
                 }
@@ -71,8 +72,7 @@ struct OnboardingView: View {
                     row(index: "02", title: "Accessibility",
                     detail: "Preserves pointer movement and shortcut keystrokes in the recording.",
                     granted: accessibilityGranted,
-                    buttonTitle: "Open Settings") {
-                    requested = true
+                    buttonTitle: "Allow…") {
                     Permissions.requestAccessibility()
                     Permissions.openSettings(accessibility: true)
                 }
@@ -83,18 +83,17 @@ struct OnboardingView: View {
 
             Rectangle().fill(Theme.strokeColor).frame(height: 1)
             HStack {
-                Text(screenGranted && accessibilityGranted ? "Setup complete" : (checkError == nil ? "Enable access, then check again" : "Access unavailable · check Settings or relaunch"))
+                Text(screenGranted && accessibilityGranted ? "Setup complete" : "Enable access, then relaunch")
                     .font(Font(Theme.captionFont))
                     .foregroundStyle(Theme.textSecondaryColor)
                     .help(checkError ?? "")
                 Spacer()
-                if requested && !(screenGranted && accessibilityGranted) {
+                if !(screenGranted && accessibilityGranted) {
                     Button("Relaunch", action: relaunch)
                         .buttonStyle(TechButtonStyle(kind: .secondary))
                 }
-                Button(checking ? "Checking…" : "Check again", action: checkAccess)
+                Button("Check again", action: checkAccess)
                     .buttonStyle(TechButtonStyle(kind: .secondary))
-                    .disabled(checking)
                 Button("Continue", action: onContinue)
                     .buttonStyle(TechButtonStyle(kind: .primary))
                     .keyboardShortcut(.defaultAction)
@@ -107,12 +106,14 @@ struct OnboardingView: View {
         .background(Theme.bgWindowColor)
         .signalWindow()
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-            screenGranted = Permissions.screen
-            accessibilityGranted = Permissions.accessibility
+            checkAccess()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            if requested { checkAccess() }
+            checkAccess()
         }
+        .alert("Permission recovery", isPresented: Binding(get: { checkError != nil }, set: { if !$0 { checkError = nil } })) {
+            Button("OK", role: .cancel) { checkError = nil }
+        } message: { Text(checkError ?? "") }
     }
 
     private func row(index: String, title: String, detail: String, granted: Bool, buttonTitle: String,
@@ -139,25 +140,52 @@ struct OnboardingView: View {
     }
 
     private func checkAccess() {
-        guard !checking else { return }
-        checking = true
-        requested = true
-        Task { @MainActor in
-            checkError = await Permissions.checkScreen()
-            screenGranted = Permissions.screen
-            accessibilityGranted = Permissions.accessibility
-            checking = false
+        // This is also called on activation and by the timer. It MUST NOT prompt.
+        screenGranted = Permissions.screen
+        accessibilityGranted = Permissions.accessibility
+    }
+
+    private func repairAccess() {
+        let bundle = Bundle.main.bundleURL
+        if bundle.path.contains("/AppTranslocation/") ||
+            (try? bundle.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly) == true {
+            checkError = "Install Recorder in Applications first, eject the DMG, and launch that copy before repairing access. This copy is running from a temporary or read-only location:\n\(bundle.path)"
+            return
+        }
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: "sh.nexo.recorder")
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        guard others.isEmpty else {
+            checkError = "Quit the other running copies of Recorder before repairing access:\n" +
+                others.map { "\($0.bundleURL?.path ?? "Unknown location") (PID \($0.processIdentifier))" }.joined(separator: "\n")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Reset Recorder’s old permission grants?"
+        alert.informativeText = "This removes only Recorder’s Screen Recording and Accessibility grants, including grants for older copies. Other apps and your recordings are untouched. Recorder will quit and reopen; then use Allow to grant access to this version.\n\n\(Bundle.main.bundlePath)\n\nAd-hoc releases may need this again after an update."
+        alert.addButton(withTitle: "Reset and Relaunch")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try Permissions.resetAccess()
+            relaunch()
+        } catch {
+            checkAccess()
+            checkError = "Could not finish resetting access: \(error.localizedDescription)\nRemove Recorder from both permission lists in System Settings, add this app again, and relaunch."
         }
     }
 
     private func relaunch() {
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
-            DispatchQueue.main.async {
-                if let error { checkError = error.localizedDescription }
-                else { NSApp.terminate(nil) }
-            }
+        // A new process must not overlap the old permission-denied process. Pass
+        // the path as an argument, never interpolate it into shell source.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "attempt=0; while /bin/kill -0 \"$1\" 2>/dev/null; do attempt=$((attempt + 1)); [ \"$attempt\" -lt 100 ] || exit 1; /bin/sleep 0.1; done; exec /usr/bin/open -n \"$2\"", "Recorder relaunch",
+                             String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundlePath]
+        do {
+            try process.run()
+            NSApp.terminate(nil)
+        } catch {
+            checkError = "Could not relaunch Recorder: \(error.localizedDescription)"
         }
     }
 }

@@ -199,7 +199,7 @@ enum SelfTest {
                 let denied = args.contains("--denied")
                 let hosting = NSHostingView(rootView: OnboardingView(onContinue: {},
                     screenGranted: denied ? false : Permissions.screen,
-                    accessibilityGranted: denied ? false : Permissions.accessibility, requested: denied))
+                    accessibilityGranted: denied ? false : Permissions.accessibility))
                 hosting.frame = NSRect(origin: .zero, size: size)
                 hosting.appearance = NSAppearance(named: .darkAqua)
                 let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -232,12 +232,29 @@ enum SelfTest {
         },
         "permission-refresh": { _ in
             struct Denied: LocalizedError { var errorDescription: String? { "Test denial" } }
-            let success = await Permissions.checkScreen(probe: {})
-            precondition(success == nil && Permissions.screen)
-            precondition(Permissions.allGranted == Permissions.accessibility)
-            let failure = await Permissions.checkScreen(probe: { throw Denied() })
-            precondition(failure == "Test denial")
-            precondition(Permissions.screen == CGPreflightScreenCaptureAccess(), "A failed probe must clear the previous grant")
+            await MainActor.run {
+                var prompts = 0
+                let request = { prompts += 1; return false }
+                Permissions.requestScreen(granted: { true }, request: request)
+                Permissions.requestAccessibility(granted: { true }, request: request)
+                precondition(prompts == 0, "Granted access must never prompt")
+                for _ in 0..<10 {
+                    Permissions.requestScreen(granted: { false }, request: request)
+                    Permissions.requestAccessibility(granted: { false }, request: request)
+                    _ = Permissions.allGranted
+                }
+                precondition(prompts == 2, "Only one explicit request per permission per process")
+            }
+            var commands: [[String]] = []
+            try Permissions.resetAccess { commands.append($0) }
+            precondition(commands == [["reset", "ScreenCapture", "sh.nexo.recorder"],
+                                      ["reset", "Accessibility", "sh.nexo.recorder"]])
+            var attempts = 0
+            do {
+                try Permissions.resetAccess { _ in attempts += 1; throw Denied() }
+                preconditionFailure("Reset failure must reach the user")
+            } catch { precondition(attempts == 1 && error.localizedDescription == "Test denial") }
+            print("permission-refresh: bounded explicit requests, Recorder-only reset, failure propagation OK")
         },
         // Throwaway generator (T-308, SPEC §6.6): writes `Resources/Wallpapers/01.jpg`…`12.jpg` —
         // abstract gradients we made ourselves (never Apple's or Screen Studio's images). Run once

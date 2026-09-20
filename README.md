@@ -77,17 +77,33 @@ Recorder needs these entries enabled in **System Settings → Privacy & Security
 | Accessibility | Preserve pointer and shortcut activity and support window controls. |
 | Camera / Microphone | Requested when you enable those inputs. |
 
-Return to Recorder and select **Check again**. If macOS requests a quit and reopen,
-use **Relaunch** after enabling access. Apple also documents
+Return to Recorder and select **Check again**. This is a read-only check, not another
+permission request. If access is still missing, use **Relaunch** after enabling it:
+macOS can retain the denied state in the old process. Apple also documents
 [screen and system audio permissions](https://support.apple.com/guide/mac-help/mchld6aa7d23/mac).
 
 **Already enabled, but Recorder still says access is missing?** Ad-hoc updates can
 leave a permission entry associated with an older copy of the app:
 
-1. Quit all running copies of Recorder.
-2. Remove the old Recorder entry with **−** from the affected permission list.
-3. Add `/Applications/Recorder.app` with **+** and enable it.
-4. Open that installed copy and select **Check again**.
+1. Quit other running copies of Recorder. Check the path/version shown in setup.
+2. In builds with **Repair access…**, choose it and confirm **Reset and Relaunch**.
+   This resets only Recorder’s Screen Recording and Accessibility grants, not other
+   apps or recordings. Then use **Allow…**, enable access, and relaunch once more.
+3. On older builds, quit Recorder, remove its entry with **−** from both permission
+   lists, add `/Applications/Recorder.app` with **+**, and enable it before reopening.
+
+If an old grant still cannot be replaced, quit every Recorder process and run these
+targeted commands in Terminal, then open the installed app and grant access again:
+
+```sh
+tccutil reset ScreenCapture sh.nexo.recorder
+tccutil reset Accessibility sh.nexo.recorder
+```
+
+These revoke Recorder’s two grants only. Do not use `tccutil reset All`.
+Ad-hoc builds do not have a stable signing identity across updates, so recovery may
+be needed again after replacing the app. Developer ID signing is needed for stable
+public-release identity; repeated permission checks cannot repair that mismatch.
 
 Avoid launching a second copy from the DMG or a build folder while troubleshooting.
 

@@ -12,12 +12,18 @@ HEVC and GIF round trips; `--capture` adds a real ScreenCaptureKit window captur
 `export-sheet` covers MP4, animated GIF, automatic clipboard handoff, cancel and retry.
 CI and release packaging run both export checks against the assembled app.
 
-September 2026 permission/release correction: onboarding offers direct Settings links,
-an explicit ScreenCaptureKit access check shared by every capture gate, refresh on return
-from Settings, and guidance for stale grants after replacing ad-hoc builds. Accessibility
-continues to use AXIsProcessTrusted. Relaunch reports launch failures instead of quitting
-silently. Verify with `Recorder --selftest permission-refresh` and `onboarding-png`;
-fresh grant/revoke cycles still require a human macOS Settings check.
+September 2026 permission/release correction: all permission checks are passive
+CGPreflightScreenCaptureAccess / AXIsProcessTrusted calls. Never enumerate ScreenCaptureKit
+content on a timer, activation, or Check again: enumeration can request consent and cause
+a prompt/activation loop. Explicit Allow requests are bounded to once per permission per
+process. Repair access requires confirmation before using tccutil to reset only
+sh.nexo.recorder's ScreenCapture and Accessibility grants, refuses while another Recorder
+copy is running, and reports reset failures. Relaunch waits for the old process to exit
+before opening this bundle again. The view displays the running path and version.
+Verify with `Recorder --selftest permission-refresh` and `onboarding-png`; these checks
+do not reset the developer's real grants. Fresh grant/revoke and old-signature migration
+still require a human macOS Settings check. Ad-hoc releases cannot retain a stable
+identity across updates; Developer ID signing remains required to solve that limitation.
 The installer uses the shared monochrome capture mark and Barlow/Andale typography.
 Configured Apple credentials enable signing, notarization and stapling of app and DMG;
 credential-free releases remain explicitly labelled ad-hoc and require Open Anyway.

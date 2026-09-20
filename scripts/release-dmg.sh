@@ -39,6 +39,7 @@ mkdir -p "$dist"
 app="$work/Recorder.app"
 APP="$app" BINARY="$work/Recorder" VERSION="$version" BUILD="$build" SIGN_ID="${SIGN_ID:--}" scripts/assemble-app.sh
 codesign --verify --deep --strict --verbose=2 "$app"
+"$app/Contents/MacOS/Recorder" --selftest permission-refresh
 # Run real GPU/codec paths in the assembled universal app before publishing it.
 "$app/Contents/MacOS/Recorder" --selftest export-colors
 "$app/Contents/MacOS/Recorder" --selftest export-sheet

@@ -1,30 +1,57 @@
 import ApplicationServices
 import AVFoundation
 import CoreGraphics
-import ScreenCaptureKit
 import AppKit
 
 enum Permissions {
-    // CoreGraphics can report a stale denial after a grant. All capture entry points
-    // also accept a successful check through the API we actually record with.
-    private static var captureAccess = false
-    static var screen: Bool { CGPreflightScreenCaptureAccess() || captureAccess }
+    // Never enumerate SCShareableContent to check permission: it can prompt, including
+    // when a Settings toggle still belongs to an older ad-hoc signature.
+    static var screen: Bool { CGPreflightScreenCaptureAccess() }
     static var accessibility: Bool { AXIsProcessTrusted() }
-    static func requestScreen() { CGRequestScreenCaptureAccess() }
-    static func requestAccessibility() { AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) }
     static var allGranted: Bool { screen && accessibility }
 
-    /// Called explicitly by onboarding; enumerating content can show the macOS consent prompt.
-    @MainActor static func checkScreen(probe: () async throws -> Void = {
-        _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-    }) async -> String? {
-        do {
-            try await probe()
-            captureAccess = true
-            return nil
-        } catch {
-            captureAccess = false
-            return error.localizedDescription
+    @MainActor private static var screenRequested = false
+    @MainActor private static var accessibilityRequested = false
+
+    // Explicit user actions only, at most once per process. Set the latch BEFORE
+    // requesting, since a system consent dialog can re-enter the app's event loop.
+    @MainActor static func requestScreen(granted: () -> Bool = { screen },
+                                         request: () -> Bool = { CGRequestScreenCaptureAccess() }) {
+        guard !granted(), !screenRequested else { return }
+        screenRequested = true
+        _ = request()
+    }
+
+    @MainActor static func requestAccessibility(granted: () -> Bool = { accessibility },
+                                                request: () -> Bool = {
+        AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+    }) {
+        guard !granted(), !accessibilityRequested else { return }
+        accessibilityRequested = true
+        _ = request()
+    }
+
+    /// Only called after the user confirms the scope in onboarding. Never reset All
+    /// or another application's grants, and never edit TCC's database directly.
+    static func resetAccess(run: ([String]) throws -> Void = runTCCReset) throws {
+        for service in ["ScreenCapture", "Accessibility"] {
+            try run(["reset", service, "sh.nexo.recorder"])
+        }
+    }
+
+    private static func runTCCReset(_ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        process.arguments = arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "Recorder.Permissions", code: Int(process.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: String(decoding: data, as: UTF8.self)])
         }
     }
 
