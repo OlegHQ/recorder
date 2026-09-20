@@ -9,59 +9,24 @@ permissions:
 
 jobs:
   release:
-    name: Signed universal DMG
+    name: Universal DMG
     runs-on: macos-15
-    env:
-      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Validate release tag and signing configuration
-        run: |
-          scripts/version.sh validate
-          for name in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
-            eval "value=\${$name:-}"
-            test -n "$value" || { echo "Missing required repository secret: $name" >&2; exit 1; }
-          done
+      - name: Validate release tag
+        run: scripts/version.sh validate
 
       - name: Install DMG layout tool
         run: brew install create-dmg
 
-      - name: Import Developer ID certificate
-        run: |
-          keychain="$RUNNER_TEMP/build.keychain-db"
-          cert="$RUNNER_TEMP/certificate.p12"
-          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$cert"
-          security create-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
-          security import "$cert" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security list-keychain -d user -s "$keychain" login.keychain-db
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
-
       - name: Test
         run: make test
 
-      - name: Build universal signed DMG
-        env:
-          SIGN_ID: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: VERSION="${GITHUB_REF_NAME#v}" BUILD="$GITHUB_RUN_NUMBER" scripts/release-dmg.sh
-
-      - name: Notarize and staple
-        run: |
-          key="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_ID.p8"
-          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$key"
-          dmg="dist/Recorder-${GITHUB_REF_NAME#v}-universal.dmg"
-          xcrun notarytool submit "$dmg" --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
-          xcrun stapler staple "$dmg"
-          spctl -a -vv -t open "$dmg"
+      - name: Build universal DMG
+        run: VERSION="${GITHUB_REF_NAME#v}" BUILD="$GITHUB_RUN_NUMBER" SIGN_ID=- scripts/release-dmg.sh
 
       - name: Publish GitHub release
         env:
@@ -70,4 +35,4 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" "dist/Recorder-$version-universal.dmg#Recorder $version (Universal DMG)" \
             --title "Recorder $version" --generate-notes \
-            --notes "Created by [Oleg Pustovit](https://github.com/opustovitexponential)."
+            --notes "Created by [Oleg Pustovit](https://github.com/OlegHQ). This DMG is ad-hoc signed and not notarized."
