@@ -267,9 +267,22 @@ enum SelfTest {
             // registration performed when a user opens the .app in Finder.
             try require(LSRegisterURL(Bundle.main.bundleURL as CFURL, true) == noErr,
                         "Could not register app document types with LaunchServices")
-            try require(AppIdentity.projectTypes.map(\.identifier) ==
-                         ["space.microapps.recorder.project", "sh.nexo.recorder.project"], "Wrong project types: \(AppIdentity.projectTypes.map(\.identifier))")
+            // macOS 15 canonicalizes the legacy imported type to the exported
+            // type with the same filename extension. Both resolutions are valid.
+            let identifiers = AppIdentity.projectTypes.map(\.identifier)
+            try require(identifiers.first == "space.microapps.recorder.project" &&
+                        ["space.microapps.recorder.project", "sh.nexo.recorder.project"].contains(identifiers[1]),
+                        "Wrong project types: \(identifiers)")
+            let imported = Bundle.main.object(forInfoDictionaryKey: "UTImportedTypeDeclarations") as? [[String: Any]]
+            try require(imported?.contains { $0["UTTypeIdentifier"] as? String == "sh.nexo.recorder.project" } == true,
+                        "Legacy project declaration missing")
             try require(AppIdentity.projectTypes.allSatisfy { $0.conforms(to: .package) }, "Project types must conform to package")
+            let package = FileManager.default.temporaryDirectory.appendingPathComponent("identity-\(UUID().uuidString).recorder")
+            try FileManager.default.createDirectory(at: package, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: package) }
+            let contentType = try package.resourceValues(forKeys: [.contentTypeKey]).contentType
+            try require(contentType.map { resolved in AppIdentity.projectTypes.contains { resolved.conforms(to: $0) } } == true,
+                        "A .recorder package must be accepted by the file panels")
             let defaults = UserDefaults.standard
             let old = "Recorder.migration-test.old.\(UUID().uuidString)"
             let new = "Recorder.migration-test.new.\(UUID().uuidString)"

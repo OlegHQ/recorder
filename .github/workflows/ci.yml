@@ -13,12 +13,6 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Diagnose identity registration
-        run: |
-          mkdir -p build
-          swiftc Sources/Recorder/App/AppIdentity.swift scripts/identity-probe.swift -o build/identity-probe
-          APP=build/IdentityProbe.app BINARY=build/identity-probe VERSION=0.0.0 BUILD=0 SIGN_ID=- scripts/assemble-app.sh
-          build/IdentityProbe.app/Contents/MacOS/Recorder
       - run: make test
       - run: make app
       - run: codesign --verify --deep --strict build/Recorder.app
