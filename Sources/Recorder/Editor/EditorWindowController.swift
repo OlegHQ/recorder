@@ -465,7 +465,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         model.saveNow()
         let panel = NSSavePanel()
         panel.nameFieldStringValue = model.project.title
-        panel.allowedContentTypes = [UTType(exportedAs: "sh.nexo.recorder.project")]
+        panel.allowedContentTypes = AppIdentity.projectTypes
         panel.directoryURL = model.packageURL.deletingLastPathComponent()
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let fm = FileManager.default

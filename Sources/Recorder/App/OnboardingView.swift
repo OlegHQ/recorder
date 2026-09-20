@@ -152,7 +152,8 @@ struct OnboardingView: View {
             checkError = "Install Recorder in Applications first, eject the DMG, and launch that copy before repairing access. This copy is running from a temporary or read-only location:\n\(bundle.path)"
             return
         }
-        let others = NSRunningApplication.runningApplications(withBundleIdentifier: "sh.nexo.recorder")
+        let others = [AppIdentity.bundleID, AppIdentity.legacyBundleID]
+            .flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0) }
             .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
         guard others.isEmpty else {
             checkError = "Quit the other running copies of Recorder before repairing access:\n" +
@@ -161,7 +162,7 @@ struct OnboardingView: View {
         }
         let alert = NSAlert()
         alert.messageText = "Reset Recorder’s old permission grants?"
-        alert.informativeText = "This removes only Recorder’s Screen Recording and Accessibility grants, including grants for older copies. Other apps and your recordings are untouched. Recorder will quit and reopen; then use Allow to grant access to this version.\n\n\(Bundle.main.bundlePath)\n\nAd-hoc releases may need this again after an update."
+        alert.informativeText = "This removes only Screen Recording and Accessibility grants for \(AppIdentity.bundleID). Other app identities and your recordings are untouched. Recorder will quit and reopen; then use Allow to grant access to this version.\n\n\(Bundle.main.bundlePath)\n\nAd-hoc releases may need this again after an update."
         alert.addButton(withTitle: "Reset and Relaunch")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }

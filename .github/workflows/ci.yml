@@ -17,6 +17,7 @@ jobs:
       - run: make app
       - run: codesign --verify --deep --strict build/Recorder.app
       - run: build/Recorder.app/Contents/MacOS/Recorder --selftest permission-refresh
+      - run: build/Recorder.app/Contents/MacOS/Recorder --selftest identity-migration
       - name: Exercise GPU export and color handling on macOS 15
         run: |
           build/Recorder.app/Contents/MacOS/Recorder --selftest export-colors

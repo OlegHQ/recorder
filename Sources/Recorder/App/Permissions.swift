@@ -35,7 +35,7 @@ enum Permissions {
     /// or another application's grants, and never edit TCC's database directly.
     static func resetAccess(run: ([String]) throws -> Void = runTCCReset) throws {
         for service in ["ScreenCapture", "Accessibility"] {
-            try run(["reset", service, "sh.nexo.recorder"])
+            try run(["reset", service, AppIdentity.bundleID])
         }
     }
 

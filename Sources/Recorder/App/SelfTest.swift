@@ -247,14 +247,45 @@ enum SelfTest {
             }
             var commands: [[String]] = []
             try Permissions.resetAccess { commands.append($0) }
-            precondition(commands == [["reset", "ScreenCapture", "sh.nexo.recorder"],
-                                      ["reset", "Accessibility", "sh.nexo.recorder"]])
+            precondition(commands == [["reset", "ScreenCapture", "space.microapps.recorder"],
+                                      ["reset", "Accessibility", "space.microapps.recorder"]])
             var attempts = 0
             do {
                 try Permissions.resetAccess { _ in attempts += 1; throw Denied() }
                 preconditionFailure("Reset failure must reach the user")
             } catch { precondition(attempts == 1 && error.localizedDescription == "Test denial") }
             print("permission-refresh: bounded explicit requests, Recorder-only reset, failure propagation OK")
+        },
+        "identity-migration": { _ in
+            precondition(Bundle.main.bundleIdentifier == AppIdentity.bundleID)
+            precondition(AppIdentity.projectTypes.map(\.identifier) ==
+                         ["space.microapps.recorder.project", "sh.nexo.recorder.project"])
+            precondition(AppIdentity.projectTypes.allSatisfy { $0.conforms(to: .package) })
+            let defaults = UserDefaults.standard
+            let old = "Recorder.migration-test.old.\(UUID().uuidString)"
+            let new = "Recorder.migration-test.new.\(UUID().uuidString)"
+            defer {
+                defaults.removePersistentDomain(forName: old)
+                defaults.removePersistentDomain(forName: new)
+            }
+            let original: [String: Any] = ["recording.fps": 30, "folder": "/tmp/My recordings", "export": Data([1, 2, 3])]
+            defaults.setPersistentDomain(original, forName: old)
+            defaults.setPersistentDomain(["recording.fps": 60], forName: new)
+            AppIdentity.migratePreferences(from: old, to: new)
+            var migrated = defaults.persistentDomain(forName: new)!
+            precondition(migrated["recording.fps"] as? Int == 60)
+            precondition(migrated["folder"] as? String == "/tmp/My recordings")
+            precondition(migrated["export"] as? Data == Data([1, 2, 3]))
+            precondition(NSDictionary(dictionary: defaults.persistentDomain(forName: old)!).isEqual(to: original))
+            migrated.removeValue(forKey: "folder")
+            defaults.setPersistentDomain(migrated, forName: new)
+            AppIdentity.migratePreferences(from: old, to: new)
+            precondition(defaults.persistentDomain(forName: new)?["folder"] == nil, "Migration must not run twice")
+            defaults.removePersistentDomain(forName: old)
+            defaults.removePersistentDomain(forName: new)
+            AppIdentity.migratePreferences(from: old, to: new)
+            precondition(defaults.persistentDomain(forName: new)?.count == 1, "Fresh installs only store the marker")
+            print("identity-migration: bundle, project compatibility, preference copy, no overwrite, idempotence OK")
         },
         // Throwaway generator (T-308, SPEC §6.6): writes `Resources/Wallpapers/01.jpg`…`12.jpg` —
         // abstract gradients we made ourselves (never Apple's or Screen Studio's images). Run once

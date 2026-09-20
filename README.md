@@ -96,11 +96,16 @@ If an old grant still cannot be replaced, quit every Recorder process and run th
 targeted commands in Terminal, then open the installed app and grant access again:
 
 ```sh
-tccutil reset ScreenCapture sh.nexo.recorder
-tccutil reset Accessibility sh.nexo.recorder
+tccutil reset ScreenCapture space.microapps.recorder
+tccutil reset Accessibility space.microapps.recorder
 ```
 
 These revoke Recorder’s two grants only. Do not use `tccutil reset All`.
+Starting with 0.1.3, the app identifier is `space.microapps.recorder`. For 0.1.2 and
+older, the reset commands must instead use `sh.nexo.recorder`. The new identity needs
+fresh macOS permissions; old grants cannot migrate. Quit older copies before updating.
+Existing preferences are copied once without overwriting new settings; project files
+and presets stay in place, and legacy `.recorder` projects remain supported.
 Ad-hoc builds do not have a stable signing identity across updates, so recovery may
 be needed again after replacing the app. Developer ID signing is needed for stable
 public-release identity; repeated permission checks cannot repair that mismatch.

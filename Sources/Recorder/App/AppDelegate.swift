@@ -137,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openDocument() {
         ToolbarController.shared.close()
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [UTType(exportedAs: "sh.nexo.recorder.project")]
+        panel.allowedContentTypes = AppIdentity.projectTypes
         panel.allowsMultipleSelection = true
         guard panel.runModal() == .OK else { return }
         panel.urls.forEach(Library.open)

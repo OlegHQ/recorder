@@ -17,7 +17,7 @@ CGPreflightScreenCaptureAccess / AXIsProcessTrusted calls. Never enumerate Scree
 content on a timer, activation, or Check again: enumeration can request consent and cause
 a prompt/activation loop. Explicit Allow requests are bounded to once per permission per
 process. Repair access requires confirmation before using tccutil to reset only
-sh.nexo.recorder's ScreenCapture and Accessibility grants, refuses while another Recorder
+space.microapps.recorder's ScreenCapture and Accessibility grants, refuses while another Recorder
 copy is running, and reports reset failures. Relaunch waits for the old process to exit
 before opening this bundle again. The view displays the running path and version.
 Verify with `Recorder --selftest permission-refresh` and `onboarding-png`; these checks
@@ -403,7 +403,7 @@ is recorded to `camera.mov` and composited in the editor. Its corner becomes the
 
 ## 5. Project format
 
-`~/Movies/Recorder/<Title>.recorder/` (folder configurable). A package directory (UTI `sh.nexo.recorder.project`, declared in Info.plist).
+`~/Movies/Recorder/<Title>.recorder/` (folder configurable). A package directory (UTI `space.microapps.recorder.project`, declared in Info.plist; legacy `sh.nexo.recorder.project` remains imported for compatibility).
 
 ```
 My Recording.recorder/
