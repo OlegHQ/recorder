@@ -153,6 +153,7 @@ final class Exporter {
         let bitrate = Self.bitrate(quality: settings.quality, codec: settings.codec, width: width, height: height, fps: settings.fps)
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: codec, AVVideoWidthKey: width, AVVideoHeightKey: height,
+            AVVideoColorPropertiesKey: VideoColor.properties,
             AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: bitrate],
         ])
         videoInput.expectsMediaDataInRealTime = false
@@ -212,8 +213,8 @@ final class Exporter {
                 try failOrCancel(ExportError.failed("failed to set up a render target"))
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
-            commandBuffer.commit()
-            await commandBuffer.waitUntilCompleted()
+            do { try await commandBuffer.commitAndWait() }
+            catch { try failOrCancel(error) }
 
             let pts = CMTime(value: Int64(n), timescale: CMTimeScale(settings.fps))
             guard adaptor.append(pixelBuffer, withPresentationTime: pts) else {
@@ -426,8 +427,7 @@ extension Exporter {
                 throw ExportError.failed("failed to set up a render target")
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
-            commandBuffer.commit()
-            await commandBuffer.waitUntilCompleted()
+            try await commandBuffer.commitAndWait()
 
             var bytes = [UInt8](repeating: 0, count: width * height * 4)
             target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
@@ -445,7 +445,7 @@ extension Exporter {
     /// BGRA8 bytes (as rendered by `Compositor`, same layout `Compositor.writePNG`'s selftest uses)
     /// → `CGImage`, one per GIF frame.
     private static func gifFrame(bgra bytes: [UInt8], width: Int, height: Int) -> CGImage? {
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colorSpace = VideoColor.space
         let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
         guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
@@ -667,8 +667,7 @@ enum ExporterSelfTest {
                 throw SelfTestArgError.usage("failed to set up Metal resources")
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
-            commandBuffer.commit()
-            await commandBuffer.waitUntilCompleted()
+            try await commandBuffer.commitAndWait()
             var bytes = [UInt8](repeating: 0, count: width * height * 4)
             target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
             return bytes

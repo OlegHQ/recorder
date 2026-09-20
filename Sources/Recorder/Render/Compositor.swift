@@ -6,11 +6,17 @@ import MetalPerformanceShaders
 import ImageIO
 import UniformTypeIdentifiers
 import RecorderCore
+import CoreImage
 
 extension MTLCommandBuffer {
-    func waitUntilCompleted() async {
-        await withCheckedContinuation { continuation in
-            addCompletedHandler { _ in continuation.resume() }
+    /// Metal requires handlers to be registered BEFORE commit, including on macOS 15.
+    func commitAndWait() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            addCompletedHandler { buffer in
+                if let error = buffer.error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            }
+            commit()
         }
     }
 }
@@ -59,6 +65,7 @@ final class Compositor {
     private let sampler: MTLSamplerState
     private let dummyTexture: MTLTexture
     private lazy var textureLoader = MTKTextureLoader(device: device)
+    private lazy var colorContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
     private var backgroundCache: [String: MTLTexture] = [:]
     private var cursorImageCache: [String: CursorImage] = [:]
     // T-602: chip label -> its rendered texture (rounded background + Core-Text-drawn label baked
@@ -111,6 +118,9 @@ final class Compositor {
     /// `Theme.bgWindow` (SPEC §6.1 preview: "letterboxed"); `nil` draws over the whole target (the
     /// `render` selftest, and the exporter, which has no letterbox — the target IS the output).
     func render(_ s: FrameState, to target: MTLTexture, commandBuffer: MTLCommandBuffer, viewport: CGRect? = nil) {
+        var s = s
+        s.screen = colorManaged(s.screen, commandBuffer: commandBuffer)
+        s.camera = colorManaged(s.camera, commandBuffer: commandBuffer)
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
@@ -187,6 +197,23 @@ final class Compositor {
         }
 
         encoder.endEncoding()
+    }
+
+    /// Core Image honors the buffer's primaries, transfer function, YCbCr matrix
+    /// and range. A fixed 709 matrix alone loses that information (notably P3).
+    private func colorManaged(_ texture: FrameState.Texture?, commandBuffer: MTLCommandBuffer) -> FrameState.Texture? {
+        guard let texture, let pixelBuffer = texture.pixelBuffer else { return texture }
+        let source = CIImage(cvPixelBuffer: pixelBuffer)
+        // Core Image renders bottom-up; our Metal UVs address the top-left row.
+        let image = source.transformed(by: CGAffineTransform(translationX: 0, y: source.extent.height).scaledBy(x: 1, y: -1))
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+            width: texture.luma.width, height: texture.luma.height, mipmapped: false)
+        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        guard let output = device.makeTexture(descriptor: descriptor) else { return nil }
+        colorContext.render(image, to: output, commandBuffer: commandBuffer,
+                            bounds: image.extent, colorSpace: VideoColor.space)
+        commandBuffer.addCompletedHandler { _ in withExtendedLifetime(pixelBuffer) {} }
+        return FrameState.Texture(luma: output)
     }
 
     // MARK: - Pass 1: background
@@ -581,7 +608,7 @@ final class Compositor {
         let width = Int(size.width), height = Int(size.height)
 
         guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                                   space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return nil
         }
         NSGraphicsContext.saveGraphicsState()
@@ -714,7 +741,7 @@ extension Compositor {
     }
 
     private static func writePNG(bytes: [UInt8], width: Int, height: Int, to url: URL) throws {
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colorSpace = VideoColor.space
         let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
         guard let provider = CGDataProvider(data: Data(bytes) as CFData),
               let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
@@ -815,8 +842,7 @@ extension Compositor {
 
         let state = makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
         compositor.render(state, to: target, commandBuffer: commandBuffer)
-        commandBuffer.commit()
-        await commandBuffer.waitUntilCompleted()
+        try await commandBuffer.commitAndWait()
 
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)

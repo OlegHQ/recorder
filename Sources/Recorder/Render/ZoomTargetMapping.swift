@@ -218,12 +218,11 @@ extension ZoomTargetMapping {
         state.view = .identity   // T-415: the un-zoomed frame, same override `PreviewView.draw` applies
         state.prevView = .identity
         compositor.render(state, to: target, commandBuffer: commandBuffer)
-        commandBuffer.commit()
-        await commandBuffer.waitUntilCompleted()
+        try await commandBuffer.commitAndWait()
 
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colorSpace = VideoColor.space
         let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
         guard let provider = CGDataProvider(data: Data(bytes) as CFData),
               let baseImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,

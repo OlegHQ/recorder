@@ -68,6 +68,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
             AVVideoCodecKey: AVVideoCodecType.hevc,
             AVVideoWidthKey: pixelWidth,
             AVVideoHeightKey: pixelHeight,
+            AVVideoColorPropertiesKey: VideoColor.properties,
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: min(60_000_000, pixelWidth * pixelHeight * 4),
             ],

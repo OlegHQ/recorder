@@ -2,19 +2,21 @@ import Foundation
 import Metal
 import CoreGraphics
 import RecorderCore
+import CoreVideo
 
 /// Everything `Compositor.render` needs to draw one output frame — built by pure code from
 /// `TimeMap`/`CameraPath`/`CursorPath` sampling, never from `EditorModel` directly, so preview
 /// and export (AC-ED-2, pixel parity) can build it from the same inputs. SPEC §6.2.
 struct FrameState {
-    /// One decoded video frame. `chroma == nil` ⇒ `luma` is already RGB (mode 3 — synthetic BGRA
-    /// fixtures, e.g. the `render` selftest); `chroma != nil` ⇒ biplanar 4:2:0 YCbCr (real capture
-    /// output, `kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`), converted to RGB in the shader
-    /// (mode 4, BT.709 video range). SPEC §6.2.
+    /// Decoded buffers retain color metadata for Core Image conversion to sRGB before
+    /// compositing. Bare textures are sRGB fixtures; bare chroma planes use the 709 shader.
     struct Texture {
         var luma: MTLTexture
         var chroma: MTLTexture?
-        init(luma: MTLTexture, chroma: MTLTexture? = nil) { self.luma = luma; self.chroma = chroma }
+        var pixelBuffer: CVPixelBuffer?
+        init(luma: MTLTexture, chroma: MTLTexture? = nil, pixelBuffer: CVPixelBuffer? = nil) {
+            self.luma = luma; self.chroma = chroma; self.pixelBuffer = pixelBuffer
+        }
     }
 
     /// T-602 Keys tab: the active chip label + its age (seconds since the key was pressed), or

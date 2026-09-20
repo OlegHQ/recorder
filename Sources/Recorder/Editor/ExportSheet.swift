@@ -4,6 +4,7 @@ import Observation
 import RecorderCore
 import SwiftUI
 import UniformTypeIdentifiers
+import ImageIO
 
 /// Export sheet (SPEC §6.8 mockup, ⌘E): pickers → live size/duration estimate → `Export…` (NSSavePanel)
 /// or `Copy to clipboard` (temp file + `NSPasteboard`) → Exporting (progress, Cancel) → Done (Show in
@@ -93,7 +94,7 @@ enum ExportSheet {
 
     /// The exact call the sheet's `Export…` and `Copy to clipboard` buttons make — driven directly
     /// by the `export-sheet` selftest, no window/NSSavePanel required.
-    func startExport(to destination: URL, copyToPasteboardWhenDone: Bool = false) {
+    func startExport(to destination: URL, copyToPasteboardWhenDone: Bool = false, pasteboard: NSPasteboard = .general) {
         guard !isExporting else { return }
         errorMessage = nil
         copyStatus = nil
@@ -117,7 +118,7 @@ enum ExportSheet {
                 await MainActor.run {
                     guard let self, self.exporter === exporter else { return }
                     self.exporter = nil
-                    if copyToPasteboardWhenDone { self.copyResult(destination) }
+                    if copyToPasteboardWhenDone { self.copyResult(destination, pasteboard: pasteboard) }
                     self.phase = .done(url: destination, sizeBytes: Self.fileSize(destination))
                 }
             } catch {
@@ -434,6 +435,7 @@ enum ExportSheetSelfTest {
     @MainActor
     static func run(_ args: [String]) async throws {
         let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-export-handoff-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         let editorModel: EditorModel
         if let packagePath = args.first {
             editorModel = try loadEditorModel(package: URL(fileURLWithPath: packagePath))
@@ -505,6 +507,23 @@ enum ExportSheetSelfTest {
             throw Fail(description: "file handoff or copy receipt failed")
         }
         print("export-sheet file pasteboard and receipt OK")
+
+        // Exercise the GIF + automatic clipboard branch that crashed in the shipped app.
+        let gifURL = scratch.appendingPathComponent("clipboard.gif")
+        model.settings = ExportSettings(format: .gif, fps: 15)
+        model.startExport(to: gifURL, copyToPasteboardWhenDone: true, pasteboard: pasteboard)
+        deadline = Date().addingTimeInterval(30)
+        while model.isExporting {
+            guard Date() < deadline else { throw Fail(description: "GIF clipboard export timed out") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .done = model.phase,
+              pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] == [gifURL],
+              let gif = CGImageSourceCreateWithURL(gifURL as CFURL, nil),
+              CGImageSourceGetCount(gif) == max(1, Int((editorModel.timeMap.outputDuration * 15).rounded())) else {
+            throw Fail(description: "GIF clipboard export failed: \(model.errorMessage ?? "invalid frames or pasteboard")")
+        }
+        print("export-sheet animated GIF and automatic clipboard handoff OK")
 
         // (d) cancel immediately (before the export Task even starts) deletes the partial file.
         let cancelledModel = ExportSheetModel(editorModel: editorModel, defaults: defaults)

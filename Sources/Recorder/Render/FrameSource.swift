@@ -5,6 +5,16 @@ import RecorderCore
 
 enum FrameSourceError: Error { case missingScreenTrack, trackCreationFailed }
 
+/// One SDR working space from capture through preview, stills and video encoding.
+enum VideoColor {
+    static let space = CGColorSpace(name: CGColorSpace.sRGB)!
+    static let properties: [String: Any] = [
+        AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+        AVVideoTransferFunctionKey: AVVideoTransferFunction_IEC_sRGB,
+        AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+    ]
+}
+
 /// Builds the `AVMutableComposition` from `project.clips` (insert ranges + `scaleTimeRange` per
 /// clip) for screen, camera, mic, system — used by both the preview player (T-306) and the
 /// exporter so clip cuts/speed changes and audio come from the same source (SPEC §6.2, §5).
@@ -170,18 +180,16 @@ final class TextureCache {
         self.cache = cache!
     }
 
-    /// Real captures decode to 420v (biplanar 4:2:0 YCbCr, video range): luma (`r8Unorm`) + chroma
-    /// (`rg8Unorm`) planes, converted to RGB by shader mode 4 (BT.709, SPEC §6.2). Single-plane
-    /// buffers (BGRA — synthetic fixtures, the `render` selftest) map directly and are sampled by
-    /// mode 3 (`Compositor.drawScreen`, keyed on `chroma == nil`).
+    /// Keep the source buffer and its color metadata for Compositor's native conversion.
+    /// Plane views also serve zero-copy BGRA writer targets, which are never decoded.
     func texture(from pb: CVPixelBuffer) -> FrameState.Texture? {
         guard CVPixelBufferIsPlanar(pb) else {
             guard let bgra = plane(pb, index: 0, pixelFormat: .bgra8Unorm) else { return nil }
-            return FrameState.Texture(luma: bgra)
+            return FrameState.Texture(luma: bgra, pixelBuffer: pb)
         }
         guard let luma = plane(pb, index: 0, pixelFormat: .r8Unorm),
               let chroma = plane(pb, index: 1, pixelFormat: .rg8Unorm) else { return nil }
-        return FrameState.Texture(luma: luma, chroma: chroma)
+        return FrameState.Texture(luma: luma, chroma: chroma, pixelBuffer: pb)
     }
 
     private func plane(_ pb: CVPixelBuffer, index: Int, pixelFormat: MTLPixelFormat) -> MTLTexture? {

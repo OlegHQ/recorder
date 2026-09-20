@@ -425,13 +425,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
             throw RenderFail(description: "failed to set up Metal resources")
         }
         compositor.render(state, to: target, commandBuffer: commandBuffer)
-        commandBuffer.commit()
-        await commandBuffer.waitUntilCompleted()
+        try await commandBuffer.commitAndWait()
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
 
         // BGRA8 bytes (as rendered by `Compositor`) -> PNG, same layout `Exporter.gifFrame` uses.
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colorSpace = VideoColor.space
         let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
         guard let provider = CGDataProvider(data: Data(bytes) as CFData),
               let cgImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,

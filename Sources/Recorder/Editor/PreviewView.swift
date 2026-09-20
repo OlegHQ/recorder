@@ -113,6 +113,7 @@ final class PreviewView: MTKView {
         isPaused = true
         enableSetNeedsDisplay = true
         colorPixelFormat = .bgra8Unorm
+        colorspace = VideoColor.space
 
         zoomTargetView.allowsResize = false
         zoomTargetView.minSize = CGSize(width: 1, height: 1)
@@ -636,7 +637,7 @@ final class PreviewView: MTKView {
                                   from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
                     guard let provider = CGDataProvider(data: Data(bytes) as CFData),
                           let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
-                              bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                              bytesPerRow: width * 4, space: VideoColor.space,
                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
                     else { continuation.resume(throwing: Failure.image); return }

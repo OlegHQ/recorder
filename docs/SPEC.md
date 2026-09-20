@@ -1,5 +1,17 @@
 # Recorder — Product & Engineering Spec
 
+Export/color regression correction: every asynchronous Metal consumer uses one
+commit-and-wait operation, registering completion before commit and propagating GPU
+errors. Capture explicitly requests sRGB with a Rec.709 YCbCr matrix; capture and MP4
+encoders tag the same primaries, sRGB transfer function and matrix. Decoded screen/camera
+buffers retain their color metadata and Core Image converts them to sRGB on the same
+GPU command buffer before compositing. Preview, PNG and GIF also declare sRGB. This is
+an SDR pipeline; it does not preserve out-of-sRGB gamut or HDR brightness.
+`export-colors` checks asymmetric color patches, Display P3/Rec.709 conversion, H.264,
+HEVC and GIF round trips; `--capture` adds a real ScreenCaptureKit window capture.
+`export-sheet` covers MP4, animated GIF, automatic clipboard handoff, cancel and retry.
+CI and release packaging run both export checks against the assembled app.
+
 September 2026 permission/release correction: onboarding offers direct Settings links,
 an explicit ScreenCaptureKit access check shared by every capture gate, refresh on return
 from Settings, and guidance for stale grants after replacing ad-hoc builds. Accessibility

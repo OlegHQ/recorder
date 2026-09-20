@@ -42,6 +42,8 @@ extension CaptureTarget {
         config.ignoreShadowsSingleWindow = true // The compositor supplies the window shadow.
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        config.colorSpaceName = CGColorSpace.sRGB
+        config.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         config.queueDepth = 6
         let size = pixelSize
         config.width = Int(size.width)

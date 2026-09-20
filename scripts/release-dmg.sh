@@ -39,6 +39,9 @@ mkdir -p "$dist"
 app="$work/Recorder.app"
 APP="$app" BINARY="$work/Recorder" VERSION="$version" BUILD="$build" SIGN_ID="${SIGN_ID:--}" scripts/assemble-app.sh
 codesign --verify --deep --strict --verbose=2 "$app"
+# Run real GPU/codec paths in the assembled universal app before publishing it.
+"$app/Contents/MacOS/Recorder" --selftest export-colors
+"$app/Contents/MacOS/Recorder" --selftest export-sheet
 if [ -n "${NOTARY_PROFILE:-}" ]; then
     ditto -c -k --keepParent "$app" "$work/Recorder.zip"
     notarize "$work/Recorder.zip"

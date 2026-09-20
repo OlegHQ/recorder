@@ -131,8 +131,7 @@ enum SelfTest {
                 let state = FrameState(outputSize: CGSize(width: 128, height: 128), screen: .init(luma: source), camera: nil, sourceTime: 1, project: project)
                 let command = queue.makeCommandBuffer()!
                 compositor.render(state, to: target, commandBuffer: command)
-                command.commit()
-                await command.waitUntilCompleted()
+                try await command.commitAndWait()
                 target.getBytes(&pixels, bytesPerRow: 512, from: MTLRegionMake2D(0, 0, 128, 128), mipmapLevel: 0)
                 samples.append(pixels[(64 * 128 + 60) * 4])
             }
@@ -330,6 +329,7 @@ enum SelfTest {
         "export-perf": { args in try await PerfSelfTest.runExportPerf(args) },
         "export-native": { _ in try await ExportSheetSelfTest.checkNativeHandoff() },
         "export-sheet": { args in try await ExportSheetSelfTest.run(args) },
+        "export-colors": { args in try await ColorSelfTest.run(args) },
         "export-sheet-png": { args in try await ExportSheetSelfTest.runPNG(args) },
         "camera-drag": { args in
             // Dragging the camera follows the pointer with normalized placement, one
