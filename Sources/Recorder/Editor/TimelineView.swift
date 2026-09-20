@@ -496,8 +496,10 @@ final class TimelineView: NSView {
         CGRect(x: 0, y: 0, width: Self.gutter, height: contentHeight).fill()
         let labels: [Lane: String] = [.clip: "Video", .camera: "Camera", .zoom: "Zoom", .layout: "Layout", .keys: "Keys", .mask: "Mask"]
         let colors: [Lane: NSColor] = [.clip: Theme.clip, .camera: Theme.layout, .keys: Theme.layout, .zoom: Theme.zoom, .layout: Theme.layout, .mask: Theme.mask]
-        let counts = [model?.project.clips.filter { !$0.isEmpty }.count ?? 0, model?.project.cameraClips.count ?? 0, model?.project.zooms.count ?? 0,
-                      model?.project.keystrokeClips.count ?? 0, model?.project.layouts.count ?? 0, model?.project.masks.count ?? 0]
+        let project = model?.project
+        let clipCount = project?.clips.filter { !$0.isEmpty }.count ?? 0
+        let counts = [clipCount, project?.cameraClips.count ?? 0, project?.zooms.count ?? 0,
+                      project?.keystrokeClips.count ?? 0, project?.layouts.count ?? 0, project?.masks.count ?? 0]
         for (i, lane) in Lane.allCases.enumerated() {
             let row = laneRow(lane)
             guard row.height > 0 else { continue }
