@@ -1665,7 +1665,8 @@ enum SelfTest {
         },
     ]
     private static let projectCases: [String: Case] = [
-        "editor-review-png": { args in try await EditorWorkspaceGallery.renderNativeEditor(to: URL(fileURLWithPath: args.first ?? "build/editor-final")) },
+        "editor-review-png": { args in try await EditorWorkspaceGallery.renderNativeEditor(
+            to: URL(fileURLWithPath: args.first ?? "build/editor-final"), readme: args.contains("--readme")) },
         "editor-png": { @MainActor args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png> [width height]") }

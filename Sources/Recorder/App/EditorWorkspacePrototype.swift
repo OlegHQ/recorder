@@ -994,12 +994,16 @@ extension EditorWorkspaceGallery {
 
 extension EditorWorkspaceGallery {
     /// Final layout review in the actual document window, with its live Metal preview included.
-    @MainActor static func renderNativeEditor(to directory: URL) async throws {
+    @MainActor static func renderNativeEditor(to directory: URL, readme: Bool = false) async throws {
         enum Failure: Error { case window, preview, bitmap }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-native-review-" + UUID().uuidString)
         let fixture = makeModel(at: scratch)
         fixture.edit("Mask fixture") {
+            if readme {
+                $0.title = "Product walkthrough"
+                $0.camera.mirror = false
+            }
             _ = $0.addMask(atSource: 10, length: 2, kind: .mask,
                           rect: NormRect(x: 0.2, y: 0.2, w: 0.3, h: 0.2))
         }
@@ -1019,8 +1023,10 @@ extension EditorWorkspaceGallery {
         window.appearance = NSAppearance(named: .darkAqua)
         window.orderFront(nil)
         let model = controller.model
-        model.edit("Long title fixture") {
-            $0.title = "Product walkthrough — recording the complete setup, demonstration and review for the team"
+        if !readme {
+            model.edit("Long title fixture") {
+                $0.title = "Product walkthrough — recording the complete setup, demonstration and review for the team"
+            }
         }
         for (width, height, size) in [(1100.0, 700.0, "minimum"), (1200.0, 760.0, "default")] {
             window.setContentSize(NSSize(width: width, height: height))
@@ -1071,6 +1077,7 @@ extension EditorWorkspaceGallery {
                 try data.write(to: directory.appendingPathComponent(size + "-" + state + ".png"))
             }
         }
+        if readme { return }
         // Dispatch native events through the real window; sample the switch in motion and settled.
         model.showProjectInspector(.keys)
         try await Task.sleep(for: .milliseconds(500))
