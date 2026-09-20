@@ -426,7 +426,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         }
         compositor.render(state, to: target, commandBuffer: commandBuffer)
         commandBuffer.commit()
-        await commandBuffer.completed()
+        await commandBuffer.waitUntilCompleted()
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
 

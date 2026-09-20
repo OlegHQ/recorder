@@ -213,7 +213,7 @@ final class Exporter {
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
             commandBuffer.commit()
-            await commandBuffer.completed()
+            await commandBuffer.waitUntilCompleted()
 
             let pts = CMTime(value: Int64(n), timescale: CMTimeScale(settings.fps))
             guard adaptor.append(pixelBuffer, withPresentationTime: pts) else {
@@ -427,7 +427,7 @@ extension Exporter {
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
             commandBuffer.commit()
-            await commandBuffer.completed()
+            await commandBuffer.waitUntilCompleted()
 
             var bytes = [UInt8](repeating: 0, count: width * height * 4)
             target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
@@ -668,7 +668,7 @@ enum ExporterSelfTest {
             }
             compositor.render(state, to: target, commandBuffer: commandBuffer)
             commandBuffer.commit()
-            await commandBuffer.completed()
+            await commandBuffer.waitUntilCompleted()
             var bytes = [UInt8](repeating: 0, count: width * height * 4)
             target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
             return bytes

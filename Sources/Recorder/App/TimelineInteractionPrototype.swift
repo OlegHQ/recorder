@@ -91,7 +91,7 @@ struct TimelineInteractionPrototype: View {
                 }
                 .onContinuousHover { phase in
                     switch phase {
-                    case .active(let point): hoverTime = min(30, max(0, (point.x - 64) / width * 30))
+                    case .active(let point): hoverTime = min(30, max(0, Double(point.x - 64) / Double(width) * 30))
                     case .ended: hoverTime = nil
                     }
                 }
@@ -149,7 +149,7 @@ struct TimelineInteractionPrototype: View {
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0).onChanged { value in
             audition = false
-            playhead = min(30, max(0, value.location.x / width * 30))
+            playhead = min(30, max(0, Double(value.location.x) / Double(width) * 30))
             message = String(format: "Scrub  %.2f s", playhead)
         })
         .accessibilityLabel("Playhead")
@@ -173,7 +173,7 @@ struct TimelineInteractionPrototype: View {
             if dragOrigin == nil { dragOrigin = starts[lane]; trimming = false }
             activeDrag = lane; selected = lane
             starts[lane] = min(30 - lengths[lane], max(0,
-                (dragOrigin ?? starts[lane]) + value.translation.width / width * 30))
+                (dragOrigin ?? starts[lane]) + Double(value.translation.width) / Double(width) * 30))
             message = String(format: "Move %@  %.1f s", names[lane], starts[lane])
         }.onEnded { _ in
             withAnimation(motion) {
@@ -194,7 +194,7 @@ struct TimelineInteractionPrototype: View {
                     if dragOrigin == nil { dragOrigin = lengths[lane]; trimming = true }
                     activeDrag = lane; selected = lane
                     lengths[lane] = min(30 - starts[lane], max(1,
-                        (dragOrigin ?? lengths[lane]) + value.translation.width / width * 30))
+                        (dragOrigin ?? lengths[lane]) + Double(value.translation.width) / Double(width) * 30))
                     message = String(format: "Trim %@  %.1f s", names[lane], lengths[lane])
                 }.onEnded { _ in
                     withAnimation(motion) {

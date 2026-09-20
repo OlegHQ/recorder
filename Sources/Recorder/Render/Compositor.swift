@@ -7,6 +7,14 @@ import ImageIO
 import UniformTypeIdentifiers
 import RecorderCore
 
+extension MTLCommandBuffer {
+    func waitUntilCompleted() async {
+        await withCheckedContinuation { continuation in
+            addCompletedHandler { _ in continuation.resume() }
+        }
+    }
+}
+
 /// Byte-layout-identical to the MSL `Uniforms` struct in `Shaders.swift` (16-byte-aligned float4s
 /// first, keeps the whole thing a multiple of 16 bytes).
 private struct Uniforms {
@@ -808,7 +816,7 @@ extension Compositor {
         let state = makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
         compositor.render(state, to: target, commandBuffer: commandBuffer)
         commandBuffer.commit()
-        await commandBuffer.completed()
+        await commandBuffer.waitUntilCompleted()
 
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)

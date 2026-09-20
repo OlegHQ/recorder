@@ -17,7 +17,14 @@ import UniformTypeIdentifiers
 /// Headless app checks, run instead of the GUI when launched with `--selftest <name> [args]`.
 /// Cases are registered by later tasks: `SelfTest.cases["name"] = { args in … throws }`.
 enum SelfTest {
-    nonisolated(unsafe) static var cases: [String: ([String]) async throws -> Void] = [
+    typealias Case = ([String]) async throws -> Void
+    nonisolated(unsafe) static var cases: [String: Case] = captureCases
+        .merging(libraryCases, uniquingKeysWith: { _, latest in latest })
+        .merging(inspectorCases, uniquingKeysWith: { _, latest in latest })
+        .merging(projectCases, uniquingKeysWith: { _, latest in latest })
+        .merging(recordingCases, uniquingKeysWith: { _, latest in latest })
+        .merging(timelineCases, uniquingKeysWith: { _, latest in latest })
+    private static let captureCases: [String: Case] = [
         "capture-exclusion": { _ in
             struct Fail: Error { let description: String }
             let first = await MainActor.run { () -> NSWindow in
@@ -125,7 +132,7 @@ enum SelfTest {
                 let command = queue.makeCommandBuffer()!
                 compositor.render(state, to: target, commandBuffer: command)
                 command.commit()
-                await command.completed()
+                await command.waitUntilCompleted()
                 target.getBytes(&pixels, bytesPerRow: 512, from: MTLRegionMake2D(0, 0, 128, 128), mipmapLevel: 0)
                 samples.append(pixels[(64 * 128 + 60) * 4])
             }
@@ -408,6 +415,8 @@ enum SelfTest {
                 print("camera-drag OK: continuous placement, selection, block editing, undo, hidden hit-test")
             }
         },
+    ]
+    private static let libraryCases: [String: Case] = [
         "library": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard LibraryView.movedIndex(current: 1, count: 8, forward: true, step: 3) == 4,
@@ -1037,6 +1046,8 @@ enum SelfTest {
                 }
             }
         },
+    ]
+    private static let inspectorCases: [String: Case] = [
         // T-308: exercises the exact closures `BackgroundTab`'s controls call — `fieldBinding`
         // (drag: beginGesture → update × N → commitGesture) for the Padding slider, and
         // `kindBinding` (a plain `model.edit`) for the kind picker — and checks they behave as
@@ -1640,6 +1651,8 @@ enum SelfTest {
             await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
             guard editor.window?.isVisible == true else { throw Fail(message: "editor did not reopen") }
         },
+    ]
+    private static let projectCases: [String: Case] = [
         "editor-review-png": { args in try await EditorWorkspaceGallery.renderNativeEditor(to: URL(fileURLWithPath: args.first ?? "build/editor-final")) },
         "editor-png": { @MainActor args in
             struct Fail: Error, CustomStringConvertible { let description: String }
@@ -2000,6 +2013,8 @@ enum SelfTest {
             try PresetStore.delete(preset)
             guard PresetStore.list().isEmpty else { throw Fail(description: "delete didn't remove the preset file") }
         },
+    ]
+    private static let recordingCases: [String: Case] = [
         "recover": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
@@ -2213,6 +2228,8 @@ enum SelfTest {
             print("SELFTEST record duration=\(source.duration) size=\(Int(naturalSize.width))x\(Int(naturalSize.height))")
             try? FileManager.default.removeItem(at: packageURL)
         },
+    ]
+    private static let timelineCases: [String: Case] = [
         "record-perf": { args in try await PerfSelfTest.runRecordPerf(args) },
         "idle-perf": { args in try await PerfSelfTest.runIdlePerf(args) },
         "recording-dismissal": { @MainActor _ in try ToolbarController.runDismissalSelfTest() },
