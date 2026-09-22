@@ -703,6 +703,7 @@ The x-axis is **output time** (what the viewer sees) — removed segments take n
 **Split (the headline interaction)**
 - `C` = split the clip under the **playhead** immediately. No mode, no selection needed.
 - Hold `⌥` (momentary) or press `S`/click ✂ (sticky until `Esc`) = **Split mode**: a full-height dashed accent blade line follows the mouse, **snapped**; timecode chip on the blade; the preview shows the frame under the blade (hover-scrub) so you can see where you cut. Click = split there. The playhead does not move.
+- Command-click ✂ splits the screen clip at the current output playhead without changing sticky blade mode. The selected clip is used if it spans the playhead; otherwise the screen clip under the playhead is used. The left split piece remains selected. Gap/edge clicks use the existing refused-split feedback and create no undo entry. The Command modifier is captured on mouse-down; ordinary clicks still toggle the blade.
 - A split produces two clips with identical speed; it is invisible in output until one side is changed. Splitting within 2 frames of an existing edge does nothing (shake animation on the blade, no error dialog).
 - After a split, a 0.25 s "cut flash" (white line fading) confirms it. Undo is one step.
 

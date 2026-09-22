@@ -1013,20 +1013,20 @@ final class TimelineView: NSView {
     /// `C` (immediate, at the playhead) and a split-mode click (at the blade) both land here.
     /// Refused (SPEC: within 2 frames of an edge, or a piece would be too short) → shake, no undo
     /// step. Success → exactly one `model.edit` (one undo step) + the cut flash.
-    private func performSplit(atOutput t: Double, target: TimelineHit? = nil) {
+    private func performSplit(atOutput t: Double, target: TimelineHit? = nil, clipOnly: Bool = false) {
         guard let model else { return }
         var trial = model.project
         let block: UUID?
         switch target {
         case .blockBody(let id), .blockEdge(let id, _): block = id
         case .clipBody, .clipEdge: block = nil
-        case nil: block = model.selection.first
+        case nil: block = clipOnly ? nil : model.selection.first
         default: return
         }
         let changed: Bool
         if let block { changed = trial.splitBlock(block, atSource: model.timeMap.sourceTime(atOutput: t)) }
         else {
-            if target == nil, let selected = model.selectedClip, trial.clipIndex(atOutput: t) != selected { return }
+            if !clipOnly, target == nil, let selected = model.selectedClip, trial.clipIndex(atOutput: t) != selected { return }
             changed = trial.split(atOutput: t)
         }
         guard changed else {
@@ -1035,7 +1035,9 @@ final class TimelineView: NSView {
             return
         }
         let px = x(forOutput: t)
+        let splitIndex = model.project.clipIndex(atOutput: t)
         model.edit("Split") { $0 = trial }
+        if clipOnly { model.selection = []; model.selectedClip = splitIndex }
         cutLane = block.flatMap { lane(ofBlock: $0) } ?? .clip
         cutFlash = (x: px, start: CACurrentMediaTime())
         ensureAnimating()
@@ -1358,6 +1360,11 @@ final class TimelineView: NSView {
         menu.addItem(.separator())
         menu.addItem(actionItem("Custom\u{2026}", action: #selector(menuCustomSpeed(_:)), represented: SpeedTarget(index: index, speed: 0)))
         return menu
+    }
+
+    func splitClipAtPlayhead() {
+        guard let model else { return }
+        performSplit(atOutput: model.playhead, clipOnly: true)
     }
 
     @objc func menuSplitAtPlayhead() {
@@ -2374,7 +2381,7 @@ final class TimelineToolbar: NSView {
     }
 
     private let pointerButton = NSButton(title: "", target: nil, action: nil)
-    private let splitButton = NSButton(title: "", target: nil, action: nil)
+    private let splitButton = ScissorsButton(title: "", target: nil, action: nil)
     private let rippleButton = NSButton(title: "", target: nil, action: nil)
     private let linkButton = NSButton(title: "", target: nil, action: nil)
     private let snapButton = NSButton(title: "", target: nil, action: nil)
@@ -2388,7 +2395,7 @@ final class TimelineToolbar: NSView {
         TechAppKit.styleSurface(self)
         let buttons: [(NSButton, Selector, String)] = [
             (pointerButton, #selector(pointerTapped), "Select tool (V). Drag empty video space or below tracks to box-select video; Shift-click to add or remove clips."),
-            (splitButton, #selector(splitTapped), "Blade tool (S). Command–X or C cuts at the playhead."),
+            (splitButton, #selector(splitTapped), "Blade tool (S). Command-click splits the clip at the playhead without changing tools. C splits the selection."),
             (snapButton, #selector(snapTapped), "Toggle snapping (N). Hold Command while dragging to bypass."),
             (linkButton, #selector(linkTapped), "Link layers to video. Video cuts, deletion, trims, moves and speed changes carry layers; layer edits stay independent."),
             (rippleButton, #selector(rippleTapped), "Ripple Delete. Close the space when deleting video clips; turn off to leave a gap."),
@@ -2464,10 +2471,99 @@ final class TimelineToolbar: NSView {
     @objc private func snapTapped() { timelineView?.toggleSnapping() }
     @objc private func focusTapped() { timelineView?.menuZoomToSelection() }
     @objc private func splitTapped() {
-        timelineView?.toggleSplitModeSticky()
+        if splitButton.commandClick { timelineView?.splitClipAtPlayhead() }
+        else { timelineView?.toggleSplitModeSticky() }
+        syncSlider()
         timelineView?.window?.makeFirstResponder(timelineView)
     }
     @objc private func fitTapped() { timelineView?.fit() }
     @objc private func zoomOutTapped() { timelineView?.stepZoom(by: 1 / 1.4) }
     @objc private func zoomInTapped() { timelineView?.stepZoom(by: 1.4) }
+}
+
+// Capture the modifier on mouse-down; NSButton still owns normal click tracking and release.
+private final class ScissorsButton: NSButton {
+    private(set) var commandClick = false
+    override func mouseDown(with event: NSEvent) {
+        commandClick = event.modifierFlags.contains(.command)
+        defer { commandClick = false }
+        super.mouseDown(with: event)
+    }
+}
+
+extension TimelineToolbar {
+    @MainActor static func runCommandSplitSelfTest() throws {
+        _ = NSApplication.shared
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ value: Bool, _ message: String) throws { if !value { throw Fail(description: message) } }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("scissors-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        for sticky in [false, true] {
+            var project = Project(source: Source(duration: 10), clips: [
+                Clip(sourceStart: 0, sourceEnd: 4), Clip(sourceStart: 4, sourceEnd: 8),
+                Clip(sourceStart: 8, sourceEnd: 10)])
+            project.clips[2].isGap = true
+            project.linkVideoEdits = false
+            project.zooms = [Zoom(start: 0, end: 4, scale: 2)]
+            let model = EditorModel(packageURL: scratch, project: project, events: EventLog())
+            defer { model.saveNow() }
+            let timeline = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 250))
+            timeline.model = model
+            let toolbar = TimelineToolbar(frame: CGRect(x: 0, y: 250, width: 900, height: 40))
+            toolbar.timelineView = timeline
+            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 290),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            defer { window.close() }
+            window.contentView?.addSubview(timeline)
+            window.contentView?.addSubview(toolbar)
+            window.contentView?.layoutSubtreeIfNeeded()
+            func click(_ modifiers: NSEvent.ModifierFlags) {
+                let point = toolbar.splitButton.convert(CGPoint(x: 14, y: 14), to: nil)
+                func event(_ type: NSEvent.EventType, _ flags: NSEvent.ModifierFlags) -> NSEvent {
+                    NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                }
+                // Modifier released before mouse-up: the mouse-down intent must survive button tracking.
+                NSApp.postEvent(event(.leftMouseUp, []), atStart: true)
+                toolbar.splitButton.mouseDown(with: event(.leftMouseDown, modifiers))
+            }
+            if sticky { click([]) }
+            try check(timeline.debugSplitMode == sticky, "ordinary click did not toggle blade")
+            model.playhead = 2
+            model.selectedClip = 1 // Selection does not span playhead: use the active screen clip.
+            model.selection = [UUID(uuidString: project.zooms[0].id)!]
+            click(.command)
+            try check(model.project.clips.count == 4 && model.project.clips[0].sourceEnd == 2 &&
+                      model.project.clips[1].sourceStart == 2 && model.project.zooms == project.zooms,
+                      "Command-click did not split exactly the screen clip at playhead")
+            try check(timeline.debugSplitMode == sticky && toolbar.splitButton.state == (sticky ? .on : .off),
+                      "Command-click changed persistent tool state: mode=\(timeline.debugSplitMode), button=\(toolbar.splitButton.state.rawValue), expected=\(sticky)")
+            try check(model.undoStepCount == 1 && model.selectedClip == 0 && model.selection.isEmpty,
+                      "undo count or selection continuity")
+            let split = model.project
+            model.undo()
+            try check(model.project == project, "undo did not restore geometry")
+            model.redo()
+            try check(model.project == split, "redo did not restore split")
+            for time in [0.0, 2, 4, 9, 10] {
+                model.playhead = time
+                let before = model.project, count = model.undoStepCount
+                click(.command)
+                try check(model.project == before && model.undoStepCount == count && timeline.debugSplitMode == sticky,
+                          "edge/gap click edited or changed tools")
+            }
+            model.playhead = 6
+            model.selectedClip = 2 // Selected clip spans the playhead.
+            click(.command)
+            try check(model.project.clips[2].sourceEnd == 6 && model.selectedClip == 2,
+                      "valid selected target was not retained")
+            try check(model.project.checkInvariants() == nil, "invalid clip geometry")
+            let beforeOrdinary = model.project
+            click([])
+            try check(timeline.debugSplitMode != sticky && model.project == beforeOrdinary,
+                      "ordinary click split media or failed to toggle")
+        }
+    }
 }
