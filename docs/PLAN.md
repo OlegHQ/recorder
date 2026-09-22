@@ -67,6 +67,12 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 |---|---|---|
 | Recorder Nudge defects | DEF-1107…DEF-1111 | 5/5 |
 | Requested clip fades | T-616 | 1/1 |
+| Requested advanced gallery | T-617 | 1/1 |
+
+- [x] **T-617 Advanced gallery themes and demo motion**
+  - User request: white/black inverted gallery with theme switcher, FUI scroll/interaction reveals, and a Twitter demo presentation.
+  - Do: reuse the native gallery, appearance-local shared tokens, a fixed theme rail, cancellable staggered reveals, and a finite Play demo sequence. Keep recorded media and the ordinary app palette stable.
+  - Verify: `make gallery CONFIG=debug`; `make gallery-png CONFIG=debug`; `--selftest ui-motion`; `--selftest ui-kit-png build/gallery-advanced-demo.png --gallery-advanced --gallery-demo --gallery-check`. Inspect both themes, intermediate reveals, component scroll and minimum-size captures. Reference boards are absent from this checkout; current UI-KIT notes used. Automated frames verify staging/layout, not a human assessment of pointer feel.
 
 - [x] **T-611 / DEF-1107 Restore recording surface focus**
   - Mapping: AppDelegate recording actions → ToolbarController.show/presentPicker → SourcePickerOverlay. Recording surface means selected SCDisplay/SCWindow in the capture picker, not an editor clip or document window.
@@ -764,3 +770,5 @@ T-614 / DEF-1110 · 2026-09-22 · Command-click scissors dispatches shared seman
 T-615 / DEF-1111 · 2026-09-22 · Suppressed native inferred recording-panel appearance animations at the shared registration point. Before trace: default(0); after: none(2), full alpha/visibility at every sample, stable layout and first responder. make app and recording-appearance OK; toolbar PNG inspected. Final five-ticket audit: make test 70/70; recording-appearance, recording-focus, recording-dismissal, export-range, highlight-manipulation, command-scissors all OK on the same final signed build. No remaining Nudge Recorder defects in the fetched five-ticket inventory; unrelated pre-existing agentpack.toml/pack.lock/AGENTS.md changes left intact.
 
 T-616 · 2026-09-22 · Removed implicit post-gap fade, added optional per-clip fade controls with old-project Off defaults and outer-edge split preservation. Corrected leading-edge snapping to zero (Command bypass retained). Verified make test 71/71, make app, clip-fades (bindings/undo/redo/save/zero-snap), timeline-ops, and parity on a fixture with explicit fades: maxDelta=0 at 8 times. Inspected clip panel PNG. Existing project timing remains unchanged until edited.
+
+T-617 · 2026-09-22 · Added gallery-advanced launch target, Black/White appearance switch, scroll-triggered rules and staggered content/lane reveals, cancellable 12-second demo and Reduce Motion handling. Built/opened both galleries; standard PNG and ui-motion passed. Advanced demo check asserted theme transitions and captured entrance/stagger, settled scroll stages and minimum size; images inspected. Media matte remains fixed; ordinary app tokens retain their original colors.

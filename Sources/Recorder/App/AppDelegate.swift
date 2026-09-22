@@ -31,7 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Dev/HUMAN entry point (T-306/T-307): `Recorder --open <package>` opens the editor for
         // that package directly, so it's reachable before the library (T-3xx, another lane) exists.
-        if CommandLine.arguments.contains("--ui-gallery") {
+        if CommandLine.arguments.contains("--ui-gallery") || CommandLine.arguments.contains("--gallery-advanced") {
             UIKitGallery.show()
         } else if CommandLine.arguments.contains("--projects") {
             Library.show()

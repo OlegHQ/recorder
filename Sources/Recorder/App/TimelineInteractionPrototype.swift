@@ -15,7 +15,12 @@ struct TimelineInteractionPrototype: View {
     @State private var audition = false
     @State private var revealID = 0
 
-    init(autoAudition: Bool = false) {
+    var scrollReveals = false
+    var galleryReplay = 0
+
+    init(autoAudition: Bool = false, scrollReveals: Bool = false, galleryReplay: Int = 0) {
+        self.scrollReveals = scrollReveals
+        self.galleryReplay = galleryReplay
         _audition = State(initialValue: autoAudition)
         _revealID = State(initialValue: autoAudition ? 1 : 0)
     }
@@ -123,6 +128,12 @@ struct TimelineInteractionPrototype: View {
             }.font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
         }
         .frame(height: 390)
+        .onScrollVisibilityChange(threshold: 0.1) { visible in
+            if scrollReveals && visible { revealID += 1 }
+        }
+        .onChange(of: galleryReplay) { _, _ in
+            if scrollReveals { audition = false; revealID += 1 }
+        }
         .task(id: audition) {
             guard audition else { return }
             do { try await Task.sleep(for: .milliseconds(650)) } catch { return }

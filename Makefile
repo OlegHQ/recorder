@@ -11,7 +11,7 @@ SIGN_ID  ?= $(shell security find-identity -p codesigning | grep -q "Recorder De
 CONFIG   ?= release
 GALLERY_PNG ?= build/signal-ui-gallery.png
 
-.PHONY: build test app run gallery gallery-png install uninstall clean cert
+.PHONY: build test app run gallery gallery-advanced gallery-png install uninstall clean cert
 build:
 	swift build -c $(CONFIG)
 
@@ -29,6 +29,9 @@ run: app
 # Component gallery: interactive AppKit window, or a deterministic PNG for visual review.
 gallery: app
 	open -n $(APP) --args --ui-gallery
+
+gallery-advanced: app
+	open -n $(APP) --args --gallery-advanced
 
 gallery-png: app
 	$(APP)/Contents/MacOS/Recorder --selftest ui-kit-png $(GALLERY_PNG)

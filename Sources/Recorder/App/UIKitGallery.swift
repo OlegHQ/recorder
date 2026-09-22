@@ -12,16 +12,17 @@ enum UIKitGallery {
     }
 
     @MainActor static func makeWindow() -> NSWindow {
+        let advanced = CommandLine.arguments.contains("--gallery-advanced")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
-        window.title = "Signal UI / Component Gallery"
+        window.title = advanced ? "Recorder / gallery-advanced" : "Signal UI / Component Gallery"
         window.appearance = NSAppearance(named: .darkAqua)
         window.titlebarAppearsTransparent = true
         window.backgroundColor = Theme.bgWindow
         window.minSize = NSSize(width: 900, height: 620)
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: UIKitGalleryView())
+        window.contentView = NSHostingView(rootView: UIKitGalleryView(advanced: advanced))
         window.center()
         return window
     }
@@ -34,21 +35,52 @@ enum UIKitGallery {
         defer { window.orderOut(nil) }
         guard let view = window.contentView else { throw Failure.capture }
         view.layoutSubtreeIfNeeded()
-        let overlay = try await WorkspacePreviewContainer.snapshot(in: view)
-        defer { overlay.removeFromSuperview() }
-        try await Task.sleep(for: .milliseconds(300))
-        // Nested SwiftUI scroll surfaces can cache as black. Capture only this window's
-        // composited pixels, including Metal, through the system's window capture utility.
-        let capture = Process()
-        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        capture.arguments = ["-x", "-o", "-l", String(window.windowNumber), url.path]
-        try capture.run()
-        capture.waitUntilExit()
-        guard capture.terminationStatus == 0 else { throw Failure.capture }
+        let advanced = CommandLine.arguments.contains("--gallery-advanced")
+        let overlay = advanced ? nil : try await WorkspacePreviewContainer.snapshot(in: view)
+        defer { overlay?.removeFromSuperview() }
+        func capture(_ destination: URL) throws {
+            // Capture this window's composited pixels, including native and Metal views.
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            process.arguments = ["-x", "-o", "-l", String(window.windowNumber), destination.path]
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw Failure.capture }
+        }
+        if CommandLine.arguments.contains("--gallery-check") {
+            try await Task.sleep(for: .milliseconds(80))
+            try capture(url.deletingPathExtension().appendingPathExtension("entrance.png"))
+            try await Task.sleep(for: .milliseconds(160))
+            try capture(url.deletingPathExtension().appendingPathExtension("stagger.png"))
+            try await Task.sleep(for: .milliseconds(660))
+        } else {
+            try await Task.sleep(for: .milliseconds(900))
+        }
+        try capture(url)
+        if CommandLine.arguments.contains("--gallery-check") {
+            guard advanced, CommandLine.arguments.contains("--gallery-demo") else { throw Failure.capture }
+            for (step, expected) in [NSAppearance.Name.darkAqua, .aqua, .aqua, .darkAqua, .darkAqua].enumerated() {
+                try await Task.sleep(for: .seconds(2.4))
+                guard window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == expected else {
+                    throw Failure.capture
+                }
+                try capture(url.deletingPathExtension().appendingPathExtension("step-\(step).png"))
+            }
+            window.setContentSize(NSSize(width: 900, height: 620))
+            try await Task.sleep(for: .milliseconds(600))
+            try capture(url.deletingPathExtension().appendingPathExtension("minimum.png"))
+            print("Gallery demo completed: scroll stages, both appearances, minimum size")
+        }
     }
 }
 
 private struct UIKitGalleryView: View {
+    var advanced = false
+    @State private var light = CommandLine.arguments.contains("--gallery-light")
+    @State private var replay = 0
+    @State private var demo = CommandLine.arguments.contains("--gallery-demo")
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     @State private var name = "Capture 042"
     @State private var enabled = true
     @State private var slider = 0.64
@@ -59,32 +91,92 @@ private struct UIKitGalleryView: View {
     var body: some View {
         ZStack {
             Theme.bgWindowColor.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    masthead
-                    EditorWorkspaceGallery().frame(height: 785)
-                    TechPanel(index: "01", title: "Editor timeline · production") {
-                        ProductionTimelinePreview().frame(height: 250)
+            ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    if advanced { themeRail }
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            masthead.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay)).id("intro")
+                            if !advanced { workspace }
+                            TimelineInteractionPrototype(
+                                autoAudition: CommandLine.arguments.contains("--ui-gallery-audition"),
+                                scrollReveals: advanced, galleryReplay: replay
+                            ).id("motion")
+                            HStack(alignment: .top, spacing: 12) {
+                                typography.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+                                colors.modifier(GalleryReveal(enabled: advanced, order: 1, replay: replay))
+                            }.frame(height: 154).id("elements")
+                            HStack(alignment: .top, spacing: 12) {
+                                controls.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+                                inputs.modifier(GalleryReveal(enabled: advanced, order: 1, replay: replay))
+                            }.frame(height: 250)
+                            if advanced { workspace.id("workspace") }
+                            states.fixedSize(horizontal: false, vertical: true)
+                                .modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+                            floatingPanels.fixedSize(horizontal: false, vertical: true)
+                                .modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+                            signature
+                        }
+                        .padding(28)
                     }
-                    TimelineInteractionPrototype(
-                        autoAudition: CommandLine.arguments.contains("--ui-gallery-audition")
-                    )
-                    HStack(alignment: .top, spacing: 12) {
-                        typography
-                        colors
-                    }.frame(height: 154)
-                    HStack(alignment: .top, spacing: 12) {
-                        controls
-                        inputs
-                    }.frame(height: 250)
-                    states.fixedSize(horizontal: false, vertical: true)
-                    floatingPanels.fixedSize(horizontal: false, vertical: true)
-                    signature
+                    .onScrollPhaseChange { _, phase in
+                        if phase == .interacting { demo = false }
+                    }
                 }
-                .padding(28)
+                .task(id: demo) {
+                    guard advanced && demo else { return }
+                    light = false
+                    proxy.scrollTo("intro", anchor: .top)
+                    replay += 1
+                    do {
+                        for (section, white) in [("motion", false), ("motion", true),
+                                             ("elements", true), ("elements", false), ("intro", false)] {
+                            try await Task.sleep(for: .seconds(2.4))
+                            light = white
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.7)) {
+                                proxy.scrollTo(section, anchor: .top)
+                            }
+                        }
+                        demo = false
+                    } catch { /* Direct scrolling and Stop demo cancel the sequence. */ }
+                }
             }
         }
-        .signalWindow()
+        .font(Font(Theme.bodyFont))
+        .foregroundStyle(Theme.textPrimaryColor)
+        .tint(Theme.accentColor)
+        .preferredColorScheme(advanced && light ? .light : .dark)
+    }
+
+    private var workspace: some View {
+        Group {
+            EditorWorkspaceGallery().frame(height: 785)
+                .modifier(GalleryReveal(enabled: advanced, order: 1, replay: replay))
+            TechPanel(index: "01", title: "Editor timeline · production") {
+                ProductionTimelinePreview().frame(height: 250)
+            }.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+        }
+    }
+
+    private var themeRail: some View {
+        HStack(spacing: 8) {
+            Text("gallery-advanced").font(Font(Theme.headingFont(24)))
+            Spacer()
+            ForEach([false, true], id: \.self) { isLight in
+                Button { demo = false; light = isLight } label: {
+                    Label(isLight ? "White" : "Black", systemImage: isLight ? "sun.max" : "moon")
+                }
+                .buttonStyle(TechButtonStyle(kind: light == isLight ? .primary : .secondary))
+                .accessibilityAddTraits(light == isLight ? .isSelected : [])
+            }
+            Button("Replay reveals") { demo = false; replay += 1 }
+                .buttonStyle(TechButtonStyle())
+            Button(demo ? "Stop demo" : "Play demo") { demo.toggle() }
+                .buttonStyle(TechButtonStyle())
+        }
+        .padding(.horizontal, 28).padding(.vertical, 14)
+        .background(Theme.bgPanelColor)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.strokeColor).frame(height: 1) }
     }
 
     private var masthead: some View {
@@ -128,12 +220,12 @@ private struct UIKitGalleryView: View {
     private var colors: some View {
         TechPanel(index: "02", title: "Surfaces") {
             HStack(spacing: 8) {
-                swatch("White", Theme.textPrimaryColor)
+                swatch("Ink", Theme.textPrimaryColor)
                 swatch("Text", Theme.textSecondaryColor)
                 swatch("Border", Theme.strokeStrongColor)
                 swatch("Control", Theme.bgHoverColor)
             }
-            Text("Black background. White foreground.")
+            Text(advanced && light ? "White background. Black foreground." : "Black background. White foreground.")
                 .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
         }
     }
@@ -339,5 +431,45 @@ private struct ProductionTimelinePreview: NSViewRepresentable {
         view.timeline.model = nil
         coordinator.model = nil
         try? FileManager.default.removeItem(at: coordinator.url)
+    }
+}
+
+/// Visibility is measured before the animated content, so reveal motion cannot retrigger itself.
+private struct GalleryReveal: ViewModifier {
+    let enabled: Bool
+    let order: Int
+    let replay: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var visible = false
+    @State private var revealed = false
+    @State private var rule = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(!enabled || revealed ? 1 : 0.08)
+            .offset(y: enabled && !revealed && !reduceMotion ? 12 : 0)
+            .overlay(alignment: .topLeading) {
+                if enabled && !reduceMotion {
+                    Rectangle().fill(Theme.textPrimaryColor)
+                        .frame(height: 1)
+                        .scaleEffect(x: rule ? 1 : 0, anchor: .leading)
+                        .opacity(revealed ? 0 : 1)
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
+            }
+            .onScrollVisibilityChange(threshold: 0.1) { visible = $0 }
+            .task(id: "\(visible)-\(replay)-\(reduceMotion)") {
+                guard enabled else { return }
+                guard visible else { revealed = false; rule = false; return }
+                if reduceMotion { revealed = true; rule = true; return }
+                revealed = false
+                rule = false
+                do {
+                    try await Task.sleep(for: .milliseconds(40 + order * 80))
+                    withAnimation(.easeOut(duration: 0.24)) { rule = true }
+                    try await Task.sleep(for: .milliseconds(75))
+                    withAnimation(.easeOut(duration: Theme.Motion.reveal)) { revealed = true }
+                } catch { /* Visibility changes and replay cancel pending stages. */ }
+            }
     }
 }

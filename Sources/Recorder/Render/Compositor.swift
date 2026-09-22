@@ -115,7 +115,7 @@ final class Compositor {
 
     /// `viewport`, when given (pixel rect, top-left origin — matches `NSView`/`screenRect`
     /// convention), restricts drawing to that sub-rect of `target` and letterboxes the rest with
-    /// `Theme.bgWindow` (SPEC §6.1 preview: "letterboxed"); `nil` draws over the whole target (the
+    /// `Theme.mediaMatte` (SPEC §6.1 preview: "letterboxed"); `nil` draws over the whole target (the
     /// `render` selftest, and the exporter, which has no letterbox — the target IS the output).
     func render(_ s: FrameState, to target: MTLTexture, commandBuffer: MTLCommandBuffer, viewport: CGRect? = nil) {
         var s = s
@@ -124,7 +124,7 @@ final class Compositor {
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
-        let bg = Theme.bgWindow
+        let bg = Theme.mediaMatte
         pass.colorAttachments[0].clearColor = MTLClearColor(
             red: Double(bg.redComponent), green: Double(bg.greenComponent), blue: Double(bg.blueComponent), alpha: 1)
         pass.colorAttachments[0].storeAction = .store

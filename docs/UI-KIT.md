@@ -305,3 +305,27 @@ blade clicks still split. `Recorder --selftest timeline-clipboard` exercises all
 a private pasteboard, plus selection, undo/redo and stale-clipboard handling.
 
 Project opening preserves the editor’s layout from the first frame: top bar, preview status, inspector and timeline. Preparation happens off the UI thread, with no artificial minimum wait. Ready controls reveal over 160 ms; Reduce Motion switches immediately. Preview loading remains labelled until the first video frame arrives.
+
+## gallery-advanced / September 2026
+
+`make gallery-advanced CONFIG=debug` opens the alternate gallery for demo recording. A fixed rail
+switches Black / White, replays entrances, and starts a finite 12-second demo: opening motion study,
+white inversion, component scroll, black inversion, return to the opening. Stop demo, manual scroll,
+or theme/replay buttons cancel pending demo stages. This is an isolated gallery, not a new app setting.
+
+The shared Theme tokens resolve against the gallery window appearance. Neutral colors and timeline
+fills invert; warning/danger retain their meaning with darker light-theme variants. Media rendering
+retains its fixed dark matte. The ordinary app still uses its original static dark palette.
+The opening puts the interactive timeline ahead of the full editing workspace for a compact demo frame.
+Sections entering the viewport reveal a short leading rule, then settle by 12 points over 420 ms;
+paired sections stagger by 80 ms. Timeline lanes wipe in 85 ms apart and selection fields retain
+existing staggered reveals. Viewport changes and replay cancel pending reveal tasks. Reduce Motion
+removes the new line/translation effects and programmatic scroll animation.
+
+Verification: `Recorder --selftest ui-kit-png build/gallery-advanced-demo.png --gallery-advanced
+--gallery-demo --gallery-check` runs the demo, asserts both appearance changes, and captures entrance,
+stagger, settled scroll stages and a 900 × 620 content-size frame. `--gallery-light` starts in White.
+`Recorder --selftest ui-motion` checks the existing timeline snapping boundaries. These automated
+captures establish layout and staged execution; personal judgment of live pointer feel remains manual.
+The reference image directory named by the design skill was absent in this checkout; implementation
+used these recorded design notes and the existing gallery.

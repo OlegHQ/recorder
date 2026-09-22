@@ -6,32 +6,45 @@ import CoreText
 /// Keep every app colour, type role, radius and spacing value here so AppKit and SwiftUI stay identical.
 enum Theme {
     // MARK: Surfaces
-    static let bgWindow = NSColor(hex: "#080808")
-    static let bgPanel = NSColor(hex: "#0B0B0B")
-    static let bgControl = NSColor(hex: "#141414")
-    static let bgHover = NSColor(hex: "#252525")
-    static let bgSelected = NSColor(hex: "#292929")
+    static let bgWindow = adaptive("#080808")
+    static let bgPanel = adaptive("#0B0B0B")
+    static let bgControl = adaptive("#141414")
+    static let bgHover = adaptive("#252525")
+    static let bgSelected = adaptive("#292929")
 
     // MARK: Structure
-    static let grid = NSColor(hex: "#202020")
-    static let stroke = NSColor(hex: "#383838")
-    static let strokeStrong = NSColor(hex: "#808080")
+    static let grid = adaptive("#202020")
+    static let stroke = adaptive("#383838")
+    static let strokeStrong = adaptive("#808080")
 
     // MARK: Content
-    static let textPrimary = NSColor(hex: "#F4F3EE")
-    static let textSecondary = NSColor(hex: "#B8B8B2")
-    static let textTertiary = NSColor(hex: "#93938E")
+    static let textPrimary = adaptive("#F4F3EE")
+    static let textSecondary = adaptive("#B8B8B2")
+    static let textTertiary = adaptive("#93938E")
 
     // MARK: Signals
-    static let accent = NSColor(hex: "#F4F3EE")
-    static let accentText = NSColor(hex: "#FFFFFF")
-    static let accentDim = NSColor(hex: "#303030")
-    static let clip = NSColor(hex: "#ECE6CE")
-    static let zoom = NSColor(hex: "#D7EAF0")
-    static let layout = NSColor(hex: "#DCE8D7")
-    static let mask = NSColor(hex: "#E5DCEC")
-    static let warning = NSColor(hex: "#D8C86A")
-    static let danger = NSColor(hex: "#E38276")
+    static let accent = adaptive("#F4F3EE")
+    static let accentText = adaptive("#FFFFFF")
+    static let accentDim = adaptive("#303030")
+    static let clip = adaptive("#ECE6CE")
+    static let zoom = adaptive("#D7EAF0")
+    static let layout = adaptive("#DCE8D7")
+    static let mask = adaptive("#E5DCEC")
+    static let warning = adaptive("#D8C86A", light: "#75620B")
+    static let danger = adaptive("#E38276", light: "#A13027")
+
+    /// Appearance-local inversion keeps media pixels intact and shares tokens with AppKit.
+    static let mediaMatte = NSColor(hex: "#080808")
+
+    private static func adaptive(_ hex: String, light lightHex: String? = nil) -> NSColor {
+        let dark = NSColor(hex: hex)
+        guard CommandLine.arguments.contains("--gallery-advanced") else { return dark }
+        let light = lightHex.map { NSColor(hex: $0) } ?? NSColor(srgbRed: 1 - dark.redComponent, green: 1 - dark.greenComponent,
+                            blue: 1 - dark.blueComponent, alpha: 1)
+        return NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        }
+    }
 
     static var bgWindowColor: Color { Color(nsColor: bgWindow) }
     static var bgPanelColor: Color { Color(nsColor: bgPanel) }
