@@ -298,6 +298,12 @@ content; other displays are dimmed 65% with no content.
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+Returning to recording setup restores the last valid display/window selection for the current app session.
+Window IDs are validated against fresh on-screen capture sources; Recorder’s own windows are excluded.
+If the target disappeared, select the source under the pointer (or the first available display); when no
+window is under the pointer, show an explicit selection prompt. Pointer movement overrides restoration.
+Do not activate the captured application or restore unrelated document focus.
+
 **AC-DSP-1** Moving the mouse to another display moves the title/button there within one frame.
 **AC-DSP-2** `Start recording` (or `Return`) starts capturing that display at native pixel resolution, 60 fps.
 

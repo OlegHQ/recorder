@@ -10,6 +10,8 @@ enum SourcePickerOverlay {
     private static var windows: [SourcePickerWindow] = []
     private static var state: SourcePickerState?
     private static var refreshTimer: Timer?
+    fileprivate static var lastDisplayID: CGDirectDisplayID?
+    fileprivate static var lastWindowID: CGWindowID?
 
     /// Whether a display/window picker is currently up.
     static var isOpen: Bool { !windows.isEmpty }
@@ -23,7 +25,10 @@ enum SourcePickerOverlay {
         }
 
         let state = SourcePickerState()
-        state.activeScreen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+        state.mode = mode
+        state.activeScreen = NSScreen.screens.first { $0.displayID == lastDisplayID }
+            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.screens.first
+        state.pendingWindowID = lastWindowID
         self.state = state
 
         windows = NSScreen.screens.map { SourcePickerWindow(screen: $0, mode: mode, state: state) }
@@ -63,13 +68,28 @@ enum SourcePickerOverlay {
         Task { @MainActor in
             guard self.state === state else { return }
             guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return }
+            guard self.state === state else { return } // A closed picker must never restore stale focus.
             state.displays = content.displays
             state.windows = content.windows.filter {
                 $0.windowLayer == 0 && $0.frame.width >= 100 && $0.frame.height >= 100
+                    && $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier
                     && !FloatingPanel.allWindowIDs.contains($0.windowID)
             }
-            if let id = state.hoveredWindow?.windowID { state.hoveredWindow = state.windows.first { $0.windowID == id } }
+            guard state.mode == .window else { return }
+            let frames = Dictionary(uniqueKeysWithValues: state.windows.map { ($0.windowID, $0.frame) })
+            let id = restoredWindowID(previous: state.hoveredWindow?.windowID ?? state.pendingWindowID,
+                                      point: cgGlobalPoint(NSEvent.mouseLocation),
+                                      order: frontToBackWindowIDs(), frames: frames)
+            state.pendingWindowID = nil
+            state.hoveredWindow = id.flatMap { id in state.windows.first { $0.windowID == id } }
+            lastWindowID = id
         }
+    }
+
+    static func restoredWindowID(previous: CGWindowID?, point: CGPoint, order: [CGWindowID],
+                                 frames: [CGWindowID: CGRect]) -> CGWindowID? {
+        if let previous, frames[previous] != nil { return previous }
+        return frontmostWindow(at: point, order: order, frames: frames)
     }
 
     /// Converts a top-left-origin **global** rect (the `SCWindow.frame`/`SCDisplay.frame` convention)
@@ -107,8 +127,14 @@ enum SourcePickerOverlay {
 @Observable private final class SourcePickerState {
     var displays: [SCDisplay] = []
     var windows: [SCWindow] = []
-    var activeScreen: NSScreen?   // display mode: the screen under the mouse
-    var hoveredWindow: SCWindow?  // window mode: front-most window under the mouse
+    var mode: RecordingSettings.Mode = .display
+    var pendingWindowID: CGWindowID?
+    var activeScreen: NSScreen? {
+        didSet { SourcePickerOverlay.lastDisplayID = activeScreen?.displayID }
+    }
+    var hoveredWindow: SCWindow? {
+        didSet { SourcePickerOverlay.lastWindowID = hoveredWindow?.windowID }
+    }
 }
 
 /// One per `NSScreen`. Borderless, non-activating, one level below `FloatingPanel` (SPEC §4 window/panel
@@ -140,7 +166,6 @@ private final class SourcePickerWindow: NSPanel {
         ))
         hostingView.onReturn = { [weak self] in self?.start() }
         hostingView.onEnter = { [weak self] in self?.enter() }
-        hostingView.onExit = { [weak self] in self?.exit() }
         hostingView.onMove = { [weak self] in self?.moved() }
         contentView = hostingView
 
@@ -159,12 +184,7 @@ private final class SourcePickerWindow: NSPanel {
     }
 
     private func enter() {
-        if mode == .display { state.activeScreen = targetScreen }
         makeKeyAndOrderFront(nil)
-    }
-
-    private func exit() {
-        if mode == .display, state.activeScreen === targetScreen { state.activeScreen = nil }
     }
 
     /// Highlights the front-most on-screen window under the mouse (AC-WIN-1). Uses `NSEvent.mouseLocation`
@@ -173,7 +193,9 @@ private final class SourcePickerWindow: NSPanel {
     /// bottom-left AppKit coordinates (as the old code did) mirrored the hit-test point vertically within
     /// the screen, which is why hover picked "random" windows.
     private func moved() {
+        if mode == .display { state.activeScreen = targetScreen; return }
         guard mode == .window else { return }
+        state.pendingWindowID = nil // Explicit pointer selection wins over an in-flight restore.
         let cgPoint = SourcePickerOverlay.cgGlobalPoint(NSEvent.mouseLocation)
         let frames = Dictionary(uniqueKeysWithValues: state.windows.map { ($0.windowID, $0.frame) })
         let order = SourcePickerOverlay.frontToBackWindowIDs()
@@ -346,7 +368,6 @@ private enum SavedWindowSizes {
 private final class SourcePickerHostingView: NSHostingView<SourcePickerContentView> {
     var onReturn: (() -> Void)?
     var onEnter: (() -> Void)?
-    var onExit: (() -> Void)?
     var onMove: (() -> Void)?
 
     private var trackingArea: NSTrackingArea?
@@ -364,7 +385,6 @@ private final class SourcePickerHostingView: NSHostingView<SourcePickerContentVi
     // `ToolbarController.handleEscape()`.
     override func cancelOperation(_ sender: Any?) { ToolbarController.shared.handleEscape() }
     override func mouseEntered(with event: NSEvent) { onEnter?() }
-    override func mouseExited(with event: NSEvent) { onExit?() }
     override func mouseMoved(with event: NSEvent) { onMove?() }
 
     override func keyDown(with event: NSEvent) {
@@ -446,6 +466,10 @@ private struct SourcePickerContentView: View {
             .overlay(Rectangle().stroke(Theme.strokeColor))
             .position(x: local.midX, y: local.midY)
             .allowsHitTesting(true)
+        } else {
+            Text("Move the pointer over a window to select it")
+                .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textPrimaryColor)
+                .padding(16).background(Theme.bgPanelColor)
         }
     }
 
@@ -514,5 +538,64 @@ struct StartRecordingButton: View {
 extension NSScreen {
     var displayID: CGDirectDisplayID? {
         (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
+
+// Uses real picker panels and live ScreenCaptureKit content for the return-navigation check.
+extension SourcePickerOverlay {
+    @MainActor static func runFocusSelfTest() async throws {
+        _ = NSApplication.shared
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func require(_ condition: Bool, _ message: String) throws {
+            if !condition { throw Fail(description: message) }
+        }
+        let frames: [CGWindowID: CGRect] = [1: CGRect(x: 0, y: 0, width: 200, height: 200),
+                                          2: CGRect(x: 300, y: 0, width: 200, height: 200)]
+        let point = CGPoint(x: 10, y: 10)
+        try require(restoredWindowID(previous: nil, point: point, order: [1, 2], frames: frames) == 1, "fresh entry")
+        try require(restoredWindowID(previous: 2, point: point, order: [1, 2], frames: frames) == 2, "restore valid target")
+        try require(restoredWindowID(previous: 9, point: point, order: [1, 2], frames: frames) == 1, "removed target fallback")
+        try require(restoredWindowID(previous: 9, point: .zero, order: [], frames: [:]) == nil, "empty sources")
+        let savedDisplay = lastDisplayID, savedWindow = lastWindowID
+        defer { close(); lastDisplayID = savedDisplay; lastWindowID = savedWindow }
+        guard let screen = NSScreen.screens.last else { throw Fail(description: "No display available") }
+        lastDisplayID = screen.displayID
+        show(mode: .display)
+        try require(state?.activeScreen === screen && windows.allSatisfy(\.isVisible), "display restore must be visible")
+        close()
+        show(mode: .display)
+        try require(state?.activeScreen === screen, "display re-entry")
+        lastDisplayID = UInt32.max
+        show(mode: .display)
+        try require(state?.activeScreen != nil, "removed display fallback")
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let candidates = content.windows.filter {
+            $0.windowLayer == 0 && $0.frame.width >= 100 && $0.frame.height >= 100
+                && $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier
+        }
+        guard let target = candidates.first else { throw Fail(description: "No external window available") }
+        lastWindowID = target.windowID
+        show(mode: .window)
+        for _ in 0..<100 {
+            if state?.hoveredWindow?.windowID == target.windowID { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try require(state?.hoveredWindow?.windowID == target.windowID, "live window restore")
+        try require(windows.allSatisfy(\.isVisible), "restored window picker visibility")
+        if let other = candidates.dropFirst().first {
+            state?.hoveredWindow = other
+            close()
+            show(mode: .display)
+            try await Task.sleep(for: .milliseconds(200))
+            show(mode: .window)
+            for _ in 0..<100 {
+                if state?.hoveredWindow?.windowID == other.windowID { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            try require(state?.hoveredWindow?.windowID == other.windowID, "explicit replacement survives return")
+        }
+        close()
+        try await Task.sleep(for: .milliseconds(100))
+        try require(!isOpen && state == nil, "late refresh reopened closed picker")
     }
 }

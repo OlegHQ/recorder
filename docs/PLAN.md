@@ -58,6 +58,30 @@ Update the "Done" column whenever you tick a task.
 
 ---
 
+## Requested Nudge fixes — 2026-09-22
+
+User-requested fixes are handled individually in this order, separately from the outstanding HUMAN milestone gates.
+Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/SwiftUI SwiftPM app.
+
+| Scope | Tasks | Done |
+|---|---|---|
+| Recorder Nudge defects | DEF-1107…DEF-1111 | 1/5 |
+
+- [x] **T-611 / DEF-1107 Restore recording surface focus**
+  - Mapping: AppDelegate recording actions → ToolbarController.show/presentPicker → SourcePickerOverlay. Recording surface means selected SCDisplay/SCWindow in the capture picker, not an editor clip or document window.
+  - Do: retain session source IDs, validate on entry, preserve explicit pointer selection, and provide a visible unavailable-source fallback.
+  - Verify: `make app`; `--selftest recording-focus` (real panels/live source validation plus deterministic missing-source matrix); existing `pickers` and `recording-dismissal` checks.
+- [ ] **T-612 / DEF-1108 End automatic export range at last active clip**
+  - Verify: range calculations through edits/undo/redo, explicit range clamping and empty projects; exporter integration.
+- [ ] **T-613 / DEF-1109 Precise small highlight manipulation**
+  - Verify: pointer move/resize/minimum/bounds, source transform, one-step undo, cancel, small-highlight integration.
+- [ ] **T-614 / DEF-1110 Cmd-click scissors split**
+  - Verify: modifier routing, clip boundaries, tool state and undo/redo through real toolbar integration.
+- [ ] **T-615 / DEF-1111 Immediate recording setup appearance**
+  - Verify: initial native window state at launch and recording entry, intended focus, unaffected unrelated transitions.
+
+---
+
 ## M0 — Foundations
 
 - [x] **T-001 git + signing identity**
@@ -718,3 +742,5 @@ ENV · 2026-09-18 evening · laptop lid closed: machine slept ~2 h (agents froze
 T-610 · 2026-09-18 · verified: `make app` (no `error:`), `make test` 48/48; selftests `snapshot` (new), `menus` (extended), `hotkeys`, `menu-actions`, `model` all OK; real run (`open -n` + `scripts/freeze-dump.sh <pid>`) produced a non-empty `sample.txt`/`ps.txt` and copied the folder path; a one-off headless visible-window run confirmed `StateSnapshot`'s own `window-<n>-<class>.png` shows real editor chrome · deviations: git commit omitted from `snapshot.json` (no build-time bake step exists in this project, task allowed omitting it); `CGWindowListCreateImage` (would avoid needing `cacheDisplay` for the own-window PNGs) is compile-time `unavailable` on this SDK, so `writeWindowPNGs` always uses `cacheDisplay` — noted as a `// ponytail:` in `StateSnapshot.swift`; `EditorWindowController.currentInspectorTab` only reflects `View ▸ 1–6` menu switches, not raw SwiftUI tab-button clicks (private `@State`, no callback out) — the more important "selection replaces the tabs" case is computed independently from `model` and stays accurate.
 
 T-505/T-506 · 2026-09-20 · Fixed MP4 writer deadlock (video-only feeding stalled Cool Forest at frame 32): feed ready audio/video inputs together, check reader/writer failures, bound backpressure/finalization waits, synchronize cancellation and remove partial files on failure. Verified Cool Forest 1378×1080/24 fps: 190 frames, H.264 and HEVC ≈1.4 s; expanded audio-mix regression to 60 decoded frames and cancellation at frame 32 (<1 s, partial deleted). Export sheet now has visible idle Cancel, bordered Cancel export with cancelling feedback, Escape cancellation/dismissal and idle/completed click-away. `audio-mix`, `export-sheet` (including AppKit outside-click/Escape), `export-colors`, idle/failure PNG checks passed.
+
+T-611 / DEF-1107 · 2026-09-22 · Restored session-scoped display/window picker selection, validated live sources, excluded own app windows, added unavailable-window prompt and discarded stale async refreshes. Verified `make app`, LaunchServices `--selftest recording-focus` (live SCWindow restore, real visible panels, display return/fallback, explicit replacement and mode switch), `pickers`, `recording-dismissal` all OK. Synthetic resolver assertions cover fresh/removed/empty sources.
