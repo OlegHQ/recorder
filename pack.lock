@@ -13,3 +13,14 @@ owner = 'dietrichgebert'
 repo = 'ponytail'
 commit = 'e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156'
 cache_key = 'a8e9bee7c0847c01c5f5eddf53560846fdc7802a173a245c957f3a51fb772ef7'
+
+[[packages]]
+module = 'github.com/oleghq/agent-configs/skills/nudge-cli'
+direct = true
+kind = 'skill'
+url = 'https://github.com/oleghq/agent-configs/tree/b2eb27d2020384700a358da3ad0cc6d9d709acb1/skills/nudge-cli'
+owner = 'oleghq'
+repo = 'agent-configs'
+path = 'skills/nudge-cli'
+commit = 'b2eb27d2020384700a358da3ad0cc6d9d709acb1'
+cache_key = 'ed4dda72812205937c109f2c1b554ba2d96bac27d62c584a212dc0dbf0f543e7'
