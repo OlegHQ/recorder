@@ -6,6 +6,7 @@ import RecorderCore
 /// `CursorStyle` fields, all wired through `EditorModel.edit` (T-604 UI half; the `CursorPath`
 /// behaviour they drive is core work already merged, see plan Log).
 struct CursorTab: View {
+    @Environment(\.colorScheme) private var colorScheme
     let model: EditorModel
 
     private var cursor: CursorStyle { model.project.cursor }
@@ -29,6 +30,7 @@ struct CursorTab: View {
             }
             .font(Font(Theme.bodyFont))
             .foregroundStyle(Theme.textSecondaryColor)
+            .id(colorScheme) // Refresh the native popup's cached text color when appearance changes.
 
             Toggle("Hide when idle", isOn: hideWhenIdleBinding)
                 .foregroundStyle(Theme.textPrimaryColor)

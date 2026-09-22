@@ -2,6 +2,7 @@ import SwiftUI
 import RecorderCore
 
 struct CameraTab: View {
+    @Environment(\.colorScheme) private var colorScheme
     let model: EditorModel
     var layoutID: UUID? = nil
     var spatialControls = true
@@ -33,6 +34,7 @@ struct CameraTab: View {
                     Text("Classic · 4:3").tag(4.0 / 3)
                     Text("Portrait · 9:16").tag(9.0 / 16)
                 }
+                .id(colorScheme) // Refresh the native popup's cached text color when appearance changes.
                 .modifier(InspectorReveal(identity: layoutID?.uuidString ?? "camera", order: 1))
                 if spatialControls {
                     PlacementPad(position: position, onChange: { point in

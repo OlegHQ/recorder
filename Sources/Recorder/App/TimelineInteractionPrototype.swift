@@ -15,10 +15,12 @@ struct TimelineInteractionPrototype: View {
     @State private var audition = false
     @State private var revealID = 0
 
+    var presentation = false
     var scrollReveals = false
     var galleryReplay = 0
 
-    init(autoAudition: Bool = false, scrollReveals: Bool = false, galleryReplay: Int = 0) {
+    init(autoAudition: Bool = false, scrollReveals: Bool = false, galleryReplay: Int = 0, presentation: Bool = false) {
+        self.presentation = presentation
         self.scrollReveals = scrollReveals
         self.galleryReplay = galleryReplay
         _audition = State(initialValue: autoAudition)
@@ -37,9 +39,10 @@ struct TimelineInteractionPrototype: View {
     }
 
     var body: some View {
-        TechPanel(index: "06", title: "Timeline / interaction study") {
+        VStack(alignment: .leading, spacing: 12) {
+            if !presentation { TechSectionLabel(index: "06", title: "Timeline / interaction study") }
             HStack(spacing: 12) {
-                Button(audition ? "Stop preview" : "Replay reveals") {
+                Button(audition ? "Stop" : presentation ? "Play motion" : "Replay reveals") {
                     if audition { audition = false }
                     else { revealID += 1; audition = true }
                 }
@@ -121,13 +124,17 @@ struct TimelineInteractionPrototype: View {
                 .overlay(alignment: .bottom) { colors[selected].frame(height: 1) }
                 .modifier(TimelineReveal(trigger: selected + revealID * 10, delay: 0))
             }
-            HStack {
+            if !presentation { HStack {
                 Text(message)
                 Spacer()
                 Text("Snap 0.5 s").foregroundStyle(Theme.textPrimaryColor)
-            }.font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+            }.font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor) }
         }
-        .frame(height: 390)
+        .padding(presentation ? 24 : 16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Theme.bgPanelColor)
+        .overlay { if !presentation { Rectangle().stroke(Theme.strokeColor); TechCornerMarks() } }
+        .frame(height: presentation ? 338 : 390)
         .onScrollVisibilityChange(threshold: 0.1) { visible in
             if scrollReveals && visible { revealID += 1 }
         }

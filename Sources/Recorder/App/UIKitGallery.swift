@@ -11,25 +11,26 @@ enum UIKitGallery {
         NSApp.activate()
     }
 
-    @MainActor static func makeWindow() -> NSWindow {
+    @MainActor static func makeWindow(onPanelsReady: @escaping (EditorModel) -> Void = { _ in }) -> NSWindow {
         let advanced = CommandLine.arguments.contains("--gallery-advanced")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = advanced ? "Recorder / gallery-advanced" : "Signal UI / Component Gallery"
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = NSAppearance(named: advanced && !CommandLine.arguments.contains("--gallery-dark") ? .aqua : .darkAqua)
         window.titlebarAppearsTransparent = true
         window.backgroundColor = Theme.bgWindow
         window.minSize = NSSize(width: 900, height: 620)
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: UIKitGalleryView(advanced: advanced))
+        window.contentView = NSHostingView(rootView: UIKitGalleryView(advanced: advanced, onPanelsReady: onPanelsReady))
         window.center()
         return window
     }
 
     @MainActor static func renderPNG(to url: URL) async throws {
         enum Failure: Error { case capture }
-        let window = makeWindow()
+        var panelsReady = false
+        let window = makeWindow { _ in panelsReady = true }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
         defer { window.orderOut(nil) }
@@ -56,15 +57,26 @@ enum UIKitGallery {
         } else {
             try await Task.sleep(for: .milliseconds(900))
         }
+        if advanced {
+            func containsEditor(_ view: NSView) -> Bool {
+                view is PreviewView || view is TimelineView || view.subviews.contains(where: containsEditor)
+            }
+            guard panelsReady, !containsEditor(view) else { throw Failure.capture }
+        }
+        if advanced && !CommandLine.arguments.contains("--gallery-dark") {
+            guard window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .aqua else { throw Failure.capture }
+        }
         try capture(url)
         if CommandLine.arguments.contains("--gallery-check") {
             guard advanced, CommandLine.arguments.contains("--gallery-demo") else { throw Failure.capture }
-            for (step, expected) in [NSAppearance.Name.darkAqua, .aqua, .aqua, .darkAqua, .darkAqua].enumerated() {
+            for (step, expected) in [NSAppearance.Name.aqua, .darkAqua, .aqua, .aqua, .darkAqua, .aqua].enumerated() {
                 try await Task.sleep(for: .seconds(2.4))
                 guard window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == expected else {
                     throw Failure.capture
                 }
                 try capture(url.deletingPathExtension().appendingPathExtension("step-\(step).png"))
+                if step == 0 { window.setContentSize(NSSize(width: 900, height: 620)) }
+                if step == 1 { window.setContentSize(NSSize(width: 1120, height: 760)) }
             }
             window.setContentSize(NSSize(width: 900, height: 620))
             try await Task.sleep(for: .milliseconds(600))
@@ -76,7 +88,9 @@ enum UIKitGallery {
 
 private struct UIKitGalleryView: View {
     var advanced = false
-    @State private var light = CommandLine.arguments.contains("--gallery-light")
+    var onPanelsReady: (EditorModel) -> Void = { _ in }
+    @State private var light = !CommandLine.arguments.contains("--gallery-dark")
+    @State private var capturePreview = false
     @State private var replay = 0
     @State private var demo = CommandLine.arguments.contains("--gallery-demo")
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -84,7 +98,7 @@ private struct UIKitGalleryView: View {
     @State private var name = "Capture 042"
     @State private var enabled = true
     @State private var slider = 0.64
-    @State private var mode = 1
+    @State private var mode = CommandLine.arguments.contains("--gallery-advanced") ? 0 : 1
     @State private var search = ""
     @State private var selectionRect = CGRect(x: 120, y: 80, width: 960, height: 540)
 
@@ -95,29 +109,32 @@ private struct UIKitGalleryView: View {
                 VStack(spacing: 0) {
                     if advanced { themeRail }
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 12) {
-                            masthead.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay)).id("intro")
-                            if !advanced { workspace }
-                            TimelineInteractionPrototype(
-                                autoAudition: CommandLine.arguments.contains("--ui-gallery-audition"),
-                                scrollReveals: advanced, galleryReplay: replay
-                            ).id("motion")
-                            HStack(alignment: .top, spacing: 12) {
-                                typography.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
-                                colors.modifier(GalleryReveal(enabled: advanced, order: 1, replay: replay))
-                            }.frame(height: 154).id("elements")
-                            HStack(alignment: .top, spacing: 12) {
-                                controls.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
-                                inputs.modifier(GalleryReveal(enabled: advanced, order: 1, replay: replay))
-                            }.frame(height: 250)
-                            if advanced { workspace.id("workspace") }
-                            states.fixedSize(horizontal: false, vertical: true)
-                                .modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
-                            floatingPanels.fixedSize(horizontal: false, vertical: true)
-                                .modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
-                            signature
+                        if advanced {
+                            presentation.padding(.horizontal, 40).padding(.vertical, 28)
+                        } else {
+                            VStack(alignment: .leading, spacing: 12) {
+                                masthead.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay)).id("intro")
+                                if !advanced { workspace }
+                                TimelineInteractionPrototype(
+                                    autoAudition: CommandLine.arguments.contains("--ui-gallery-audition"),
+                                    scrollReveals: advanced, galleryReplay: replay
+                                ).id("motion")
+                                HStack(alignment: .top, spacing: 12) {
+                                    typography.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+                                    colors.modifier(GalleryReveal(enabled: advanced, order: 1, replay: replay))
+                                }.frame(height: 154).id("elements")
+                                HStack(alignment: .top, spacing: 12) {
+                                    controls.modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+                                    inputs.modifier(GalleryReveal(enabled: advanced, order: 1, replay: replay))
+                                }.frame(height: 250)
+                                states.fixedSize(horizontal: false, vertical: true)
+                                    .modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+                                floatingPanels.fixedSize(horizontal: false, vertical: true)
+                                    .modifier(GalleryReveal(enabled: advanced, order: 0, replay: replay))
+                                signature
+                            }
+                            .padding(28)
                         }
-                        .padding(28)
                     }
                     .onScrollPhaseChange { _, phase in
                         if phase == .interacting { demo = false }
@@ -125,15 +142,20 @@ private struct UIKitGalleryView: View {
                 }
                 .task(id: demo) {
                     guard advanced && demo else { return }
-                    light = false
+                    light = true
+                    capturePreview = false
+                    mode = 0
                     proxy.scrollTo("intro", anchor: .top)
                     replay += 1
                     do {
-                        for (section, white) in [("motion", false), ("motion", true),
-                                             ("elements", true), ("elements", false), ("intro", false)] {
+                        for (section, white) in [("elements", true), ("elements", false), ("keys", true),
+                                                 ("capture", true), ("widgets", false), ("intro", true)] {
                             try await Task.sleep(for: .seconds(2.4))
                             light = white
+                            capturePreview.toggle()
+                            mode = (mode + 1) % 3
                             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.7)) {
+                                slider = section == "elements" ? 0.85 : 0.36
                                 proxy.scrollTo(section, anchor: .top)
                             }
                         }
@@ -148,6 +170,154 @@ private struct UIKitGalleryView: View {
         .preferredColorScheme(advanced && light ? .light : .dark)
     }
 
+    private var presentation: some View {
+        VStack(alignment: .leading, spacing: 32) {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .lastTextBaseline) {
+                    Text("Recorder").font(Font(Theme.headingFont(64)))
+                    Spacer()
+                    Text("Motion & detail").font(Font(Theme.labelFont))
+                        .foregroundStyle(Theme.textSecondaryColor)
+                }
+                .modifier(GalleryReveal(enabled: true, order: 0, replay: replay))
+                TimelineInteractionPrototype(scrollReveals: true, galleryReplay: replay, presentation: true)
+            }.id("intro")
+
+            GalleryInspectorStudies(replay: replay, onReady: onPanelsReady).id("elements")
+
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 20) {
+                    studyHeading("06", "Capture")
+                    TechSegmentedControl(selection: Binding(get: { mode }, set: { demo = false; mode = $0 }),
+                                         options: [(0, "Display"), (1, "Window"), (2, "Area")])
+                    Toggle("Microphone", isOn: Binding(get: { enabled }, set: { demo = false; enabled = $0 }))
+                        .toggleStyle(TechToggleStyle())
+                    Spacer(minLength: 0)
+                    Button(capturePreview ? "Reset preview" : "Preview capture") {
+                        demo = false
+                        capturePreview.toggle()
+                    }.buttonStyle(TechButtonStyle(kind: .primary))
+                }.frame(width: 250, height: 238, alignment: .topLeading)
+                    .modifier(GalleryReveal(enabled: true, order: 0, replay: replay))
+                captureCanvas.modifier(GalleryReveal(enabled: true, order: 1, replay: replay))
+            }.id("capture")
+
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 20) {
+                    studyHeading("07", "Actions")
+                    HStack(spacing: 8) {
+                        Button(capturePreview ? "Selected" : "Select") { capturePreview.toggle() }
+                            .buttonStyle(TechButtonStyle(kind: .primary))
+                        Button("Reset") { capturePreview = false; slider = 0.64 }
+                            .buttonStyle(TechButtonStyle())
+                        Menu { Button("White") { light = true }; Button("Black") { light = false } }
+                            label: { TechMenuLabel(title: "Theme") }
+                            .menuStyle(.borderlessButton).fixedSize()
+                    }
+                    HStack(spacing: 8) {
+                        ForEach(["display", "macwindow", "rectangle.dashed"].indices, id: \.self) { index in
+                            Button { mode = index } label: {
+                                Image(systemName: ["display", "macwindow", "rectangle.dashed"][index])
+                                    .frame(width: 24, height: 24)
+                            }
+                            .buttonStyle(TechButtonStyle(kind: mode == index ? .primary : .secondary))
+                            .accessibilityLabel(["Display", "Window", "Area"][index])
+                        }
+                        Spacer()
+                        Text("⌘").padding(8).background(Theme.bgControlColor)
+                        Text("K").padding(8).background(Theme.bgControlColor)
+                    }
+                    HStack(spacing: 4) {
+                        ForEach([Theme.textPrimaryColor, Theme.textSecondaryColor, Theme.strokeStrongColor, Theme.bgHoverColor].indices, id: \.self) { index in
+                            [Theme.textPrimaryColor, Theme.textSecondaryColor, Theme.strokeStrongColor, Theme.bgHoverColor][index]
+                                .frame(height: 24)
+                        }
+                    }.accessibilityLabel("Theme tones")
+                }.frame(maxWidth: .infinity)
+                    .modifier(GalleryReveal(enabled: true, order: 0, replay: replay))
+                VStack(alignment: .leading, spacing: 20) {
+                    studyHeading("08", "Inputs")
+                    TextField("Recording name", text: $name).textFieldStyle(TechFieldStyle())
+                    TechSearchField(placeholder: "Search projects", text: $search, width: 260)
+                    HStack {
+                        Text("Scale").foregroundStyle(Theme.textSecondaryColor)
+                        Slider(value: $slider).accessibilityLabel("Scale study")
+                        Text(slider, format: .percent.precision(.fractionLength(0)))
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }.frame(maxWidth: .infinity)
+                    .modifier(GalleryReveal(enabled: true, order: 1, replay: replay))
+            }.id("widgets")
+
+            HStack {
+                Text("Recorder")
+                Spacer()
+                Text("Motion & detail")
+            }.font(Font(Theme.labelFont)).foregroundStyle(Theme.textSecondaryColor)
+                .padding(.top, 12)
+        }
+        .padding(.bottom, 160)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: capturePreview)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: mode)
+    }
+
+    private func studyHeading(_ index: String, _ title: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            Text(index).font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+            Text(title).font(Font(Theme.headingFont(32)))
+            Spacer()
+        }
+        .padding(.top, 16)
+        .overlay(alignment: .top) { Theme.strokeColor.frame(height: 1) }
+    }
+
+    private var captureCanvas: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            ZStack {
+                Theme.textPrimaryColor
+                // The target geometry follows the source choice; no screen capture is started.
+                VStack(spacing: 0) {
+                    HStack(spacing: 5) {
+                        ForEach(0..<3) { _ in Circle().fill(Theme.bgWindowColor.opacity(0.5)).frame(width: 4, height: 4) }
+                        Spacer()
+                    }.padding(12)
+                    Rectangle().fill(Theme.bgWindowColor.opacity(0.18)).frame(height: 1)
+                    Spacer()
+                    HStack(alignment: .bottom, spacing: 12) {
+                        Text("Aa").font(Font(Theme.headingFont(mode == 2 ? 44 : 72)))
+                        Spacer(minLength: 0)
+                        HStack(alignment: .bottom, spacing: 5) {
+                            ForEach(0..<4) { index in
+                                Rectangle().fill(Theme.bgWindowColor.opacity(0.3 + Double(index) * 0.2))
+                                    .frame(width: 9, height: CGFloat(capturePreview ? 4 - index : index + 1) * 16)
+                            }
+                        }
+                    }
+                    .foregroundStyle(Theme.bgWindowColor)
+                    .padding(.horizontal, 20)
+                    Spacer()
+                }
+                .frame(width: width * (mode == 0 ? 0.82 : mode == 1 ? 0.64 : 0.46),
+                       height: mode == 2 ? 128 : 174)
+                .overlay(Rectangle().stroke(Theme.bgWindowColor.opacity(capturePreview ? 1 : 0.45), lineWidth: 1))
+                .scaleEffect(capturePreview ? 0.94 : 1)
+                VStack {
+                    Spacer()
+                    HStack {
+                        Text(["Display", "Window", "Area"][mode])
+                        Spacer()
+                        Image(systemName: enabled ? "mic" : "mic.slash")
+                    }.font(Font(Theme.captionFont)).foregroundStyle(Theme.bgWindowColor.opacity(0.7))
+                }.padding(18)
+            }
+        }
+        .frame(height: 238)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Capture preview")
+        .accessibilityValue("\(["Display", "Window", "Area"][mode]), microphone \(enabled ? "on" : "off"), \(capturePreview ? "selected" : "ready")")
+    }
+
     private var workspace: some View {
         Group {
             EditorWorkspaceGallery().frame(height: 785)
@@ -160,21 +330,24 @@ private struct UIKitGalleryView: View {
 
     private var themeRail: some View {
         HStack(spacing: 8) {
-            Text("gallery-advanced").font(Font(Theme.headingFont(24)))
+            Text("Recorder / Studies").font(Font(Theme.labelFont))
             Spacer()
-            ForEach([false, true], id: \.self) { isLight in
+            ForEach([true, false], id: \.self) { isLight in
                 Button { demo = false; light = isLight } label: {
                     Label(isLight ? "White" : "Black", systemImage: isLight ? "sun.max" : "moon")
                 }
                 .buttonStyle(TechButtonStyle(kind: light == isLight ? .primary : .secondary))
                 .accessibilityAddTraits(light == isLight ? .isSelected : [])
             }
-            Button("Replay reveals") { demo = false; replay += 1 }
+            Button { demo = false; replay += 1 } label: {
+                Image(systemName: "arrow.clockwise").frame(width: 18)
+            }
+                .help("Replay reveals").accessibilityLabel("Replay reveals")
                 .buttonStyle(TechButtonStyle())
             Button(demo ? "Stop demo" : "Play demo") { demo.toggle() }
                 .buttonStyle(TechButtonStyle())
         }
-        .padding(.horizontal, 28).padding(.vertical, 14)
+        .padding(.horizontal, 40).padding(.vertical, 12)
         .background(Theme.bgPanelColor)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.strokeColor).frame(height: 1) }
     }
@@ -394,6 +567,91 @@ private struct UIKitGalleryView: View {
                     }
                 }
             }.frame(height: 23)
+        }
+    }
+}
+
+/// Individual production panels, composed as studies over a disposable project.
+private struct GalleryInspectorStudies: View {
+    let replay: Int
+    let onReady: (EditorModel) -> Void
+    @State private var model: EditorModel?
+    @State private var mediaReady = false
+    @State private var preparationError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            if let model {
+                HStack(alignment: .top, spacing: 24) {
+                    VStack(spacing: 24) {
+                        TechPanel(index: "01", title: "Canvas") { BackgroundTab(model: model).disabled(!mediaReady) }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .modifier(GalleryReveal(enabled: true, order: 0, replay: replay))
+                        TechPanel(index: "03", title: "Cursor") { CursorTab(model: model) }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .modifier(GalleryReveal(enabled: true, order: 0, replay: replay))
+                    }.frame(maxWidth: .infinity, alignment: .top)
+                    VStack(spacing: 24) {
+                        TechPanel(index: "02", title: "Camera") {
+                            CameraTab(model: model, showsTimelineActions: false)
+                        }.fixedSize(horizontal: false, vertical: true)
+                            .modifier(GalleryReveal(enabled: true, order: 1, replay: replay))
+                        TechPanel(index: "04", title: "Motion") { AnimationsTab(model: model) }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .modifier(GalleryReveal(enabled: true, order: 1, replay: replay))
+                    }.frame(maxWidth: .infinity, alignment: .top)
+                }
+                HStack(alignment: .top, spacing: 24) {
+                    TechPanel(index: "05", title: "Keystrokes") {
+                        KeysTab(model: model, showsTimelineActions: false)
+                    }.fixedSize(horizontal: false, vertical: true)
+                        .modifier(GalleryReveal(enabled: true, order: 0, replay: replay))
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Key display").font(Font(Theme.headingFont(32)))
+                        GeometryReader { geometry in
+                            let keys = model.project.keys
+                            let label = activeKeyChip(events: model.events.events, atSource: 2,
+                                                      hold: keys.hold, allKeys: keys.allKeys)?.label ?? ""
+                            ZStack {
+                                Theme.textPrimaryColor
+                                if keys.show {
+                                    Text(label).font(Font(Theme.timecodeFont(18 * keys.size)))
+                                        .foregroundStyle(Theme.textPrimaryColor)
+                                        .padding(12).background(Theme.bgWindowColor)
+                                        .position(x: 70 + max(0, geometry.size.width - 140) * keys.position.x,
+                                                  y: 40 + max(0, geometry.size.height - 80) * keys.position.y)
+                                }
+                            }
+                        }.frame(height: 220)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                        .modifier(GalleryReveal(enabled: true, order: 1, replay: replay))
+                }.id("keys")
+                if let preparationError {
+                    Text(preparationError).foregroundStyle(Theme.dangerColor)
+                }
+            }
+        }
+        .toggleStyle(TechToggleStyle())
+        .disclosureGroupStyle(InspectorDisclosureStyle())
+        .task {
+            guard model == nil else { return }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-panel-studies-" + UUID().uuidString)
+            let fixture = EditorWorkspaceGallery.makeModel(at: url)
+            model = fixture
+            onReady(fixture)
+            do {
+                try await WorkspaceMedia.prepare(at: url)
+                try Task.checkCancellation()
+                mediaReady = true
+            } catch is CancellationError { }
+            catch { preparationError = "Sample unavailable: " + error.localizedDescription }
+        }
+        .onDisappear {
+            guard let model else { return }
+            model.saveNow()
+            try? FileManager.default.removeItem(at: model.packageURL)
+            self.model = nil
+            mediaReady = false
         }
     }
 }

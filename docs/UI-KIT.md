@@ -308,24 +308,42 @@ Project opening preserves the editor’s layout from the first frame: top bar, p
 
 ## gallery-advanced / September 2026
 
-`make gallery-advanced CONFIG=debug` opens the alternate gallery for demo recording. A fixed rail
-switches Black / White, replays entrances, and starts a finite 12-second demo: opening motion study,
-white inversion, component scroll, black inversion, return to the opening. Stop demo, manual scroll,
-or theme/replay buttons cancel pending demo stages. This is an isolated gallery, not a new app setting.
+`make gallery-advanced CONFIG=debug` opens a presentation gallery in **White by default**.
+The fixed, compact rail offers White / Black, replay, and a finite Play demo sequence.
+`--gallery-dark` explicitly opens Black. This remains an isolated gallery, not an app setting.
 
-The shared Theme tokens resolve against the gallery window appearance. Neutral colors and timeline
-fills invert; warning/danger retain their meaning with darker light-theme variants. Media rendering
-retains its fixed dark matte. The ordinary app still uses its original static dark palette.
-The opening puts the interactive timeline ahead of the full editing workspace for a compact demo frame.
-Sections entering the viewport reveal a short leading rule, then settle by 12 points over 420 ms;
-paired sections stagger by 80 ms. Timeline lanes wipe in 85 ms apart and selection fields retain
-existing staggered reveals. Viewport changes and replay cancel pending reveal tasks. Reduce Motion
-removes the new line/translation effects and programmatic scroll animation.
+The presentation leads with the interactive timeline under a compact Recorder masthead. It retains
+selection, drag, trim and scrub, while omitting the diagnostic heading, enclosing corner frame and
+instruction footer. The timeline's own lane wipes remain visible during entrance.
 
-Verification: `Recorder --selftest ui-kit-png build/gallery-advanced-demo.png --gallery-advanced
---gallery-demo --gallery-check` runs the demo, asserts both appearance changes, and captures entrance,
-stagger, settled scroll stages and a 900 × 620 content-size frame. `--gallery-light` starts in White.
-`Recorder --selftest ui-motion` checks the existing timeline snapping boundaries. These automated
-captures establish layout and staged execution; personal judgment of live pointer feel remains manual.
-The reference image directory named by the design skill was absent in this checkout; implementation
-used these recorded design notes and the existing gallery.
+Next come actual editor panels in two staggered columns: Canvas and Cursor on the left, Camera and
+Motion on the right. Keystrokes pairs with a live key-display specimen; show, size and position
+controls update it. These are the production panel views, bound to one disposable editor model,
+with sample media for Crop source. Individual reveals follow scroll visibility. The full editor
+shell and large video preview are absent. This balances dense working controls with open separation
+and contrasting specimens, instead of filling the page with full-window debug views.
+
+A compact Capture study follows: source choices morph a typographic composition; Microphone and
+Preview capture update the specimen. The rejected cursor graphic is removed. Actions and Inputs
+restore filled/outlined/icon buttons, a menu, fields, search, slider, keycaps and theme tones.
+These specimens never begin a real recording. Panel edits affect only the disposable fixture.
+
+The roughly 14-second demo starts/finishes White and visits the panels in both appearances,
+Keystrokes, Capture and the small widgets. Stop, manual scroll, and theme/replay controls cancel
+pending demo steps. Reduce Motion removes spatial entrances, target animation and animated scroll.
+
+Shared Theme tokens resolve against the gallery window appearance. Neutral colors and timeline
+fills invert; warning/danger keep darker light-theme variants. The ordinary app palette and media
+matte remain stable. The ordinary developer gallery retains its component inventory and workspace.
+
+Verification:
+- `Recorder --selftest ui-kit-png build/gallery-advanced-white.png --gallery-advanced` asserts the
+  default White appearance, that the panel fixture mounted, and absence of native full-editor views.
+- `Recorder --selftest ui-kit-png build/gallery-advanced-presentation.png --gallery-advanced
+  --gallery-demo --gallery-check` checks theme transitions and captures intermediate reveals,
+  all demo stages, panels at minimum width, and a 900 × 620 opening frame.
+- `Recorder --selftest ui-motion`, `placement`, and `inspector-panels` check shared interaction logic.
+
+Automated captures establish composition and staged execution; live pointer feel remains a manual
+assessment. The reference image directory is absent in this checkout; recorded design notes and the
+existing shared controls supplied the visual context.
