@@ -33,9 +33,11 @@ public extension Project {
         clips[i] = Clip(sourceStart: clip.sourceStart, sourceEnd: s, speed: clip.speed)
         clips[i].mediaStart = clip.mediaStart
         clips[i].clockSpeed = clip.clockSpeed
+        clips[i].fadeIn = clip.fadeIn
         var right = Clip(sourceStart: s, sourceEnd: clip.sourceEnd, speed: clip.speed)
         right.mediaStart = clip.mediaTime(atSource: s)
         right.clockSpeed = clip.clockSpeed
+        right.fadeOut = clip.fadeOut
         clips.insert(right, at: i + 1)
         if linkVideoEdits { editLinkedLayers(in: s...s, moveBy: 0) }
         assert(checkInvariants() == nil)
@@ -343,13 +345,17 @@ public extension Project {
         })
     }
 
-    /// A short smooth arrival after empty video; the opening frame and adjacent cuts stay immediate.
+    /// Only explicit per-clip fades affect opacity; gaps never enable a transition automatically.
     func videoOpacity(atOutput time: Double) -> Double {
         guard let i = clipIndex(atOutput: time), !clips[i].isEmpty else { return 0 }
-        guard i > 0, clips[i - 1].isEmpty else { return 1 }
-        let start = clips[..<i].reduce(0) { $0 + $1.outputDuration }
-        let t = min(1, max(0, (time - start) / min(0.18, clips[i].outputDuration / 2)))
-        return t * t * (3 - 2 * t)
+        let clip = clips[i]
+        let elapsed = time - clips[..<i].reduce(0) { $0 + $1.outputDuration }
+        func ramp(_ distance: Double, _ seconds: Double?) -> Double {
+            guard let seconds, seconds.isFinite, seconds > 0 else { return 1 }
+            let t = min(1, max(0, distance / min(seconds, clip.outputDuration)))
+            return t * t * (3 - 2 * t)
+        }
+        return min(ramp(elapsed, clip.fadeIn), ramp(clip.outputDuration - elapsed, clip.fadeOut))
     }
 
     /// Trim/move only within adjacent free space. Gap pieces retain the clock mapping, so
@@ -546,8 +552,10 @@ public extension Project {
             let a = clips[i], b = clips[i + 1]
             if !a.isEmpty, !b.isEmpty, a.speed == b.speed, a.timeScale == b.timeScale,
                abs(a.sourceEnd - b.sourceStart) < 1e-8,
-               abs(a.mediaIn + a.mediaDuration - b.mediaIn) < 1e-8 {
+               abs(a.mediaIn + a.mediaDuration - b.mediaIn) < 1e-8,
+               (a.fadeOut ?? 0) == 0, (b.fadeIn ?? 0) == 0 {
                 clips[i].sourceEnd = b.sourceEnd
+                clips[i].fadeOut = b.fadeOut
                 clips.remove(at: i + 1)
             } else { i += 1 }
         }
@@ -623,9 +631,11 @@ public extension Project {
         clips[i] = Clip(sourceStart: clip.sourceStart, sourceEnd: s, speed: clip.speed)
         clips[i].mediaStart = clip.mediaStart
         clips[i].clockSpeed = clip.clockSpeed
+        clips[i].fadeIn = clip.fadeIn
         var right = Clip(sourceStart: s, sourceEnd: clip.sourceEnd, speed: clip.speed)
         right.mediaStart = clip.mediaTime(atSource: s)
         right.clockSpeed = clip.clockSpeed
+        right.fadeOut = clip.fadeOut
         clips.insert(right, at: i + 1)
         if linkVideoEdits { editLinkedLayers(in: s...s, moveBy: 0) }
     }

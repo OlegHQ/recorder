@@ -66,6 +66,7 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 | Scope | Tasks | Done |
 |---|---|---|
 | Recorder Nudge defects | DEF-1107…DEF-1111 | 5/5 |
+| Requested clip fades | T-616 | 1/1 |
 
 - [x] **T-611 / DEF-1107 Restore recording surface focus**
   - Mapping: AppDelegate recording actions → ToolbarController.show/presentPicker → SourcePickerOverlay. Recording surface means selected SCDisplay/SCWindow in the capture picker, not an editor clip or document window.
@@ -665,6 +666,11 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 
 ---
 
+## Requested clip fades — 2026-09-22
+
+- [x] **T-616 Explicit clip fades, default Off** — Remove automatic post-gap video arrival. Add per-clip Fade in/Fade out sliders (output seconds, Off by default for new and old projects), preserve outer fades across splits, and snap the dragged selection's leading edge exactly to zero. Shared opacity covers preview/export. SPEC: Video clip fades below.
+  - Verify: `make test` (including old JSON defaults, explicit ramp values and split preservation), `make app`, `--selftest clip-fades` (controls, undo/redo, persistence, zero-edge snap and Command bypass), `--selftest timeline-ops`, `--selftest parity` with explicit fades; inspect `/tmp/recorder-clip-fades.png`.
+
 ## Log
 
 Append one line per completed task: `T-xxx · YYYY-MM-DD · verified: <what> · deviations: <none|…>`
@@ -756,3 +762,5 @@ T-613 / DEF-1109 · 2026-09-22 · Highlight minimum is one cropped-source pixel 
 T-614 / DEF-1110 · 2026-09-22 · Command-click scissors dispatches shared semantic split at output playhead without toggling tools; mouse-down modifier survives release, toolbar refresh restores native button state, left split clip selected. Existing split mutation/boundary policy reused. make app; make test FILTER=split (4/4); command-scissors, timeline-ops, menu-actions all OK.
 
 T-615 / DEF-1111 · 2026-09-22 · Suppressed native inferred recording-panel appearance animations at the shared registration point. Before trace: default(0); after: none(2), full alpha/visibility at every sample, stable layout and first responder. make app and recording-appearance OK; toolbar PNG inspected. Final five-ticket audit: make test 70/70; recording-appearance, recording-focus, recording-dismissal, export-range, highlight-manipulation, command-scissors all OK on the same final signed build. No remaining Nudge Recorder defects in the fetched five-ticket inventory; unrelated pre-existing agentpack.toml/pack.lock/AGENTS.md changes left intact.
+
+T-616 · 2026-09-22 · Removed implicit post-gap fade, added optional per-clip fade controls with old-project Off defaults and outer-edge split preservation. Corrected leading-edge snapping to zero (Command bypass retained). Verified make test 71/71, make app, clip-fades (bindings/undo/redo/save/zero-snap), timeline-ops, and parity on a fixture with explicit fades: maxDelta=0 at 8 times. Inspected clip panel PNG. Existing project timing remains unchanged until edited.

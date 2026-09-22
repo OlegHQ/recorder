@@ -870,3 +870,10 @@ visibility fades, discrete switches apply inside the clip, and transition 0 swit
 Camera roundness/shadow animate alongside size/aspect/position; mirror is a discrete switch.
 Display/area capture excludes the Recorder application, including windows opened after capture starts;
 Finder desktop-icon exceptions remain independent. Preview and export share the same overlay evaluation.
+
+
+### Video clip fades (September 2026)
+
+Video clips have explicit Fade in and Fade out controls in the selected clip inspector. Both default to Off, including existing projects without stored fade values. There is no automatic arrival fade after a gap. Optional `Clip.fadeIn` / `fadeOut` store output seconds, clamped to the clip duration when edited and rendered; zero or absent means Off. Each edge uses smoothstep opacity, and overlapping fades use the lower opacity. Preview and export use the same opacity function. Splitting retains fades only on the original outer edges; the new cut is immediate. Slider edits support undo/redo and autosave.
+
+With snapping enabled, dragging the leading edge of a clip selection within six pixels of timeline zero snaps it exactly to zero, regardless of where its body was grabbed. Command bypasses snapping. Stored gaps are preserved until edited; a tiny gap may display as `00:00.00` because timeline labels round to hundredths.

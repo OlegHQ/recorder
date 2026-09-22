@@ -90,8 +90,8 @@ private func linkedFixture() -> Project {
     #expect(p.zooms.map(\.start) == [2, 7, 11])
     #expect(p.videoOpacity(atOutput: 0) == 1)
     #expect(p.videoOpacity(atOutput: 6) == 0)
-    #expect(p.videoOpacity(atOutput: 7) == 0)
-    #expect(abs(p.videoOpacity(atOutput: 7.09) - 0.5) < 1e-8)
+    #expect(p.videoOpacity(atOutput: 7) == 1)
+    #expect(p.videoOpacity(atOutput: 7.09) == 1)
     #expect(p.videoOpacity(atOutput: 7.18) == 1)
     #expect(p.videoOpacity(atOutput: 11) == 1)
     let movedBack = p.moveClips(selected, byOutput: -100)
@@ -165,4 +165,25 @@ private func linkedFixture() -> Project {
             #expect(abs(p.clips[returned.min()!].sourceStart - oldMap.outputTime(atSource: clips[4].sourceStart)!) < 1e-8)
         }
     }
+}
+
+
+@Test func explicitClipFadesDefaultOffAndPreserveOuterSplitEdges() throws {
+    let old = try JSONDecoder().decode(Clip.self, from: Data(#"{"sourceStart":0,"sourceEnd":4,"speed":2}"#.utf8))
+    var p = Project(source: Source(duration: 4), clips: [old])
+    #expect(old.fadeIn == nil && old.fadeOut == nil)
+    #expect(p.videoOpacity(atOutput: 0) == 1)
+    p.clips[0].fadeIn = 0.4; p.clips[0].fadeOut = 0.8
+    #expect(p.videoOpacity(atOutput: 0) == 0)
+    #expect(abs(p.videoOpacity(atOutput: 0.2) - 0.5) < 1e-9)
+    #expect(p.videoOpacity(atOutput: 0.8) == 1)
+    #expect(abs(p.videoOpacity(atOutput: 1.6) - 0.5) < 1e-9)
+    #expect(try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(p)) == p)
+    let didSplit = p.split(atOutput: 1)
+    #expect(didSplit)
+    #expect(p.clips[0].fadeIn == 0.4 && p.clips[0].fadeOut == nil)
+    #expect(p.clips[1].fadeIn == nil && p.clips[1].fadeOut == 0.8)
+    #expect(p.videoOpacity(atOutput: 1) == 1)
+    p.clips[0].fadeIn = .nan
+    #expect(p.videoOpacity(atOutput: 0) == 1)
 }

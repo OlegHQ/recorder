@@ -1708,7 +1708,15 @@ final class TimelineView: NSView {
             let (out, snapped) = snappedOutput(raw, disabled: snapDisabled)
             snapGuideX = snapped ? x(forOutput: out) : nil
             let anchorOutput = TimeMap(dragClips).outputTime(atSource: anchor) ?? 0
-            let delta = out - anchorOutput
+            var delta = out - anchorOutput
+            // Snap the selected clips' leading edge to zero, not the pointer's grab position.
+            if snappingEnabled, !snapDisabled, let first = dragSelection.min() {
+                let leading = dragClips.prefix(first).reduce(0) { $0 + $1.outputDuration }
+                if abs(leading + raw - anchorOutput) <= 6 / max(geometry.pxPerSecond, 1) {
+                    delta = -leading
+                    snapGuideX = x(forOutput: 0)
+                }
+            }
             model.update { project in
                 if let dragProject { project = dragProject }
                 model.selectedClips = project.moveClips(dragSelection, byOutput: delta)
@@ -2564,6 +2572,40 @@ extension TimelineToolbar {
             click([])
             try check(timeline.debugSplitMode != sticky && model.project == beforeOrdinary,
                       "ordinary click split media or failed to toggle")
+        }
+    }
+}
+
+
+extension TimelineView {
+    @MainActor static func checkClipZeroSnap(packageURL: URL) throws {
+        struct Fail: Error { }
+        for disabled in [false, true] {
+            var gap = Clip(sourceStart: 0, sourceEnd: 1)
+            gap.isGap = true
+            var project = Project(source: Source(duration: 5), clips: [gap, Clip(sourceStart: 1, sourceEnd: 5)])
+            project.linkVideoEdits = false
+            let model = EditorModel(packageURL: packageURL, project: project, events: EventLog())
+            let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 250))
+            view.model = model
+            view.dragClips = project.clips
+            view.dragProject = project
+            view.dragSelection = [1]
+            view.dragKind = .moveClip(index: 1, anchor: 2)
+            model.beginGesture()
+            let event = NSEvent.mouseEvent(with: .leftMouseDragged,
+                location: CGPoint(x: view.x(forOutput: 1.00165), y: 60),
+                modifierFlags: disabled ? [.command] : [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            view.mouseDragged(with: event)
+            if disabled {
+                guard model.project.clips[0].isEmpty,
+                      abs(model.project.clips[0].outputDuration - 0.00165) < 1e-8 else { throw Fail() }
+            } else {
+                guard !model.project.clips[0].isEmpty, model.project.videoOpacity(atOutput: 0) == 1 else { throw Fail() }
+            }
+            model.cancelGesture()
+            model.saveNow()
         }
     }
 }
