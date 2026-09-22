@@ -61,7 +61,8 @@ enum ExportSheet {
         self.settings = ExportSettings.loadDefault(from: defaults)
     }
 
-    var outputDuration: Double { editorModel.timeMap.outputDuration }
+    var outputDuration: Double { editorModel.project.exportDuration }
+    var canExport: Bool { outputDuration > 0 }
     var durationText: String { Self.mmss(outputDuration) }
 
     /// SPEC §6.8: "Estimated size ~48 MB" = `bitrate × duration / 8`, the exact `Exporter.bitrate`
@@ -98,6 +99,7 @@ enum ExportSheet {
     /// by the `export-sheet` selftest, no window/NSSavePanel required.
     func startExport(to destination: URL, copyToPasteboardWhenDone: Bool = false, pasteboard: NSPasteboard = .general) {
         guard !isExporting else { return }
+        guard canExport else { errorMessage = "No media to export."; return }
         errorMessage = nil
         isCancelling = false
         copyStatus = nil
@@ -396,7 +398,7 @@ struct ExportSheetView: View {
                 HStack {
                     Text("Estimated size  \(model.estimatedSizeText)")
                     Spacer()
-                    Text("Final size may vary").foregroundStyle(Theme.textSecondaryColor)
+                    Text(model.canExport ? "Final size may vary" : "No media to export").foregroundStyle(Theme.textSecondaryColor)
                 }
                 .font(Font(Theme.captionFont)).foregroundStyle(Theme.textPrimaryColor)
                 HStack {
@@ -405,8 +407,10 @@ struct ExportSheetView: View {
                         .keyboardShortcut(.cancelAction)
                     Spacer()
                     Button("Copy to clipboard", action: onCopyToClipboard)
+                        .disabled(!model.canExport)
                         .buttonStyle(TechButtonStyle(kind: .secondary))
                     Button("Export…", action: onChooseDestination)
+                        .disabled(!model.canExport)
                         .buttonStyle(TechButtonStyle(kind: .primary))
                         .keyboardShortcut(.defaultAction)
                 }
@@ -495,7 +499,7 @@ enum ExportSheetSelfTest {
             model.settings.fps = fps
             let size = ExportSettings.outputSize(project: editorModel.project, shortEdge: shortEdge)
             let expectedBitrate = Exporter.bitrate(quality: quality, codec: codec, width: Int(size.width), height: Int(size.height), fps: fps)
-            let expectedBytes = Double(expectedBitrate) * editorModel.timeMap.outputDuration / 8
+            let expectedBytes = Double(expectedBitrate) * editorModel.project.exportDuration / 8
             let expectedText = ByteCountFormatter.string(fromByteCount: Int64(expectedBytes), countStyle: .file)
             guard model.estimatedSizeText == expectedText else {
                 throw Fail(description: "estimate mismatch: \(model.estimatedSizeText) vs \(expectedText)")
@@ -553,7 +557,7 @@ enum ExportSheetSelfTest {
         guard case .done = model.phase,
               pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] == [gifURL],
               let gif = CGImageSourceCreateWithURL(gifURL as CFURL, nil),
-              CGImageSourceGetCount(gif) == max(1, Int((editorModel.timeMap.outputDuration * 15).rounded())) else {
+              CGImageSourceGetCount(gif) == max(1, Int((editorModel.project.exportDuration * 15).rounded())) else {
             throw Fail(description: "GIF clipboard export failed: \(model.errorMessage ?? "invalid frames or pasteboard")")
         }
         print("export-sheet animated GIF and automatic clipboard handoff OK")
@@ -754,5 +758,76 @@ extension ExportSheetSelfTest {
         pressReturn()
         try await waitFor("Return did not close completion", { parent.attachedSheet == nil })
         print("Native export passed: Return opens Save; cancel retains settings; explicit test destination exports; Return closes completion. System Save confirmation is not simulated.")
+    }
+}
+
+
+extension ExportSheetSelfTest {
+    @MainActor static func runRange() async throws {
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-export-range-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        try await WorkspaceMedia.prepare(at: scratch)
+        var gap = Clip(sourceStart: 1, sourceEnd: 3)
+        gap.isGap = true
+        let project = Project(source: Source(pixelWidth: 960, pixelHeight: 540, duration: 32),
+                              clips: [Clip(sourceStart: 0, sourceEnd: 1), gap])
+        let editor = EditorModel(packageURL: scratch, project: project, events: EventLog(events: [
+            InputEvent(t: 0.5, k: .down, x: 0.5, y: 0.5, b: 0), InputEvent(t: 2.5, k: .down, x: 0.5, y: 0.5, b: 0)]))
+        let suite = "recorder-range-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let sheet = ExportSheetModel(editorModel: editor, defaults: defaults)
+        guard sheet.outputDuration == 1 else { throw Fail(description: "sheet includes trailing gap") }
+        editor.edit("Trim") { $0.placeClip(0, start: 0, end: 0.5) }
+        guard sheet.outputDuration == 0.5 else { throw Fail(description: "trim did not update range") }
+        editor.undo()
+        guard sheet.outputDuration == 1 else { throw Fail(description: "undo did not update range") }
+        editor.redo()
+        guard sheet.outputDuration == 0.5 else { throw Fail(description: "redo did not update range") }
+        editor.undo()
+        editor.edit("Click audio") { $0.cursor.clickSound = true }
+        for camera in [false, true] {
+            editor.edit("Camera tail") {
+                $0.source.hasCamera = camera
+                $0.cameraClips = camera ? [CameraClip(start: 0, end: 1.5)] : []
+            }
+            let expected = camera ? 1.5 : 1.0
+            guard sheet.outputDuration == expected else { throw Fail(description: "camera tail not reflected in sheet") }
+            for format in [ExportSettings.Format.mp4, .gif] {
+                let out = scratch.appendingPathComponent("range-\(camera).\(format == .mp4 ? "mp4" : "gif")")
+                sheet.settings = ExportSettings(format: format, shortEdge: 720, fps: 10, quality: .web, codec: .h264)
+                sheet.startExport(to: out)
+                let deadline = Date().addingTimeInterval(30)
+                while sheet.isExporting && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                guard case .done = sheet.phase else {
+                    sheet.cancel()
+                    throw Fail(description: "range export failed: \(sheet.errorMessage ?? "timeout")")
+                }
+                if format == .mp4 {
+                    let asset = AVURLAsset(url: out)
+                    let duration = try await asset.load(.duration).seconds
+                    guard abs(duration - expected) < 0.11 else { throw Fail(description: "MP4 tail: \(duration), expected \(expected)") }
+                    guard !(try await asset.loadTracks(withMediaType: .audio)).isEmpty else { throw Fail(description: "audio clamp was not exercised") }
+                } else {
+                    guard let image = CGImageSourceCreateWithURL(out as CFURL, nil),
+                          CGImageSourceGetCount(image) == Int(expected * 10) else { throw Fail(description: "GIF tail") }
+                }
+                sheet.backToIdle()
+            }
+        }
+        editor.edit("Delete all media") { $0.cameraClips = []; $0.deleteClips(Set($0.clips.indices)) }
+        guard sheet.outputDuration == 0, !sheet.canExport else { throw Fail(description: "empty export enabled") }
+        let sentinel = scratch.appendingPathComponent("untouched.mp4")
+        let bytes = Data("existing file".utf8)
+        try bytes.write(to: sentinel)
+        sheet.startExport(to: sentinel)
+        guard !sheet.isExporting, sheet.errorMessage == "No media to export." else { throw Fail(description: "empty sheet export started") }
+        do {
+            try await Exporter(model: editor, settings: sheet.settings, destination: sentinel).run()
+            throw Fail(description: "empty exporter succeeded")
+        } catch is Exporter.ExportError { }
+        guard try Data(contentsOf: sentinel) == bytes else { throw Fail(description: "empty export modified destination") }
+        editor.saveNow()
     }
 }

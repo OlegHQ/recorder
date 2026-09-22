@@ -48,3 +48,24 @@ public struct TimeMap: Sendable {
         return nil
     }
 }
+
+public extension Project {
+    /// End of retained screen/camera media in output time. Interior gaps stay in the export;
+    /// trailing gaps and effect blocks alone do not extend it.
+    var exportDuration: Double {
+        var output = 0.0, end = 0.0
+        for clip in clips {
+            let duration = clip.outputDuration
+            guard duration.isFinite, duration >= 0, clip.timeScale > 0 else { return 0 }
+            if !clip.isEmpty { end = output + duration }
+            if source.hasCamera {
+                for camera in cameraClips {
+                    let lo = max(clip.sourceStart, camera.start), hi = min(clip.sourceEnd, camera.end)
+                    if hi > lo { end = max(end, output + (hi - clip.sourceStart) / clip.timeScale) }
+                }
+            }
+            output += duration
+        }
+        return end.isFinite ? end : 0
+    }
+}

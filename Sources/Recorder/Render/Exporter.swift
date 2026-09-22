@@ -67,7 +67,8 @@ final class Exporter {
 
         let packageURL = model.packageURL
         let project = await model.project
-        let outputDuration = await model.timeMap.outputDuration
+        let outputDuration = project.exportDuration
+        guard outputDuration > 0 else { throw ExportError.failed("No media to export.") }
         try? FileManager.default.removeItem(at: destination)
 
         // T-504: `denoise` is applied EXPORT ONLY (preview always plays the raw mic) — pre-process
@@ -117,6 +118,7 @@ final class Exporter {
         // MARK: Reader (SPEC §6.8: `AVAssetReaderTrackOutput`, not a video-composition output)
 
         let reader = try AVAssetReader(asset: composition)
+        reader.timeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: outputDuration, preferredTimescale: 600))
         let decodeSettings: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             kCVPixelBufferMetalCompatibilityKey as String: true,
@@ -259,6 +261,7 @@ final class Exporter {
             if n == totalFrames { videoInput.markAsFinished() }
         }
 
+        writer.endSession(atSourceTime: CMTime(value: Int64(totalFrames), timescale: CMTimeScale(settings.fps)))
         writer.finishWriting {}
         let finishStart = clock.now
         while writer.status == .writing {
@@ -381,7 +384,8 @@ extension Exporter {
     private func runGIF() async throws {
         let packageURL = model.packageURL
         let project = await model.project
-        let outputDuration = await model.timeMap.outputDuration
+        let outputDuration = project.exportDuration
+        guard outputDuration > 0 else { throw ExportError.failed("No media to export.") }
         try? FileManager.default.removeItem(at: destination)
 
         // SPEC §6.8: "Warn (non-blocking) if duration > 60 s" — GIFs get large fast; export still runs.
@@ -409,6 +413,7 @@ extension Exporter {
             kCVPixelBufferMetalCompatibilityKey as String: true,
         ]
         let reader = try AVAssetReader(asset: composition)
+        reader.timeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: outputDuration, preferredTimescale: 600))
         let videoTracks = composition.tracks(withMediaType: .video)
         guard let screenTrack = videoTracks.first else { throw ExportError.noVideoTrack }
         let screenOutput = AVAssetReaderTrackOutput(track: screenTrack, outputSettings: decodeSettings)
@@ -532,7 +537,7 @@ enum ExporterSelfTest {
         let packageURL = URL(fileURLWithPath: args[0])
         let outURL = URL(fileURLWithPath: args[1])
         let model = try loadEditorModel(package: packageURL)
-        let expectedDuration = model.timeMap.outputDuration
+        let expectedDuration = model.project.exportDuration
 
         var settings = ExportSettings()
         settings.fps = args.count > 2 ? (Int(args[2]) ?? 30) : 30
@@ -772,7 +777,7 @@ enum ExporterSelfTest {
         let packageURL = URL(fileURLWithPath: args[0])
         let outURL = URL(fileURLWithPath: args[1])
         let model = try loadEditorModel(package: packageURL)
-        let expectedDuration = model.timeMap.outputDuration
+        let expectedDuration = model.project.exportDuration
 
         var settings = ExportSettings()
         settings.format = .gif

@@ -65,14 +65,15 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 
 | Scope | Tasks | Done |
 |---|---|---|
-| Recorder Nudge defects | DEF-1107…DEF-1111 | 1/5 |
+| Recorder Nudge defects | DEF-1107…DEF-1111 | 2/5 |
 
 - [x] **T-611 / DEF-1107 Restore recording surface focus**
   - Mapping: AppDelegate recording actions → ToolbarController.show/presentPicker → SourcePickerOverlay. Recording surface means selected SCDisplay/SCWindow in the capture picker, not an editor clip or document window.
   - Do: retain session source IDs, validate on entry, preserve explicit pointer selection, and provide a visible unavailable-source fallback.
   - Verify: `make app`; `--selftest recording-focus` (real panels/live source validation plus deterministic missing-source matrix); existing `pickers` and `recording-dismissal` checks.
-- [ ] **T-612 / DEF-1108 End automatic export range at last active clip**
-  - Verify: range calculations through edits/undo/redo, explicit range clamping and empty projects; exporter integration.
+- [x] **T-612 / DEF-1108 End automatic export range at last active clip**
+  - Mapping: screen Clip.isGap distinguishes removed media; cameraClips can remain independently over screen gaps. No explicit export in/out selection exists. Project.exportDuration computes the last retained screen/camera endpoint; sheet estimates, both encoders and MP4 audio use it. Empty export is disabled/rejected before destination mutation.
+  - Verified: `make test FILTER=exportDurationTracksActiveMedia`, `make app`, selftests `export-range`, `export-sheet`, `audio-mix` all pass. Range test covers split/trim/move/delete, missing camera source, empty/invalid media; live sheet edits/undo/redo; MP4/GIF output with screen and camera tails; audio clipping and empty destination preservation.
 - [ ] **T-613 / DEF-1109 Precise small highlight manipulation**
   - Verify: pointer move/resize/minimum/bounds, source transform, one-step undo, cancel, small-highlight integration.
 - [ ] **T-614 / DEF-1110 Cmd-click scissors split**
@@ -744,3 +745,5 @@ T-610 · 2026-09-18 · verified: `make app` (no `error:`), `make test` 48/48; se
 T-505/T-506 · 2026-09-20 · Fixed MP4 writer deadlock (video-only feeding stalled Cool Forest at frame 32): feed ready audio/video inputs together, check reader/writer failures, bound backpressure/finalization waits, synchronize cancellation and remove partial files on failure. Verified Cool Forest 1378×1080/24 fps: 190 frames, H.264 and HEVC ≈1.4 s; expanded audio-mix regression to 60 decoded frames and cancellation at frame 32 (<1 s, partial deleted). Export sheet now has visible idle Cancel, bordered Cancel export with cancelling feedback, Escape cancellation/dismissal and idle/completed click-away. `audio-mix`, `export-sheet` (including AppKit outside-click/Escape), `export-colors`, idle/failure PNG checks passed.
 
 T-611 / DEF-1107 · 2026-09-22 · Restored session-scoped display/window picker selection, validated live sources, excluded own app windows, added unavailable-window prompt and discarded stale async refreshes. Verified `make app`, LaunchServices `--selftest recording-focus` (live SCWindow restore, real visible panels, display return/fallback, explicit replacement and mode switch), `pickers`, `recording-dismissal` all OK. Synthetic resolver assertions cover fresh/removed/empty sources.
+
+T-612 / DEF-1108 · 2026-09-22 · Added Project.exportDuration for last retained screen/camera endpoint; retained interior gaps and timeline edit space. Sheet duration/size, MP4/GIF frame count, reader bounds and MP4 session end now agree. Empty exports disabled/rejected. Verified targeted Core test, make app, export-range (real MP4/GIF, audio tail, camera, undo/redo), export-sheet and audio-mix all OK. No user range state exists to clamp; no new range UI introduced.

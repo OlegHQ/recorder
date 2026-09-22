@@ -398,6 +398,7 @@ enum SelfTest {
         "export-gif": { args in try await ExporterSelfTest.runExportGIFSelfTest(args) },
         "export-perf": { args in try await PerfSelfTest.runExportPerf(args) },
         "export-native": { _ in try await ExportSheetSelfTest.checkNativeHandoff() },
+        "export-range": { _ in try await ExportSheetSelfTest.runRange() },
         "export-sheet": { args in try await ExportSheetSelfTest.run(args) },
         "export-colors": { args in try await ColorSelfTest.run(args) },
         "export-sheet-png": { args in try await ExportSheetSelfTest.runPNG(args) },
