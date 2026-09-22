@@ -234,6 +234,8 @@ active display, 40 pt above the Dock. Draggable by its background.
 Entering capture setup hides Projects before showing the floating toolbar and source overlay.
 
 Dock reopening returns to the existing editor/projects window (or opens Projects), never starts source selection.
+Recording toolbar, source/area pickers, camera bubble, countdown panel, recording widget and target outline appear immediately (`NSWindow.animationBehavior = .none`), independent of Reduce Motion. This native window policy does not change countdown-number or editor-content animations.
+
 Focusing a titled app window or switching to another application dismisses recording setup. Setup cannot reopen during countdown or capture.
 Source pickers only open after the toolbar is visible; hiding the toolbar or the app dismisses all pickers together.
 Starting a recording dismisses setup before countdown; Escape restores setup. Once capture starts, the selected

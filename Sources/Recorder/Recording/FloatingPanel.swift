@@ -63,6 +63,8 @@ final class FloatingPanel: NSPanel {
     private static var trackedWindows: [Weak<NSWindow>] = []
 
     static func register(_ window: NSWindow) {
+        // All registered windows belong to recording flow; disable AppKit's implicit panel fade.
+        window.animationBehavior = .none
         trackedWindows.removeAll { $0.value == nil }
         trackedWindows.append(Weak(window))
     }

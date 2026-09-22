@@ -2318,6 +2318,7 @@ enum SelfTest {
     private static let timelineCases: [String: Case] = [
         "record-perf": { args in try await PerfSelfTest.runRecordPerf(args) },
         "idle-perf": { args in try await PerfSelfTest.runIdlePerf(args) },
+        "recording-appearance": { @MainActor args in try await ToolbarController.runAppearanceSelfTest(traceOnly: args.contains("trace")) },
         "recording-focus": { @MainActor _ in try await SourcePickerOverlay.runFocusSelfTest() },
         "recording-dismissal": { @MainActor _ in try ToolbarController.runDismissalSelfTest() },
         "permission-return": { _ in try await ToolbarController.runPermissionReturnSelfTest() },

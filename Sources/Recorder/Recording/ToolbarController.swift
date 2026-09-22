@@ -483,3 +483,63 @@ extension ToolbarController {
         print("Permission return: toolbar visible, picker closed, re-entrant focus and cancellation handled in all modes")
     }
 }
+
+extension ToolbarController {
+    @MainActor static func runAppearanceSelfTest(traceOnly: Bool = false) async throws {
+        _ = NSApplication.shared
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let toolbar = shared, settings = RecordingSettings.shared
+        let oldMode = settings.mode, oldCamera = settings.cameraID
+        settings.cameraID = nil
+        defer { toolbar.close(); RecordingWidgetPanel.hide(); settings.mode = oldMode; settings.cameraID = oldCamera }
+        guard Permissions.allGranted else { throw Fail(description: "Recording permissions required; launch this check via LaunchServices") }
+        let unrelated = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        let unrelatedAnimation = unrelated.animationBehavior
+        for mode in [RecordingSettings.Mode.display, .window, .area] {
+            settings.mode = mode
+            // First iteration is a fresh controller/panel, identical to the permitted cold-launch path.
+            toolbar.show()
+            guard let panel = toolbar.panel, panel.isVisible, panel.firstResponder is ToolbarHostingView,
+                  panel.frame.width > 0, panel.frame.height > 0 else { throw Fail(description: "Initial toolbar not ready for input") }
+            let windows = NSApp.windows.filter { $0.isVisible && FloatingPanel.allWindowIDs.contains(CGWindowID($0.windowNumber)) }
+            guard windows.count >= 2 else { throw Fail(description: "Source picker not visible immediately") }
+            let frames = windows.map(\.frame)
+            for tick in 0..<4 {
+                for window in windows {
+                    print("appearance mode=\(mode) tick=\(tick) window=\(type(of: window)) animation=\(window.animationBehavior.rawValue) alpha=\(window.alphaValue) visible=\(window.isVisible)")
+                    if !traceOnly, window.animationBehavior != .none || window.alphaValue != 1 || !window.isVisible {
+                        throw Fail(description: "Recording window has an animated or incomplete initial state")
+                    }
+                }
+                try await Task.sleep(for: .milliseconds(40))
+            }
+            guard windows.map(\.frame) == frames else { throw Fail(description: "Initial recording layout moved") }
+            guard let content = panel.contentView, let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
+                throw Fail(description: "No initial toolbar render")
+            }
+            content.cacheDisplay(in: content.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else { throw Fail(description: "No toolbar PNG") }
+            try png.write(to: URL(fileURLWithPath: "/tmp/recorder-appearance-\(mode).png"))
+            toolbar.close()
+        }
+        RecordingWidgetPanel.show()
+        defer { RecordingWidgetPanel.hide() }
+        guard let widget = NSApp.windows.first(where: { $0.isVisible && $0 is FloatingPanel }) else {
+            throw Fail(description: "Recording start widget missing")
+        }
+        print("appearance recording widget animation=\(widget.animationBehavior.rawValue) alpha=\(widget.alphaValue)")
+        if !traceOnly, widget.animationBehavior != .none || widget.alphaValue != 1 { throw Fail(description: "Widget fades on recording entry") }
+        guard unrelated.animationBehavior == unrelatedAnimation else { throw Fail(description: "Unrelated window animation changed") }
+        // Native appearance is unconditional; countdown's existing internal reduced-motion animation is separate.
+        print("appearance reducedMotion=\(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)")
+        do {
+            let content = NSHostingView(rootView: CountdownView(state: CountdownState(remaining: 3)))
+            let countdown = FloatingPanel(content: content, draggable: false)
+            countdown.makeKeyAndOrderFront(nil)
+            defer { countdown.orderOut(nil) }
+            if !traceOnly, countdown.animationBehavior != .none || countdown.alphaValue != 1 || !countdown.isVisible {
+                throw Fail(description: "Countdown initial appearance depends on reduced motion")
+            }
+        }
+    }
+}

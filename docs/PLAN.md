@@ -65,7 +65,7 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 
 | Scope | Tasks | Done |
 |---|---|---|
-| Recorder Nudge defects | DEF-1107…DEF-1111 | 4/5 |
+| Recorder Nudge defects | DEF-1107…DEF-1111 | 5/5 |
 
 - [x] **T-611 / DEF-1107 Restore recording surface focus**
   - Mapping: AppDelegate recording actions → ToolbarController.show/presentPicker → SourcePickerOverlay. Recording surface means selected SCDisplay/SCWindow in the capture picker, not an editor clip or document window.
@@ -80,8 +80,9 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 - [x] **T-614 / DEF-1110 Cmd-click scissors split**
   - Mapping: native ScissorsButton captures NSEvent.command at mouse-down, retains NSButton tracking, and routes the action to TimelineView.splitClipAtPlayhead → existing performSplit/Project.split. Screen clips occupy a single non-overlapping lane; the clip under the playhead is deterministic. No tool activation; the left piece remains selected.
   - Verified: make app; make test FILTER=split (4 tests); command-scissors, timeline-ops, menu-actions selftests. Actual button down/up tests cover both sticky states, modifier released before mouse-up, selected/nonselected target, effects selection, edges/gaps, geometry, one undo entry, undo/redo, button state and ordinary clicks.
-- [ ] **T-615 / DEF-1111 Immediate recording setup appearance**
-  - Verify: initial native window state at launch and recording entry, intended focus, unaffected unrelated transitions.
+- [x] **T-615 / DEF-1111 Immediate recording setup appearance**
+  - Source: recording panels retained NSWindow.animationBehavior.default (AppKit infers automatic orderFront/orderOut animation). FloatingPanel.register now sets .none for recording-flow windows only; no custom initial SwiftUI fade exists. Countdown-number animation and unrelated windows retain their behavior.
+  - Verified: before/after recording-appearance trace through fresh ToolbarController.show (same cold-launch entry), all three modes, widget and countdown. Baseline check fails with animation=0; fixed check passes with animation=2, alpha=1, immediate visibility/input and stable frames. Reduce Motion is false on the host; native .none is unconditional and the existing countdown Reduce Motion branch remains unchanged. Toolbar PNG rendered/inspected; recording-focus and recording-dismissal pass.
 
 ---
 
@@ -753,3 +754,5 @@ T-612 / DEF-1108 · 2026-09-22 · Added Project.exportDuration for last retained
 T-613 / DEF-1109 · 2026-09-22 · Highlight minimum is one cropped-source pixel with independent handle hit targets; body drag, resize grab offset and bounded geometry; outside drags do not recreate a selected mask. Fixed shared clamping callback so persisted geometry agrees with display; preview retains rectangle focus; Escape rolls back without undo entry and responder-chain fallback preserves crop cancellation. make app and highlight-manipulation/pickers/mask-rect/crop/zoom-target all OK; /tmp/recorder-small-highlight.png inspected.
 
 T-614 / DEF-1110 · 2026-09-22 · Command-click scissors dispatches shared semantic split at output playhead without toggling tools; mouse-down modifier survives release, toolbar refresh restores native button state, left split clip selected. Existing split mutation/boundary policy reused. make app; make test FILTER=split (4/4); command-scissors, timeline-ops, menu-actions all OK.
+
+T-615 / DEF-1111 · 2026-09-22 · Suppressed native inferred recording-panel appearance animations at the shared registration point. Before trace: default(0); after: none(2), full alpha/visibility at every sample, stable layout and first responder. make app and recording-appearance OK; toolbar PNG inspected. Final five-ticket audit: make test 70/70; recording-appearance, recording-focus, recording-dismissal, export-range, highlight-manipulation, command-scissors all OK on the same final signed build. No remaining Nudge Recorder defects in the fetched five-ticket inventory; unrelated pre-existing agentpack.toml/pack.lock/AGENTS.md changes left intact.
