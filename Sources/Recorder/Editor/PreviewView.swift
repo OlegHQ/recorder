@@ -779,6 +779,11 @@ final class PreviewView: MTKView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if let maskOverlayView, !maskOverlayView.isHidden {
+            cameraDragActive = false
+            maskOverlayView.mouseDown(with: event)
+            return // The rectangle retains first responder for arrow nudges and Escape rollback.
+        }
         let p = convert(event.locationInWindow, from: nil)
         if model.project.source.hasCamera, cameraBubbleRectInBounds().contains(p) {
             pause()
@@ -800,11 +805,6 @@ final class PreviewView: MTKView {
             cameraDragActive = false
             guard zoomTargetView.isHidden else {
                 zoomTargetView.mouseDown(with: event)
-                window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
-                return
-            }
-            if let maskOverlayView, !maskOverlayView.isHidden {
-                maskOverlayView.mouseDown(with: event)
                 window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
                 return
             }

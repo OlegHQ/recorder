@@ -795,6 +795,7 @@ enum SelfTest {
         // through `ZoomTargetMapping.contentRect` + `CropMapping` (the same pure pair "crop" above
         // already round-trips) into the selected mask's `rect`, and the whole drag is exactly one
         // undo step. See "mask-overlay" below for the padding/letterbox-aware mapping itself.
+        "highlight-manipulation": { @MainActor _ in try MaskRectOverlay.runManipulationSelfTest() },
         "mask-rect": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             @Sendable func synthEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {

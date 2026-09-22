@@ -6,7 +6,7 @@ final class SelectionRectView: NSView {
     var rect: CGRect = .zero {
         didSet {
             let clamped = SelectionRectView.clamp(rect, to: limit, minSize: minSize)
-            if clamped != rect { rect = clamped; return }
+            if clamped != rect { rect = clamped }
             needsDisplay = true
             onChange?(rect)
         }
@@ -19,6 +19,8 @@ final class SelectionRectView: NSView {
     /// entirely by the caller, e.g. `1/scale`). Defaults `true` so every other reuse (area selection,
     /// crop sheet) is unaffected.
     var allowsResize = true
+    var allowsCreation = true
+    var onCancelDrag: (() -> Void)?
     var onChange: ((CGRect) -> Void)?
     var onKeyboardEditingChanged: ((Bool) -> Void)?
     /// True between `mouseDown` and `mouseUp`. `AreaSelectionOverlay` checks this before applying a
@@ -47,8 +49,9 @@ final class SelectionRectView: NSView {
         }
     }
 
-    private enum DragMode { case create, move(CGPoint), resize(Handle) }
+    private enum DragMode { case create, move(CGPoint), resize(Handle, CGPoint) }
     private var dragMode: DragMode?
+    private var originalRect = CGRect.zero
     private var dragStart = CGRect.zero    // rect (or anchor, for .create) at mouseDown
     private var dragAspect: CGFloat = 1    // rect's own aspect at mouseDown, used when ⇧ is held
 
@@ -118,6 +121,19 @@ final class SelectionRectView: NSView {
     }
 
     private func handlePoint(_ h: Handle) -> CGPoint {
+        // Keep 16-point hit targets apart without inflating persisted geometry.
+        var rect = CGRect(x: rect.midX - max(32, rect.width) / 2, y: rect.midY - max(32, rect.height) / 2,
+                          width: max(32, rect.width), height: max(32, rect.height))
+        if self.rect.width < 32 {
+            rect.origin.x = min(max(rect.minX, bounds.minX + 8), bounds.maxX - rect.width - 8)
+        }
+        if self.rect.height < 32 {
+            rect.origin.y = min(max(rect.minY, bounds.minY + 8), bounds.maxY - rect.height - 8)
+        }
+        return edgePoint(h, in: rect)
+    }
+
+    private func edgePoint(_ h: Handle, in rect: CGRect) -> CGPoint {
         switch h {
         case .topLeft: return CGPoint(x: rect.minX, y: rect.maxY)
         case .top: return CGPoint(x: rect.midX, y: rect.maxY)
@@ -138,7 +154,13 @@ final class SelectionRectView: NSView {
 
     private func hitHandle(_ p: CGPoint) -> Handle? {
         guard !rect.isEmpty else { return nil }
+        if (rect.width < 32 || rect.height < 32), rect.contains(p) { return nil }
         return Handle.allCases.first { handleRect($0).insetBy(dx: -4, dy: -4).contains(p) }
+    }
+
+    private var moveRect: CGRect {
+        CGRect(x: rect.midX - max(16, rect.width) / 2, y: rect.midY - max(16, rect.height) / 2,
+               width: max(16, rect.width), height: max(16, rect.height))
     }
 
     // MARK: - Drawing
@@ -168,7 +190,15 @@ final class SelectionRectView: NSView {
 
         if allowsResize {
             Theme.textPrimary.setFill()
-            for h in Handle.allCases { NSBezierPath(ovalIn: handleRect(h)).fill() }
+            for h in Handle.allCases {
+                let point = handlePoint(h), edge = edgePoint(h, in: rect)
+                if point != edge {
+                    let stem = NSBezierPath()
+                    stem.move(to: edge); stem.line(to: point)
+                    Theme.textPrimary.setStroke(); stem.stroke()
+                }
+                NSBezierPath(ovalIn: handleRect(h)).fill()
+            }
         }
     }
 
@@ -181,14 +211,16 @@ final class SelectionRectView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         isDragging = true
+        originalRect = rect
         let p = convert(event.locationInWindow, from: nil)
         if allowsResize, let h = hitHandle(p) {
-            dragMode = .resize(h)
+            let edge = edgePoint(h, in: rect)
+            dragMode = .resize(h, CGPoint(x: p.x - edge.x, y: p.y - edge.y))
             dragStart = rect
-        } else if !rect.isEmpty, rect.contains(p) {
+        } else if !rect.isEmpty, moveRect.contains(p) {
             dragMode = .move(CGPoint(x: p.x - rect.minX, y: p.y - rect.minY))
             dragStart = rect
-        } else if allowsResize {
+        } else if allowsResize && allowsCreation {
             dragMode = .create
             dragStart = CGRect(origin: p, size: .zero)
         } else {
@@ -206,8 +238,17 @@ final class SelectionRectView: NSView {
         switch mode {
         case .move(let offset):
             rect = CGRect(origin: CGPoint(x: p.x - offset.x, y: p.y - offset.y), size: dragStart.size)
-        case .resize(let h):
-            rect = resized(from: dragStart, handle: h, mouse: p, option: option, aspect: lockedAspect)
+        case .resize(let h, let offset):
+            var edge = CGPoint(x: p.x - offset.x, y: p.y - offset.y)
+            if let maxEdge = h.xEdge {
+                edge.x = maxEdge ? max(dragStart.minX + minSize.width, min(limit.maxX, edge.x))
+                    : min(dragStart.maxX - minSize.width, max(limit.minX, edge.x))
+            }
+            if let maxEdge = h.yEdge {
+                edge.y = maxEdge ? max(dragStart.minY + minSize.height, min(limit.maxY, edge.y))
+                    : min(dragStart.maxY - minSize.height, max(limit.minY, edge.y))
+            }
+            rect = resized(from: dragStart, handle: h, mouse: edge, option: option, aspect: lockedAspect)
         case .create:
             rect = resized(from: dragStart, handle: .bottomRight, mouse: p, option: option, aspect: lockedAspect)
         }
@@ -215,11 +256,23 @@ final class SelectionRectView: NSView {
 
     override func mouseUp(with event: NSEvent) { dragMode = nil; isDragging = false }
 
+    override func cancelOperation(_ sender: Any?) {
+        guard isDragging, let onCancelDrag else {
+            nextResponder?.tryToPerform(#selector(cancelOperation(_:)), with: sender)
+            return
+        }
+        dragMode = nil
+        isDragging = false
+        rect = originalRect
+        onCancelDrag()
+    }
+
     // MARK: - Keyboard
 
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, isDragging, onCancelDrag != nil { cancelOperation(nil); return }
         guard (123...126).contains(event.keyCode), !isHiddenOrHasHiddenAncestor else {
             super.keyDown(with: event)
             return
@@ -258,7 +311,7 @@ final class SelectionRectView: NSView {
         if allowsResize, let h = hitHandle(p) {
             return cursor(for: h)
         }
-        return rect.contains(p) ? .openHand : .arrow
+        return moveRect.contains(p) ? .openHand : .arrow
     }
 
     private func cursor(for h: Handle) -> NSCursor {

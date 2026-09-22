@@ -65,7 +65,7 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 
 | Scope | Tasks | Done |
 |---|---|---|
-| Recorder Nudge defects | DEF-1107…DEF-1111 | 2/5 |
+| Recorder Nudge defects | DEF-1107…DEF-1111 | 3/5 |
 
 - [x] **T-611 / DEF-1107 Restore recording surface focus**
   - Mapping: AppDelegate recording actions → ToolbarController.show/presentPicker → SourcePickerOverlay. Recording surface means selected SCDisplay/SCWindow in the capture picker, not an editor clip or document window.
@@ -74,8 +74,9 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 - [x] **T-612 / DEF-1108 End automatic export range at last active clip**
   - Mapping: screen Clip.isGap distinguishes removed media; cameraClips can remain independently over screen gaps. No explicit export in/out selection exists. Project.exportDuration computes the last retained screen/camera endpoint; sheet estimates, both encoders and MP4 audio use it. Empty export is disabled/rejected before destination mutation.
   - Verified: `make test FILTER=exportDurationTracksActiveMedia`, `make app`, selftests `export-range`, `export-sheet`, `audio-mix` all pass. Range test covers split/trim/move/delete, missing camera source, empty/invalid media; live sheet edits/undo/redo; MP4/GIF output with screen and camera tails; audio clipping and empty destination preservation.
-- [ ] **T-613 / DEF-1109 Precise small highlight manipulation**
-  - Verify: pointer move/resize/minimum/bounds, source transform, one-step undo, cancel, small-highlight integration.
+- [x] **T-613 / DEF-1109 Precise small highlight manipulation**
+  - Mapping: normalized Mask.rect → CropMapping within ZoomTargetMapping.contentRect → shared SelectionRectView. One cropped-source pixel replaces the inherited 100-point minimum. Small geometry has separated handles, body movement and offset-preserving resize; outside drag cannot replace the mask. Preview preserves rectangle keyboard focus; Escape cancels through EditorModel.
+  - Verified: make app; selftests highlight-manipulation, pickers, mask-rect, crop, zoom-target all pass. Pointer coverage: all eight handles, two preview scales, no jump, minimum, bounds including persisted geometry, undo/redo and cancel; real PreviewView first-responder dispatch; small-highlight PNG rendered and inspected.
 - [ ] **T-614 / DEF-1110 Cmd-click scissors split**
   - Verify: modifier routing, clip boundaries, tool state and undo/redo through real toolbar integration.
 - [ ] **T-615 / DEF-1111 Immediate recording setup appearance**
@@ -747,3 +748,5 @@ T-505/T-506 · 2026-09-20 · Fixed MP4 writer deadlock (video-only feeding stall
 T-611 / DEF-1107 · 2026-09-22 · Restored session-scoped display/window picker selection, validated live sources, excluded own app windows, added unavailable-window prompt and discarded stale async refreshes. Verified `make app`, LaunchServices `--selftest recording-focus` (live SCWindow restore, real visible panels, display return/fallback, explicit replacement and mode switch), `pickers`, `recording-dismissal` all OK. Synthetic resolver assertions cover fresh/removed/empty sources.
 
 T-612 / DEF-1108 · 2026-09-22 · Added Project.exportDuration for last retained screen/camera endpoint; retained interior gaps and timeline edit space. Sheet duration/size, MP4/GIF frame count, reader bounds and MP4 session end now agree. Empty exports disabled/rejected. Verified targeted Core test, make app, export-range (real MP4/GIF, audio tail, camera, undo/redo), export-sheet and audio-mix all OK. No user range state exists to clamp; no new range UI introduced.
+
+T-613 / DEF-1109 · 2026-09-22 · Highlight minimum is one cropped-source pixel with independent handle hit targets; body drag, resize grab offset and bounded geometry; outside drags do not recreate a selected mask. Fixed shared clamping callback so persisted geometry agrees with display; preview retains rectangle focus; Escape rolls back without undo entry and responder-chain fallback preserves crop cancellation. make app and highlight-manipulation/pickers/mask-rect/crop/zoom-target all OK; /tmp/recorder-small-highlight.png inspected.

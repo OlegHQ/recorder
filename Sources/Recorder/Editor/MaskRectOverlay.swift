@@ -44,6 +44,13 @@ final class MaskRectOverlay {
         container.addSubview(selectionView)
         view = container
 
+        selectionView.allowsCreation = false
+        selectionView.onCancelDrag = { [weak self] in
+            guard let self, self.gestureOpen else { return }
+            self.gestureOpen = false
+            self.model.cancelGesture()
+            self.updateContentRect()
+        }
         selectionView.onChange = { [weak self] r in self?.rectChanged(r) }
         selectionView.onKeyboardEditingChanged = { [weak self] editing in
             if editing { self?.gestureBegan() } else { self?.gestureEnded() }
@@ -79,6 +86,10 @@ final class MaskRectOverlay {
         // `observeSelection`'s now-broader `model.project` tracking).
         guard !selectionView.isDragging else { return }
         imageRect = ZoomTargetMapping.contentRect(viewBounds: mountedSize, project: model.project)
+        // One pixel of the cropped source, independent of preview scale and handle hit size.
+        selectionView.minSize = CGSize(
+            width: imageRect.width / max(1, Double(model.project.source.pixelWidth) * model.project.crop.w),
+            height: imageRect.height / max(1, Double(model.project.source.pixelHeight) * model.project.crop.h))
         selectionView.limit = imageRect
         syncFromModel()
     }
@@ -181,5 +192,113 @@ private final class HitForwardingView: NSView {
     override func mouseUp(with event: NSEvent) {
         forward?.mouseUp(with: event)
         onMouseUp?()
+    }
+}
+
+extension MaskRectOverlay {
+    @MainActor static func runManipulationSelfTest() throws {
+        _ = NSApplication.shared
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ ok: Bool, _ message: String) throws { if !ok { throw Fail(description: message) } }
+        func event(_ type: NSEvent.EventType, _ point: CGPoint, window: Int = 0) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
+                              windowNumber: window, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("highlight-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        var project = Project(source: Source(pixelWidth: 1000, pixelHeight: 1000, duration: 3),
+                              clips: [Clip(sourceStart: 0, sourceEnd: 3)])
+        project.masks = [Mask(start: 0, end: 3, kind: .highlight, rect: NormRect(x: 0.4, y: 0.4, w: 0.2, h: 0.2))]
+        let model = EditorModel(packageURL: scratch, project: project, events: EventLog())
+        defer { model.saveNow() }
+        model.selection = [UUID(uuidString: project.masks[0].id)!]
+        let overlay = MaskRectOverlay(model: model)
+        let rectangle = overlay.selectionView
+        func drag(_ from: CGPoint, _ to: CGPoint) {
+            overlay.view.mouseDown(with: event(.leftMouseDown, from))
+            overlay.view.mouseDragged(with: event(.leftMouseDragged, to))
+            overlay.view.mouseUp(with: event(.leftMouseUp, to))
+        }
+        for size in [CGSize(width: 1000, height: 1000), CGSize(width: 500, height: 700)] {
+            model.edit("Reset") { $0.masks = project.masks }
+            overlay.layout(in: size)
+            let start = rectangle.rect
+            let center = CGPoint(x: start.midX, y: start.midY)
+            let before = model.undoStepCount
+            drag(center, CGPoint(x: center.x + overlay.imageRect.width * 0.1, y: center.y))
+            try check(abs(model.project.masks[0].rect.x - 0.5) < 1e-9, "scale-dependent body drift")
+            try check(model.undoStepCount == before + 1, "move not one undo step")
+            model.undo(); model.selection = [UUID(uuidString: project.masks[0].id)!]; overlay.layout(in: size)
+            try check(model.project.masks == project.masks, "undo")
+            model.redo(); model.selection = [UUID(uuidString: project.masks[0].id)!]; overlay.layout(in: size)
+            try check(abs(model.project.masks[0].rect.x - 0.5) < 1e-9, "redo")
+            // Each intended edge/corner is reachable and uses pointer deltas, including off-center grabs.
+            for (x, y) in [(0.0, 0.0), (0, 0.5), (0, 1), (0.5, 0), (0.5, 1), (1, 0), (1, 0.5), (1, 1)] {
+                model.edit("Reset") { $0.masks = project.masks }
+                overlay.layout(in: size)
+                let r = rectangle.rect
+                let grab = CGPoint(x: r.minX + x * r.width + 2, y: r.minY + y * r.height + 2)
+                overlay.view.mouseDown(with: event(.leftMouseDown, grab))
+                overlay.view.mouseDragged(with: event(.leftMouseDragged, grab))
+                try check(rectangle.rect == r, "resize jumped at pointer-down")
+                let dx = x == 0.5 ? 0.0 : (x == 0 ? -10.0 : 10.0)
+                let dy = y == 0.5 ? 0.0 : (y == 0 ? -10.0 : 10.0)
+                overlay.view.mouseDragged(with: event(.leftMouseDragged, CGPoint(x: grab.x + dx, y: grab.y + dy)))
+                overlay.view.mouseUp(with: event(.leftMouseUp, grab))
+                try check(abs(rectangle.rect.width - r.width - abs(dx)) < 1e-8 &&
+                          abs(rectangle.rect.height - r.height - abs(dy)) < 1e-8, "wrong resize edge")
+            }
+            // Shrink beyond the opposite corner: clamp at one source pixel, never flip the anchor.
+            let r = rectangle.rect
+            drag(CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX - 100, y: r.minY - 100))
+            try check(abs(model.project.masks[0].rect.w - 0.001) < 1e-9 &&
+                      abs(model.project.masks[0].rect.h - 0.001) < 1e-9, "minimum not one source pixel: \(model.project.masks[0].rect)")
+            let tiny = rectangle.rect
+            drag(CGPoint(x: tiny.midX, y: tiny.midY), CGPoint(x: tiny.midX + 10, y: tiny.midY + 10))
+            try check(abs(rectangle.rect.minX - tiny.minX - 10) < 1e-8 && rectangle.rect.size == tiny.size,
+                      "tiny body intercepted by resize handle")
+            let small = rectangle.rect
+            let handle = CGPoint(x: small.midX + 16, y: small.midY + 16)
+            drag(handle, CGPoint(x: handle.x + 5, y: handle.y + 5))
+            try check(abs(rectangle.rect.width - small.width - 5) < 1e-8, "tiny handle unusable")
+            let beforeCancel = model.project, undoCount = model.undoStepCount
+            let c = CGPoint(x: rectangle.rect.midX, y: rectangle.rect.midY)
+            overlay.view.mouseDown(with: event(.leftMouseDown, c))
+            overlay.view.mouseDragged(with: event(.leftMouseDragged, CGPoint(x: c.x + 20, y: c.y)))
+            let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+            rectangle.keyDown(with: escape)
+            overlay.view.mouseUp(with: event(.leftMouseUp, c))
+            try check(model.project == beforeCancel && model.undoStepCount == undoCount && !rectangle.isDragging, "Escape did not roll back")
+            drag(CGPoint(x: rectangle.rect.midX, y: rectangle.rect.midY), CGPoint(x: -1000, y: -1000))
+            try check(rectangle.rect.minX == overlay.imageRect.minX && rectangle.rect.minY == overlay.imageRect.minY, "bounds")
+            try check(abs(model.project.masks[0].rect.x) < 1e-9 &&
+                      abs(model.project.masks[0].rect.y + model.project.masks[0].rect.h - 1) < 1e-9,
+                      "clamped view did not update persisted bounds")
+            let saved = model.project.masks[0].rect
+            drag(CGPoint(x: size.width - 5, y: size.height - 5), CGPoint(x: size.width / 2, y: size.height / 2))
+            try check(model.project.masks[0].rect == saved, "outside drag recreated mask")
+        }
+        // Actual preview dispatch must leave keyboard focus on the rectangle, not steal it back.
+        model.edit("Small highlight") { $0.masks[0].rect = NormRect(x: 0.5, y: 0.5, w: 0.001, h: 0.001) }
+        let preview = PreviewView(model: model)
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 500, height: 500),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = preview
+        preview.maskOverlayView = overlay.view
+        overlay.layout(in: preview.bounds.size)
+        let center = CGPoint(x: rectangle.rect.midX, y: rectangle.rect.midY)
+        preview.mouseDown(with: event(.leftMouseDown, center, window: window.windowNumber))
+        try check(window.firstResponder === rectangle, "preview stole rectangle keyboard focus")
+        rectangle.cancelOperation(nil)
+        preview.mouseUp(with: event(.leftMouseUp, center, window: window.windowNumber))
+        guard let bitmap = rectangle.bitmapImageRepForCachingDisplay(in: rectangle.bounds) else { throw Fail(description: "no bitmap") }
+        rectangle.cacheDisplay(in: rectangle.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw Fail(description: "no PNG") }
+        try png.write(to: URL(fileURLWithPath: "/tmp/recorder-small-highlight.png"))
+        print("Small highlight PNG: /tmp/recorder-small-highlight.png")
     }
 }
