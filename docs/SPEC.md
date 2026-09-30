@@ -25,8 +25,10 @@ do not reset the developer's real grants. Fresh grant/revoke and old-signature m
 still require a human macOS Settings check. Ad-hoc releases cannot retain a stable
 identity across updates; Developer ID signing remains required to solve that limitation.
 The installer uses the shared monochrome capture mark and Barlow/Andale typography.
-Configured Apple credentials enable signing, notarization and stapling of app and DMG;
-credential-free releases remain explicitly labelled ad-hoc and require Open Anyway.
+Release CI requires Developer ID signing and notarization through a GitHub secret;
+missing credentials block publication. The app and DMG
+are stapled and assessed before a release is published. Earlier ad-hoc releases
+remain untrusted and require Open Anyway.
 
 A native macOS screen recorder + editor, functionally modelled on Screen Studio 3.7.
 Sources for this spec: Screen Studio's public guide (editor) and local toolchain probes

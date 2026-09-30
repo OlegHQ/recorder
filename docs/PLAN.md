@@ -68,6 +68,12 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 | Recorder Nudge defects | DEF-1107…DEF-1111 | 5/5 |
 | Requested clip fades | T-616 | 1/1 |
 | Requested advanced gallery | T-617 | 1/1 |
+| Requested signed releases | T-618 | 0/1 |
+
+- [~] **T-618 Developer ID signed release DMGs**
+  - User request: release CI uses the user's Apple account and publishes installable, notarized DMGs.
+  - Do: require a Developer ID Application certificate and app-specific notarization credentials in GitHub secrets; fail closed if absent; retain app and DMG staple/assessment checks. Document one-time Apple account and GitHub setup.
+  - Verify: parse workflow YAML, check shell syntax for every run block, and run `make test`; HUMAN: create/export the Developer ID certificate, generate an app-specific password, configure GitHub secrets, run a tagged release, and install the resulting DMG on a clean Mac/user account.
 
 - [x] **T-617 Advanced gallery themes and demo motion**
   - User request: white/black inverted gallery with theme switcher, FUI scroll/interaction reveals, and a Twitter demo presentation.
@@ -774,3 +780,5 @@ T-616 · 2026-09-22 · Removed implicit post-gap fade, added optional per-clip f
 T-617 · 2026-09-22 · Added gallery-advanced launch target, Black/White appearance switch, scroll-triggered rules and staggered content/lane reveals, cancellable 12-second demo and Reduce Motion handling. Built/opened both galleries; standard PNG and ui-motion passed. Advanced demo check asserted theme transitions and captured entrance/stagger, settled scroll stages and minimum size; images inspected. Media matte remains fixed; ordinary app tokens retain their original colors.
 
 T-617 refinement · 2026-09-22 · Advanced gallery now opens White with the timeline first, followed by production Canvas/Camera/Cursor/Motion/Keystrokes panels in staggered columns, a bound key specimen, capture typography and compact widget studies. Removed the full editor shell and cursor hero. Shared camera/cursor popups refresh on appearance changes. Verified debug build, default-White render/panel-mount/full-editor-absence guards, six-stage demo in both themes, minimum-width panels, ui-motion, placement, inspector-panels and standard gallery PNG. Inspected rendered opening, panels, key specimen and native picker contrast.
+
+T-618 · 2026-09-30 · Release CI now requires Developer ID signing and notarization with a secret Apple ID; removed ad-hoc publication fallback. YAML and every run block passed syntax checks; missing-secret gate rejected release; `make test` passed 71/71. Waiting on HUMAN Apple Developer certificate/private key, app-specific password, GitHub secrets, and clean install of a tagged release DMG.
