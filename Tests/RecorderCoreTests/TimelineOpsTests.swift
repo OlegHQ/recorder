@@ -200,3 +200,12 @@ private struct LCG: RandomNumberGenerator {
     #expect(exact.snapped)
     #expect(exact.value == 9.0)
 }
+
+@Test func splitAtPausesOnlySplits() {
+    var p = Project(source: Source(duration: 20), clips: [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)])
+    p.splitAtPauses([TimeRange(start: 5, end: 8), TimeRange(start: 12, end: 15)])
+    #expect(p.checkInvariants() == nil)
+    #expect(p.clips.map { $0.sourceStart } == [0, 5, 8, 12, 15])
+    #expect(p.clips.map { $0.sourceEnd } == [5, 8, 12, 15, 20])
+    #expect(p.clips.allSatisfy { $0.speed == 1 })
+}

@@ -50,3 +50,16 @@ private func typing(_ t: Double) -> InputEvent { InputEvent(t: t, k: .typing) }
     #expect(typingRanges(events: []).isEmpty)
     #expect(typingRanges(events: [InputEvent(t: 0, k: .move, x: 0, y: 0)]).isEmpty)
 }
+
+@Test func silentRangesThresholdMinDurationAndPad() {
+    // 100/s: loud 0-1 s, silent 1-2 s, loud 2-2.3 s, silent 2.3-2.7 s (too short), loud, silent to end 3.0-4.0.
+    var levels = [Float](repeating: 0.5, count: 400)
+    for i in 100..<200 { levels[i] = 0.001 }
+    for i in 230..<270 { levels[i] = 0.001 }
+    for i in 300..<400 { levels[i] = 0.001 }
+    let r = silentRanges(levels: levels, perSecond: 100)
+    #expect(r.count == 2)
+    #expect(abs(r[0].start - 1.15) < 1e-9 && abs(r[0].end - 1.85) < 1e-9)
+    #expect(abs(r[1].start - 3.15) < 1e-9 && abs(r[1].end - 3.85) < 1e-9)
+    #expect(silentRanges(levels: [], perSecond: 100).isEmpty)
+}

@@ -623,6 +623,13 @@ public extension Project {
         assert(checkInvariants() == nil)
     }
 
+    /// Edit ▸ Split at Pauses (T-625): splits clips at both edges of each silent SOURCE-time range
+    /// (`silentRanges`, `Events.swift`). Never removes or retimes anything.
+    mutating func splitAtPauses(_ ranges: [TimeRange]) {
+        for range in ranges { splitClip(atSource: range.start); splitClip(atSource: range.end) }
+        assert(checkInvariants() == nil)
+    }
+
     /// Splits the clip containing SOURCE time `s` into two clips of the same speed. No-op if `s`
     /// isn't strictly inside a clip (in a gap, or within `minClipLength` of an edge/existing boundary).
     private mutating func splitClip(atSource s: Double) {
