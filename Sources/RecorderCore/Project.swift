@@ -52,6 +52,12 @@ public struct NormRect: Codable, Equatable, Sendable {
 
 // MARK: - Project sections
 
+public struct PixelSize: Codable, Equatable, Sendable {
+    public var w: Int
+    public var h: Int
+    public init(w: Int, h: Int) { self.w = w; self.h = h }
+}
+
 public struct Source: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable { case display, window, area }
     public var kind: Kind
@@ -62,12 +68,16 @@ public struct Source: Codable, Equatable, Sendable {
     public var hasCamera: Bool
     public var hasMic: Bool
     public var hasSystemAudio: Bool
+    /// Pixel size of every recorded window (`screen.mov`, `window-1.mov`…); empty unless more than one.
+    public var windowSizes: [PixelSize] = []
     public init(kind: Kind = .display, pixelWidth: Int = 0, pixelHeight: Int = 0, scale: Double = 1,
-                duration: Double = 0, hasCamera: Bool = false, hasMic: Bool = false, hasSystemAudio: Bool = false) {
+                duration: Double = 0, hasCamera: Bool = false, hasMic: Bool = false, hasSystemAudio: Bool = false,
+                windowSizes: [PixelSize] = []) {
+        self.windowSizes = windowSizes
         self.kind = kind; self.pixelWidth = pixelWidth; self.pixelHeight = pixelHeight; self.scale = scale
         self.duration = duration; self.hasCamera = hasCamera; self.hasMic = hasMic; self.hasSystemAudio = hasSystemAudio
     }
-    enum CodingKeys: String, CodingKey { case kind, pixelWidth, pixelHeight, scale, duration, hasCamera, hasMic, hasSystemAudio }
+    enum CodingKeys: String, CodingKey { case kind, pixelWidth, pixelHeight, scale, duration, hasCamera, hasMic, hasSystemAudio, windowSizes }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         kind = try c.value(.kind, default: .display)
@@ -78,6 +88,7 @@ public struct Source: Codable, Equatable, Sendable {
         hasCamera = try c.value(.hasCamera, default: false)
         hasMic = try c.value(.hasMic, default: false)
         hasSystemAudio = try c.value(.hasSystemAudio, default: false)
+        windowSizes = try c.value(.windowSizes, default: [])
     }
 }
 
@@ -244,6 +255,26 @@ public func captionPhrases(words: [Word], maxWords: Int = 4, gap: Double = 0.5) 
         let end = max(start + 0.1, min(g[g.count - 1].end, nextStart))
         return TextBlock(start: start, end: end, text: g.map(\.text).joined(separator: " "),
                          words: g.map { Word(text: $0.text, start: $0.start - start, end: $0.end - start) }, style: .caption, size: 48)
+    }
+}
+
+/// Multi-window recordings (SPEC "Windows as layers"): while a shot spans a time, window `window`
+/// (0 = `screen.mov`, N = `window-N.mov`) is the visible one. Outside every shot window 0 shows.
+public struct WindowShot: Codable, Equatable, Sendable {
+    public var id: String
+    public var start: Double
+    public var end: Double
+    public var window: Int
+    public init(id: String = UUID().uuidString, start: Double = 0, end: Double = 0, window: Int = 0) {
+        self.id = id; self.start = start; self.end = end; self.window = window
+    }
+    enum CodingKeys: String, CodingKey { case id, start, end, window }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.value(.id, default: UUID().uuidString)
+        start = try c.value(.start, default: 0)
+        end = try c.value(.end, default: 0)
+        window = try c.value(.window, default: 0)
     }
 }
 
@@ -512,6 +543,7 @@ public struct Project: Codable, Equatable, Sendable {
     public var cameraClips: [CameraClip]
     public var masks: [Mask]
     public var texts: [TextBlock]
+    public var windowShots: [WindowShot]
     public var cursorHidden: [TimeRange]
     public var crop: NormRect
     public var output: Output
@@ -536,6 +568,7 @@ public struct Project: Codable, Equatable, Sendable {
         keystrokeClips: [Layout] = [],
         masks: [Mask] = [],
         texts: [TextBlock] = [],
+        windowShots: [WindowShot] = [],
         cursorHidden: [TimeRange] = [],
         crop: NormRect = NormRect(),
         output: Output = Output(),
@@ -550,14 +583,14 @@ public struct Project: Codable, Equatable, Sendable {
         self.version = version; self.id = id; self.title = title; self.createdAt = createdAt
         self.keystrokeClips = keystrokeClips + layouts.filter { $0.kind == .settings }
         self.cameraClips = cameraClips ?? (source.hasCamera && source.duration > 0 ? [CameraClip(start: 0, end: source.duration)] : [])
-        self.source = source; self.clips = clips; self.zooms = zooms; self.layouts = layouts.filter { $0.kind != .settings }; self.masks = masks; self.texts = texts
+        self.source = source; self.clips = clips; self.zooms = zooms; self.layouts = layouts.filter { $0.kind != .settings }; self.masks = masks; self.texts = texts; self.windowShots = windowShots
         self.cursorHidden = cursorHidden; self.crop = crop; self.output = output; self.background = background
         self.frame = frame; self.cursor = cursor; self.animation = animation; self.camera = camera
         self.audio = audio; self.keys = keys
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, id, title, createdAt, source, linkVideoEdits, rippleDelete, clips, zooms, layouts, cameraClips, keystrokeClips, masks, texts, cursorHidden, crop, output,
+        case version, id, title, createdAt, source, linkVideoEdits, rippleDelete, clips, zooms, layouts, cameraClips, keystrokeClips, masks, texts, windowShots, cursorHidden, crop, output,
              background, frame, cursor, animation, camera, audio, keys
     }
 
@@ -578,6 +611,7 @@ public struct Project: Codable, Equatable, Sendable {
         cameraClips = try c.value(.cameraClips, default: source.hasCamera && source.duration > 0 ? [CameraClip(start: 0, end: source.duration)] : [])
         masks = try c.value(.masks, default: [])
         texts = try c.value(.texts, default: [])
+        windowShots = try c.value(.windowShots, default: [])
         cursorHidden = try c.value(.cursorHidden, default: [])
         crop = try c.value(.crop, default: NormRect())
         output = try c.value(.output, default: Output())

@@ -88,6 +88,16 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
         }
     }
 
+    // Windows 1…N (SPEC "Windows as layers") play through the same one screen track, switched by
+    // `windowShots`, so preview and export keep decoding a single screen track. A missing file falls back to window 0.
+    var windowSources: [AVAssetTrack] = [screenSource]
+    var windowAssetsKeepAlive: [AVURLAsset] = []
+    for i in 1..<max(1, project.windowCount) {
+        let asset = AVURLAsset(url: package.appendingPathComponent("window-\(i).mov"))
+        windowAssetsKeepAlive.append(asset)
+        windowSources.append(try await asset.loadTracks(withMediaType: .video).first ?? screenSource)
+    }
+
     let timescale: CMTimeScale = 600
     var cursor = CMTime.zero
     for clip in project.clips {
@@ -97,8 +107,26 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
         let mediaDuration = clip.isEmpty ? min(project.source.duration, 1.0 / 30) : clip.mediaDuration
         let range = CMTimeRange(start: CMTime(seconds: clip.isEmpty ? 0 : clip.mediaIn, preferredTimescale: timescale),
                                 duration: CMTime(seconds: mediaDuration, preferredTimescale: timescale))
-        try screenTrack.insertTimeRange(range, of: screenSource, at: cursor)
-        screenTrack.scaleTimeRange(CMTimeRange(start: cursor, duration: range.duration), toDuration: outputDuration)
+        if project.windowCount > 1 && !clip.isEmpty {
+            // One piece per shot boundary inside the clip; the last piece absorbs rounding so the clip stays exact.
+            let edges = project.windowShots.flatMap { [$0.start, $0.end] }
+            var lo = clip.sourceStart
+            var at = cursor
+            while lo < clip.sourceEnd - 1e-9 {
+                let hi = min(clip.sourceEnd, edges.filter { $0 > lo + 1e-9 }.min() ?? clip.sourceEnd)
+                let piece = CMTimeRange(start: CMTime(seconds: clip.mediaTime(atSource: lo), preferredTimescale: timescale),
+                                        duration: CMTime(seconds: (hi - lo) * clip.speed / clip.timeScale, preferredTimescale: timescale))
+                let pieceOut = hi >= clip.sourceEnd - 1e-9 ? cursor + outputDuration - at
+                    : CMTime(seconds: (hi - lo) / clip.timeScale, preferredTimescale: timescale)
+                try screenTrack.insertTimeRange(piece, of: windowSources[project.windowIndex(atSource: lo)], at: at)
+                screenTrack.scaleTimeRange(CMTimeRange(start: at, duration: piece.duration), toDuration: pieceOut)
+                at = at + pieceOut
+                lo = hi
+            }
+        } else {
+            try screenTrack.insertTimeRange(range, of: screenSource, at: cursor)
+            screenTrack.scaleTimeRange(CMTimeRange(start: cursor, duration: range.duration), toDuration: outputDuration)
+        }
         for (track, source) in [(micTrack, micSource), (systemTrack, systemSource)] {
             guard let track, let source else { continue }
             if clip.isEmpty { track.insertEmptyTimeRange(CMTimeRange(start: cursor, duration: outputDuration)) }
@@ -127,7 +155,7 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
         }
     }
 
-    withExtendedLifetime((screenAssetKeepAlive, cameraAssetKeepAlive, micAssetKeepAlive, systemAssetKeepAlive)) {}
+    withExtendedLifetime((screenAssetKeepAlive, cameraAssetKeepAlive, micAssetKeepAlive, systemAssetKeepAlive, windowAssetsKeepAlive)) {}
 
     let audioMix = makeAudioMix(project: project, micTrack: micTrack, systemTrack: systemTrack)
     // `audioTimePitchAlgorithm = .spectral` (SPEC §6.2) is a property of the AVPlayerItem/

@@ -78,7 +78,7 @@ enum ColorSelfTest {
             guard let target = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
                 throw Failure(description: "capture fixture window unavailable")
             }
-            let config = CaptureTarget.window(target).configuration(settings: RecordingSettings.shared)
+            let config = CaptureTarget.windows([target]).configuration(settings: RecordingSettings.shared)
             config.width = width; config.height = height
             config.captureMicrophone = false; config.capturesAudio = false
             let sample = try await SCScreenshotManager.captureSampleBuffer(

@@ -75,6 +75,7 @@ enum SourcePickerOverlay {
                     && $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier
                     && !FloatingPanel.allWindowIDs.contains($0.windowID)
             }
+            state.selectedIDs.removeAll { id in !state.windows.contains { $0.windowID == id } }
             guard state.mode == .window else { return }
             let frames = Dictionary(uniqueKeysWithValues: state.windows.map { ($0.windowID, $0.frame) })
             let id = restoredWindowID(previous: state.hoveredWindow?.windowID ?? state.pendingWindowID,
@@ -84,6 +85,12 @@ enum SourcePickerOverlay {
             state.hoveredWindow = id.flatMap { id in state.windows.first { $0.windowID == id } }
             lastWindowID = id
         }
+    }
+
+    /// ⌘-click multi-select (SPEC "Windows as layers"): toggles `id`, at most `limit` windows, order kept (first = window 0).
+    static func toggled(_ ids: [CGWindowID], _ id: CGWindowID, limit: Int = 4) -> [CGWindowID] {
+        if ids.contains(id) { return ids.filter { $0 != id } }
+        return ids.count < limit ? ids + [id] : ids
     }
 
     static func restoredWindowID(previous: CGWindowID?, point: CGPoint, order: [CGWindowID],
@@ -129,6 +136,7 @@ enum SourcePickerOverlay {
     var windows: [SCWindow] = []
     var mode: RecordingSettings.Mode = .display
     var pendingWindowID: CGWindowID?
+    var selectedIDs: [CGWindowID] = []
     var activeScreen: NSScreen? {
         didSet { SourcePickerOverlay.lastDisplayID = activeScreen?.displayID }
     }
@@ -162,6 +170,7 @@ private final class SourcePickerWindow: NSPanel {
         let hostingView = SourcePickerHostingView(rootView: SourcePickerContentView(
             screen: screen, mode: mode, state: state,
             onStart: { [weak self] in self?.start() },
+            onTap: { [weak self] in self?.tap() },
             onResize: { [weak self] in self?.showResizeMenu() }
         ))
         hostingView.onReturn = { [weak self] in self?.start() }
@@ -203,6 +212,11 @@ private final class SourcePickerWindow: NSPanel {
         state.hoveredWindow = id.flatMap { i in state.windows.first { $0.windowID == i } }
     }
 
+    private func tap() {
+        guard NSEvent.modifierFlags.contains(.command), let id = state.hoveredWindow?.windowID else { return start() }
+        state.selectedIDs = SourcePickerOverlay.toggled(state.selectedIDs, id)
+    }
+
     private func start() {
         guard let target = currentTarget() else { return }
         SourcePickerOverlay.startRecording(target: target)
@@ -215,7 +229,8 @@ private final class SourcePickerWindow: NSPanel {
                   let display = state.displays.first(where: { $0.displayID == id }) else { return nil }
             return .display(display)
         case .window:
-            return state.hoveredWindow.map { .window($0) }
+            let picked = state.selectedIDs.compactMap { id in state.windows.first { $0.windowID == id } }
+            return picked.isEmpty ? state.hoveredWindow.map { .windows([$0]) } : .windows(picked)
         case .area:
             return nil
         }
@@ -398,6 +413,7 @@ private struct SourcePickerContentView: View {
     let mode: RecordingSettings.Mode
     var state: SourcePickerState
     var onStart: () -> Void
+    var onTap: () -> Void
     var onResize: () -> Void
 
     var body: some View {
@@ -405,7 +421,7 @@ private struct SourcePickerContentView: View {
             Color.black.opacity(dimOpacity)
             switch mode {
             case .display: displayContent
-            case .window: windowContent
+            case .window: selectedOutlines; windowContent
             case .area: EmptyView()
             }
         }
@@ -442,7 +458,7 @@ private struct SourcePickerContentView: View {
                 .overlay(Rectangle().stroke(Theme.accentColor, lineWidth: 2))
                 .frame(width: local.width, height: local.height)
                 .position(x: local.midX, y: local.midY)
-                .onTapGesture(perform: onStart)
+                .onTapGesture(perform: onTap)
 
             HStack(spacing: 16) {
                 if let icon = icon(for: window) {
@@ -457,6 +473,9 @@ private struct SourcePickerContentView: View {
                         Button("Resize", action: onResize)
                             .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
                     }
+                    Text(state.selectedIDs.isEmpty ? "⌘-click to record several windows"
+                         : "\(state.selectedIDs.count) selected · ⌘-click to add or remove")
+                        .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textSecondaryColor)
                 }
                 Rectangle().fill(Theme.strokeColor).frame(width: 1, height: 44)
                 StartRecordingButton(action: onStart)
@@ -470,6 +489,24 @@ private struct SourcePickerContentView: View {
             Text("Move the pointer over a window to select it")
                 .font(Font(Theme.bodyFont)).foregroundStyle(Theme.textPrimaryColor)
                 .padding(16).background(Theme.bgPanelColor)
+        }
+    }
+
+    /// Outline + order number (1 = `screen.mov`) on every ⌘-click-selected window.
+    @ViewBuilder private var selectedOutlines: some View {
+        ForEach(Array(state.selectedIDs.enumerated()), id: \.element) { n, id in
+            if let window = state.windows.first(where: { $0.windowID == id }) {
+                let local = swiftUIRect(for: window.frame)
+                Rectangle()
+                    .stroke(Theme.accentColor, lineWidth: 3)
+                    .overlay(alignment: .topLeading) {
+                        Text("\(n + 1)").font(Font(Theme.headingFont(24))).foregroundStyle(Theme.textPrimaryColor)
+                            .padding(8).background(Theme.accentColor)
+                    }
+                    .frame(width: local.width, height: local.height)
+                    .position(x: local.midX, y: local.midY)
+                    .allowsHitTesting(false)
+            }
         }
     }
 

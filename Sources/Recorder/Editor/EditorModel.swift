@@ -222,12 +222,15 @@ import RecorderCore
     private func rebuildPathsIfNeeded(from before: Project) {
         guard before.clips != project.clips || before.zooms != project.zooms || before.cursor != project.cursor
             || before.animation.screen != project.animation.screen || before.cursorHidden != project.cursorHidden
+            || before.windowShots != project.windowShots
         else { return }
         (cursorPath, cameraPath) = Self.buildPaths(project: project, events: events)
     }
 
     nonisolated static func buildPaths(project: Project, events: EventLog) -> (CursorPath, CameraPath) {
-        let cursorPath = CursorPath(events: events, style: project.cursor, hidden: project.cursorHidden, duration: project.source.duration)
+        // Multi-window: pointer normalised against the visible window, hidden outside it (identity otherwise).
+        let (events, outside) = remapWindowEvents(events, project: project)
+        let cursorPath = CursorPath(events: events, style: project.cursor, hidden: project.cursorHidden + outside, duration: project.source.duration)
         // Remap recorded pointer motion into the edited video clock for automatic zoom following.
         let mappedEvents = project.clips.filter { !$0.isEmpty }.flatMap { clip -> [InputEvent] in
             let initial = cursorPath.sample(atSource: clip.mediaIn)

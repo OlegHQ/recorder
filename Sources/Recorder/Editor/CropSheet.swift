@@ -13,6 +13,7 @@ import RecorderCore
 enum CropSheet {
     @MainActor
     static func present(for model: EditorModel, on window: NSWindow) {
+        guard model.project.windowCount == 1 else { return } // crop is disabled for multi-window projects
         let project = model.project
         let sourceSize = CGSize(width: project.source.pixelWidth, height: project.source.pixelHeight)
         let sourceTime = frameTime(project: project, outputTime: model.playhead)

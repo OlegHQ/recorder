@@ -85,11 +85,12 @@ final class MaskRectOverlay {
         // the drag's own edits triggered (`rectChanged` -> `model.update` -> this observer, via
         // `observeSelection`'s now-broader `model.project` tracking).
         guard !selectionView.isDragging else { return }
-        imageRect = ZoomTargetMapping.contentRect(viewBounds: mountedSize, project: model.project)
+        let visible = model.project.visibleWindow(atSource: model.timeMap.sourceTime(atOutput: model.playhead))
+        imageRect = ZoomTargetMapping.contentRect(viewBounds: mountedSize, project: visible)
         // One pixel of the cropped source, independent of preview scale and handle hit size.
         selectionView.minSize = CGSize(
-            width: imageRect.width / max(1, Double(model.project.source.pixelWidth) * model.project.crop.w),
-            height: imageRect.height / max(1, Double(model.project.source.pixelHeight) * model.project.crop.h))
+            width: imageRect.width / max(1, Double(visible.source.pixelWidth) * visible.crop.w),
+            height: imageRect.height / max(1, Double(visible.source.pixelHeight) * visible.crop.h))
         selectionView.limit = imageRect
         syncFromModel()
     }

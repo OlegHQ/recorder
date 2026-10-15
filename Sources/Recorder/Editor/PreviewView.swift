@@ -39,6 +39,7 @@ final class PreviewView: MTKView {
     private var isSeeking = false
     private var pendingSeekTime: Double?
     private var lastCameraClips: [CameraClip] = []
+    private var lastWindowShots: [WindowShot] = []
     private var lastClips: [Clip]
     private var lastAudio: Audio
 
@@ -102,6 +103,7 @@ final class PreviewView: MTKView {
     init(model: EditorModel, preparedCompositor: Compositor? = nil) {
         self.model = model
         self.lastClips = model.project.clips
+        self.lastWindowShots = model.project.windowShots
         self.lastAudio = model.project.audio
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             fatalError("no Metal device")
@@ -342,7 +344,8 @@ final class PreviewView: MTKView {
                 self.updateZoomTargetOverlay()
                 let clips = self.model.project.clips
                 let audio = self.model.project.audio
-                if clips != self.lastClips || self.model.project.cameraClips != self.lastCameraClips {
+                if clips != self.lastClips || self.model.project.cameraClips != self.lastCameraClips || self.model.project.windowShots != self.lastWindowShots {
+                    self.lastWindowShots = self.model.project.windowShots
                     self.lastCameraClips = self.model.project.cameraClips
                     self.lastClips = clips
                     self.lastAudio = audio
@@ -701,7 +704,8 @@ final class PreviewView: MTKView {
         }
         zoomTargetView.isHidden = false
         zoomTargetView.frame = bounds
-        let content = ZoomTargetMapping.contentRect(viewBounds: bounds.size, project: model.project)
+        // ponytail: sized for the window visible at the playhead when the selection/project last changed, not live while scrubbing.
+        let content = ZoomTargetMapping.contentRect(viewBounds: bounds.size, project: model.project.visibleWindow(atSource: model.timeMap.sourceTime(atOutput: model.playhead)))
         zoomTargetContentRect = content
         zoomTargetView.limit = content
         zoomTargetView.snapTargets = model.project.masks.map { CropMapping.viewRect(from: $0.rect, imageRect: content) }

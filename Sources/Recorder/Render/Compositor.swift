@@ -122,6 +122,12 @@ final class Compositor {
         var s = s
         s.screen = colorManaged(s.screen, commandBuffer: commandBuffer)
         s.camera = colorManaged(s.camera, commandBuffer: commandBuffer)
+        if s.project.windowCount > 1, let screen = s.screen {
+            // Multi-window: the decoded window's own size drives aspect-fit and scale (the canvas stays window 0's); no crop.
+            s.project.source.pixelWidth = screen.luma.width
+            s.project.source.pixelHeight = screen.luma.height
+            s.project.crop = NormRect()
+        }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear

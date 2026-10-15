@@ -2350,6 +2350,64 @@ enum SelfTest {
             print("SELFTEST record duration=\(source.duration) size=\(Int(naturalSize.width))x\(Int(naturalSize.height))")
             try? FileManager.default.removeItem(at: packageURL)
         },
+        // record-windows <N 2…4> [seconds]: N solid-colour windows of Recorder's own → `screen.mov` + `window-N.mov`.
+        "record-windows": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let count = min(4, max(2, args.first.flatMap(Int.init) ?? 3))
+            let seconds = args.count > 1 ? (Double(args[1]) ?? 3) : 3
+            let colors: [(NSColor, [Int])] = [(.red, [255, 0, 0]), (.green, [0, 255, 0]), (.blue, [0, 0, 255]), (.yellow, [255, 255, 0])]
+            let sizes = [CGSize(width: 480, height: 300), CGSize(width: 360, height: 420), CGSize(width: 560, height: 320), CGSize(width: 400, height: 400)]
+            let numbers = await MainActor.run { () -> [Int] in
+                NSApplication.shared.setActivationPolicy(.accessory)
+                NSApplication.shared.finishLaunching()
+                return (0..<count).map { i in
+                    let w = NSWindow(contentRect: NSRect(origin: CGPoint(x: 80 + 120 * i, y: 200 + 60 * i), size: sizes[i]),
+                                     styleMask: [.borderless], backing: .buffered, defer: false)
+                    w.isReleasedWhenClosed = false
+                    w.backgroundColor = colors[i].0
+                    w.level = .floating
+                    w.orderFrontRegardless()
+                    return w.windowNumber
+                }
+            }
+            defer { Task { @MainActor in NSApp.windows.filter { numbers.contains($0.windowNumber) }.forEach { $0.close() } } }
+            try await Task.sleep(nanoseconds: 400_000_000)
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let windows = numbers.compactMap { n in content.windows.first { $0.windowID == CGWindowID(n) } }
+            guard windows.count == count else { throw Fail(description: "fixture windows unavailable") }
+            let packageURL = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-selftest-windows-\(UUID().uuidString).recorder")
+            defer { try? FileManager.default.removeItem(at: packageURL) }
+            let settings = RecordingSettings.shared
+            let (mic, audio) = (settings.micID, settings.systemAudio)
+            settings.micID = nil; settings.systemAudio = .off
+            defer { settings.micID = mic; settings.systemAudio = audio }
+            let session = try await CaptureSession(target: .windows(windows), settings: settings, packageURL: packageURL)
+            try await session.start()
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            let source = try await session.finish()
+            guard source.windowSizes.count == count else { throw Fail(description: "windowSizes \(source.windowSizes.count) != \(count)") }
+            for i in 0..<count {
+                let name = i == 0 ? "screen.mov" : "window-\(i).mov"
+                let asset = AVURLAsset(url: packageURL.appendingPathComponent(name))
+                guard let track = try await asset.loadTracks(withMediaType: .video).first else { throw Fail(description: "\(name) has no video track") }
+                let size = try await track.load(.naturalSize)
+                let duration = try await asset.load(.duration).seconds
+                guard Int(size.width) == source.windowSizes[i].w, Int(size.height) == source.windowSizes[i].h else {
+                    throw Fail(description: "\(name) size \(size) != \(source.windowSizes[i])")
+                }
+                guard abs(duration - seconds) < 0.75 else { throw Fail(description: "\(name) duration \(duration) != \(seconds): clocks differ") }
+                let generator = AVAssetImageGenerator(asset: asset)
+                let image = try await generator.image(at: CMTime(seconds: seconds / 2, preferredTimescale: 600)).image
+                var px = [UInt8](repeating: 0, count: 4)
+                let ctx = CGContext(data: &px, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+                ctx.draw(image, in: CGRect(x: -image.width / 2, y: -image.height / 2, width: image.width, height: image.height))
+                guard zip(px, colors[i].1).allSatisfy({ abs(Int($0) - $1) < 60 }) else { throw Fail(description: "\(name) centre pixel \(px) != \(colors[i].1)") }
+            }
+            let log = try JSONDecoder().decode(EventLog.self, from: Data(contentsOf: packageURL.appendingPathComponent("events.json")))
+            guard Set((log.windowFrames ?? []).map(\.i)) == Set(0..<count) else { throw Fail(description: "windowFrames missing a window") }
+            print("SELFTEST record-windows count=\(count) sizes=\(source.windowSizes.map { "\($0.w)x\($0.h)" }) frames=\(log.windowFrames?.count ?? 0)")
+        },
     ]
     private static let timelineCases: [String: Case] = [
         "record-perf": { args in try await PerfSelfTest.runRecordPerf(args) },
@@ -2495,6 +2553,10 @@ enum SelfTest {
                 }
                 guard SourcePickerOverlay.frontmostWindow(at: CGPoint(x: -5, y: -5), order: [2, 1], frames: frames) == nil else {
                     throw Fail(description: "hit-test should return nil outside every window")
+                }
+                guard SourcePickerOverlay.toggled([1], 2) == [1, 2], SourcePickerOverlay.toggled([1, 2], 1) == [2],
+                      SourcePickerOverlay.toggled([1, 2, 3, 4], 5) == [1, 2, 3, 4] else {
+                    throw Fail(description: "⌘-click multi-select toggle/limit wrong")
                 }
             }
         },
@@ -3215,6 +3277,26 @@ enum SelfTest {
                 TextBlock(start: 2, end: 3, text: "Step 3 of 5", style: .label, position: NormPoint(x: 0.2, y: 0.15), size: 64),
             ]
             try project.save(to: url.appendingPathComponent("project.json"))
+        },
+        // T-635: a 2-window package (640x360 `screen.mov`, 400x400 `window-1.mov`) with the second window visible
+        // for the back half; pointer events are global points. Feed it to `parity`, `export`, `preview-frame`.
+        "make-windows-fixture": { _ in
+            let url = URL(fileURLWithPath: "/tmp/WindowsFixture.recorder")
+            try? FileManager.default.removeItem(at: url)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try await Self.synthesizeGradientMovie(at: url.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 3, frameCount: 12)
+            try await Self.synthesizeGradientMovie(at: url.appendingPathComponent("window-1.mov"), width: 400, height: 400, fps: 3, frameCount: 12)
+            var project = Project(title: "Windows Fixture",
+                                  source: Source(kind: .window, pixelWidth: 640, pixelHeight: 360, scale: 1, duration: 4.0,
+                                                 windowSizes: [PixelSize(w: 640, h: 360), PixelSize(w: 400, h: 400)]))
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 4.0)]
+            project.windowShots = [WindowShot(start: 0, end: 2, window: 0), WindowShot(start: 2, end: 4, window: 1)]
+            try project.save(to: url.appendingPathComponent("project.json"))
+            let events = EventLog(events: [
+                InputEvent(t: 0.2, k: .move, x: 200, y: 150), InputEvent(t: 1.5, k: .move, x: 400, y: 200),
+                InputEvent(t: 2.5, k: .move, x: 1100, y: 250), InputEvent(t: 3.5, k: .move, x: 1600, y: 250),
+            ], windowFrames: [WindowFrame(t: 0, i: 0, x: 0, y: 0, w: 640, h: 360), WindowFrame(t: 0, i: 1, x: 1000, y: 100, w: 400, h: 400)])
+            try JSONEncoder().encode(events).write(to: url.appendingPathComponent("events.json"))
             print("wrote \(url.path)")
         },
         // T-610: `StateSnapshot.dump(to:pasteboard:)` over a real offscreen editor (one edit + a
