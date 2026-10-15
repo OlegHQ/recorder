@@ -141,6 +141,7 @@ extension ZoomTargetMapping {
             throw SelfTestArgError.usage("undo didn't restore the original center")
         }
         model.redo()
+        model.selection = [UUID(uuidString: zoom.id)!]   // undo/redo cleared it; without it the far drag below was a silent no-op
 
         // Clamped: a drag far outside the frame leaves the target rect inside `fixtureContent`
         // (`SelectionRectView.limit`, wired in `PreviewView.updateZoomTargetOverlay`).
@@ -157,7 +158,63 @@ extension ZoomTargetMapping {
         guard fixtureContent.insetBy(dx: -0.5, dy: -0.5).contains(clampedRect) else {
             throw SelfTestArgError.usage("clamped rect \(clampedRect) escaped contentRect \(fixtureContent)")
         }
-        print("zoom-target OK: mapping round trip, drag moved center by expected amount (1 undo step), far drag clamped")
+        // T-620: Esc with the target shown keeps the selection + project and never leaks up the responder
+        // chain (the window controller would hand it to the timeline); Esc mid-drag reverts the drag.
+        final class Probe: NSView {
+            var escapes = 0
+            override func keyDown(with event: NSEvent) { if event.keyCode == 53 { escapes += 1 } }
+        }
+        let probe = Probe(frame: NSRect(x: 0, y: 0, width: 960, height: 540))
+        probe.addSubview(view)
+        func esc() -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                             characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+        }
+        let selectedBefore = model.selection, projectBefore = model.project, undoBefore = model.undoStepCount
+        view.keyDown(with: esc())
+        guard probe.escapes == 0, model.selection == selectedBefore, model.project == projectBefore else {
+            throw SelfTestArgError.usage("Esc with the zoom target shown leaked (\(probe.escapes)) or changed selection/project")
+        }
+        let here = rect(center: model.project.zooms[0].center, scale: zoom.scale, in: fixtureContent)
+        let mid = CGPoint(x: here.midX, y: here.midY)
+        view.mouseDown(with: synthEvent(.leftMouseDown, mid))
+        view.mouseDragged(with: synthEvent(.leftMouseDragged, CGPoint(x: mid.x - 30, y: mid.y - 20)))
+        guard model.project != projectBefore else { throw SelfTestArgError.usage("mid-drag edit didn't apply") }
+        view.keyDown(with: esc())
+        view.mouseUp(with: synthEvent(.leftMouseUp, CGPoint(x: mid.x - 30, y: mid.y - 20)))
+        guard model.project == projectBefore, model.undoStepCount == undoBefore, model.selection == selectedBefore, probe.escapes == 0 else {
+            throw SelfTestArgError.usage("Esc mid-drag didn't revert (undo steps \(model.undoStepCount - undoBefore), escapes \(probe.escapes))")
+        }
+        // T-624: the target keeps first responder after a click (arrow nudge), and a held arrow is one gesture.
+        let window = NSWindow(contentRect: probe.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = probe
+        guard let target = view.subviews.first(where: { $0 is SelectionRectView }) as? SelectionRectView else {
+            throw SelfTestArgError.usage("no zoom target view")
+        }
+        let nudgeRect = rect(center: model.project.zooms[0].center, scale: zoom.scale, in: fixtureContent)
+        let click = CGPoint(x: nudgeRect.midX, y: nudgeRect.midY)
+        func windowEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        view.mouseDown(with: windowEvent(.leftMouseDown, click))
+        view.mouseUp(with: windowEvent(.leftMouseUp, click))
+        guard window.firstResponder === target else { throw SelfTestArgError.usage("zoom target lost keyboard focus after a click") }
+        let steps = model.undoStepCount, xBefore = model.project.zooms[0].center.x
+        func arrow(_ type: NSEvent.EventType, repeated: Bool) -> NSEvent {
+            NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [.shift], timestamp: 0, windowNumber: window.windowNumber,
+                             context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: repeated, keyCode: 123)!
+        }
+        target.keyDown(with: arrow(.keyDown, repeated: false))
+        target.keyDown(with: arrow(.keyDown, repeated: true))
+        target.keyDown(with: arrow(.keyDown, repeated: true))
+        target.keyUp(with: arrow(.keyUp, repeated: false))
+        guard model.project.zooms[0].center.x < xBefore, model.undoStepCount == steps + 1 else {
+            throw SelfTestArgError.usage("held arrow: expected 1 undo step, got \(model.undoStepCount - steps)")
+        }
+        print("zoom-target OK: mapping round trip, drag moved center by expected amount (1 undo step), far drag clamped, Esc keeps selection / reverts drag")
     }
 
     /// Renders the un-zoomed frame (same override `PreviewView.draw` applies while a manual zoom is

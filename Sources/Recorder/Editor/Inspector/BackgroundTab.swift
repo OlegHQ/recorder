@@ -8,6 +8,7 @@ import RecorderCore
 /// so it round-trips (AC-INS-1) and a drag is one undo step (AC-INS-2).
 struct BackgroundTab: View {
     let model: EditorModel
+    @State private var colorCommit: DispatchWorkItem?
 
     private var background: Background { model.project.background }
 
@@ -165,9 +166,20 @@ struct BackgroundTab: View {
                 set: { newValue in model.edit("Background kind") { $0.background.kind = newValue } })
     }
 
+    /// `ColorPicker` has no begin/end callbacks, so one drag through the wheel = one gesture that commits once
+    /// the colour has been still for 0.5 s. // ponytail: a different edit inside that window joins the gesture.
+    private func colorEdit(_ name: String, _ change: @escaping (inout Project) -> Void) {
+        if colorCommit == nil { model.beginGesture() }
+        model.update(change)
+        colorCommit?.cancel()
+        let work = DispatchWorkItem { [model] in model.commitGesture(name); colorCommit = nil }
+        colorCommit = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
     private var colorBinding: Binding<Color> {
         Binding(get: { Color(nsColor: NSColor(hex: background.color)) },
-                set: { newValue in model.edit("Background color") { $0.background.color = NSColor(newValue).hexString } })
+                set: { newValue in colorEdit("Background color") { $0.background.color = NSColor(newValue).hexString } })
     }
 
     private func gradientBinding(_ index: Int) -> Binding<Color> {
@@ -177,7 +189,7 @@ struct BackgroundTab: View {
                 return Color(nsColor: NSColor(hex: hex))
             },
             set: { newValue in
-                model.edit("Background gradient") { project in
+                colorEdit("Background gradient") { project in
                     var stops = project.background.gradient
                     while stops.count <= index { stops.append("#FFFFFF") }
                     stops[index] = NSColor(newValue).hexString

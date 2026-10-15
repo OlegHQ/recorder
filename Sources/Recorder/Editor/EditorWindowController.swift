@@ -635,10 +635,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         guard !isRoutingKey else { return super.keyDown(with: event) }
         isRoutingKey = true
         defer { isRoutingKey = false }
-        let transportKeys: Set<UInt16> = [49, 123, 124, 115, 119, 38, 40, 37]
+        let transportKeys: Set<UInt16> = [49, 123, 124, 125, 126, 115, 119, 38, 40, 37]
         if transportKeys.contains(event.keyCode), window?.firstResponder !== previewView {
             previewView.keyDown(with: event)
-        } else if window?.firstResponder !== coreTimelineView {
+        } else if event.keyCode != 53, window?.firstResponder !== coreTimelineView { // Esc never selects/deselects via the timeline
             coreTimelineView.keyDown(with: event)
         } else {
             super.keyDown(with: event)

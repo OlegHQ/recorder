@@ -256,7 +256,7 @@ final class SelectionRectView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        isDragging = true
+        endKeyboardEditing()
         originalRect = rect
         let p = convert(event.locationInWindow, from: nil)
         if allowsResize, let h = hitHandle(p) {
@@ -273,6 +273,7 @@ final class SelectionRectView: NSView {
             dragMode = nil
         }
         dragAspect = dragStart.height > 0 ? dragStart.width / dragStart.height : 1
+        isDragging = dragMode != nil   // a click that grabs nothing (outside the rect, no creation) is not a drag
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -329,8 +330,8 @@ final class SelectionRectView: NSView {
             return
         }
         guard !isDragging else { return }
-        onKeyboardEditingChanged?(true)
-        defer { onKeyboardEditingChanged?(false) }
+        // One gesture from the first press to key-up, so a held key (auto-repeat) is a single undo step.
+        if !keyboardEditing { keyboardEditing = true; onKeyboardEditingChanged?(true) }
         let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
         switch event.keyCode {
         case 123: rect.origin.x -= step // left
@@ -339,6 +340,22 @@ final class SelectionRectView: NSView {
         case 126: rect.origin.y += step // up
         default: super.keyDown(with: event)
         }
+    }
+
+    private var keyboardEditing = false
+    private func endKeyboardEditing() {
+        guard keyboardEditing else { return }
+        keyboardEditing = false
+        onKeyboardEditingChanged?(false)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if (123...126).contains(event.keyCode) { endKeyboardEditing() } else { super.keyUp(with: event) }
+    }
+
+    override func resignFirstResponder() -> Bool {
+        endKeyboardEditing()
+        return super.resignFirstResponder()
     }
 
     // MARK: - Cursor

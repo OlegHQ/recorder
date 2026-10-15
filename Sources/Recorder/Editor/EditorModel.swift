@@ -48,6 +48,18 @@ import RecorderCore
         return id
     }
 
+    /// SPEC §7.3 ↑/↓: the nearest edit point (clip boundary or block edge, output time) before/after `t`.
+    func editPoint(from t: Double, forward: Bool) -> Double? {
+        var points: [Double] = [0]
+        var end = 0.0
+        for clip in project.clips { end += clip.outputDuration; points.append(end) }
+        let edges = project.zooms.map { ($0.start, $0.end) } + project.layouts.map { ($0.start, $0.end) }
+            + project.masks.map { ($0.start, $0.end) } + project.keystrokeClips.map { ($0.start, $0.end) }
+            + project.cameraClips.map { ($0.start, $0.end) } + project.texts.map { ($0.start, $0.end) }
+        for (a, b) in edges { points += [a, b].compactMap { timeMap.outputTime(atSource: $0) } }
+        return forward ? points.filter { $0 > t + 1e-4 }.min() : points.filter { $0 < t - 1e-4 }.max()
+    }
+
     /// Find a retained point inside an effect interval, accounting for cuts and clip speed.
     func previewTime(start: Double, end: Double) -> Double? {
         for clip in project.clips {
@@ -188,7 +200,7 @@ import RecorderCore
         redoNames.append(name)
         let before = project
         project = previous
-        selectedClips = []; selection = []
+        keepExistingSelection()
         rebuildPathsIfNeeded(from: before)
         scheduleAutosave()
     }
@@ -199,9 +211,19 @@ import RecorderCore
         undoNames.append(name)
         let before = project
         project = next
-        selectedClips = []; selection = []
+        keepExistingSelection()
         rebuildPathsIfNeeded(from: before)
         scheduleAutosave()
+    }
+
+    /// SPEC §7.2: selection survives undo/redo when the ids still exist. An open gesture can't outlive a
+    /// snapshot swap. // ponytail: clips have no ids, so selected clip *indices* are kept if still in range.
+    private func keepExistingSelection() {
+        gestureSnapshot = nil
+        let ids = Set(project.zooms.map(\.id) + project.layouts.map(\.id) + project.masks.map(\.id)
+                      + project.keystrokeClips.map(\.id) + project.cameraClips.map(\.id))
+        selection = selection.filter { ids.contains($0.uuidString) }
+        selectedClips = selectedClips.filter { project.clips.indices.contains($0) }
     }
 
     func saveNow() {

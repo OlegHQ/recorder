@@ -569,6 +569,9 @@ extension EditorWorkspaceGallery {
             isARepeat: false, keyCode: 124)!
         let originalCenter = model.project.zooms[0].center
         target.keyDown(with: right)
+        target.keyUp(with: NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "",
+            isARepeat: false, keyCode: 124)!)
         guard model.project.zooms[0].center.x > originalCenter.x,
               model.project.zooms[0].center.y == originalCenter.y, model.undoStepCount == 1
         else { throw Failure.unexpectedEdit }
