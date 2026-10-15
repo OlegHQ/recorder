@@ -158,16 +158,8 @@ final class EventRecorder {
         case .scrollWheel:
             let p = normalized(event.location)
             record(InputEvent(t: t, k: .scroll, x: p.x, y: p.y))
-        case .keyDown:
-            recordKey(t: t, event: event)
-        case .flagsChanged:
-            let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
-            let flags: [Int: CGEventFlags] = [54: .maskCommand, 55: .maskCommand, 56: .maskShift, 60: .maskShift,
-                58: .maskAlternate, 61: .maskAlternate, 59: .maskControl, 62: .maskControl, 57: .maskAlphaShift, 63: .maskSecondaryFn]
-            // Modifier-only press (not release): a `.key` event, never `.typing`.
-            if let flag = flags[code], event.flags.contains(flag) {
-                record(InputEvent(t: t, k: .key, keyCode: code, mods: UInt(event.flags.rawValue)))
-            }
+        case .keyDown, .flagsChanged:
+            EventRecorder.keyEvents(type: type, event: event, t: t).forEach(record)
         default:
             break
         }
@@ -181,21 +173,28 @@ final class EventRecorder {
         }
     }
 
-    private func recordKey(t: Double, event: CGEvent) {
-        guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { return }
-        let flags = event.flags
+    /// Key events for one tapped `keyDown`/`flagsChanged` (pure, so `--selftest key-capture` can drive it without TCC).
+    static func keyEvents(type: CGEventType, event: CGEvent, t: Double) -> [InputEvent] {
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        let flags = event.flags
+        if type == .flagsChanged {
+            let modifierFlags: [Int: CGEventFlags] = [54: .maskCommand, 55: .maskCommand, 56: .maskShift, 60: .maskShift,
+                58: .maskAlternate, 61: .maskAlternate, 59: .maskControl, 62: .maskControl, 57: .maskAlphaShift, 63: .maskSecondaryFn]
+            // Modifier-only press (not release): a `.key` event, never `.typing`.
+            guard let flag = modifierFlags[keyCode], flags.contains(flag) else { return [] }
+            return [InputEvent(t: t, k: .key, keyCode: keyCode, mods: UInt(flags.rawValue))]
+        }
+        guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { return [] }
         // The typed character in the current layout (nil for control/function keys).
         var buf = [UniChar](repeating: 0, count: 4)
         var n = 0
         event.keyboardGetUnicodeString(maxStringLength: 4, actualStringLength: &n, unicodeString: &buf)
         let str = String(utf16CodeUnits: buf, count: n)
         let ch = str.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f && !(0xF700...0xF8FF).contains($0.value) }) && n > 0 ? str : nil
-        record(InputEvent(t: t, k: .key, keyCode: keyCode, mods: UInt(flags.rawValue), ch: ch))
+        var out = [InputEvent(t: t, k: .key, keyCode: keyCode, mods: UInt(flags.rawValue), ch: ch)]
         let hasModifier = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
-        if !hasModifier && !EventRecorder.nonPrintingKeyCodes.contains(keyCode) {
-            record(InputEvent(t: t, k: .typing))
-        }
+        if !hasModifier && !EventRecorder.nonPrintingKeyCodes.contains(keyCode) { out.append(InputEvent(t: t, k: .typing)) }
+        return out
     }
 
     // Virtual keycodes (Carbon `HIToolbox/Events.h`) for arrows, return, esc, tab, delete, F-keys.

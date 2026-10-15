@@ -2537,6 +2537,30 @@ enum SelfTest {
                 }
             }
         },
+        // T-622: the tap's key decisions on synthetic CGEvents (no TCC needed; the live tap is `events`).
+        "key-capture": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            // Hardware events carry the layout's character; synthetic ones need it set explicitly.
+            let chars: [CGKeyCode: String] = [0: "a", 49: " ", 8: "c", 123: "\u{F702}"]
+            func run(_ code: CGKeyCode, _ flags: CGEventFlags = [], type: CGEventType = .keyDown, repeat r: Bool = false) -> [InputEvent] {
+                let e = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!
+                e.flags = flags; e.type = type
+                if let c = chars[code] { let u = Array(c.utf16); e.keyboardSetUnicodeString(stringLength: u.count, unicodeString: u) }
+                if r { e.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
+                return EventRecorder.keyEvents(type: type, event: e, t: 1)
+            }
+            func kinds(_ e: [InputEvent]) -> [String] { e.map { "\($0.k)" } }
+            let letter = run(0), space = run(49), cmdC = run(8, .maskCommand), arrow = run(123), shiftA = run(0, .maskShift)
+            guard kinds(letter) == ["key", "typing"], letter[0].ch == "a" else { throw Fail(description: "letter: \(letter)") }
+            guard kinds(shiftA) == ["key", "typing"] else { throw Fail(description: "shift+letter: \(shiftA)") }
+            guard kinds(space) == ["key", "typing"], space[0].ch == " " else { throw Fail(description: "space: \(space)") }
+            guard kinds(cmdC) == ["key"] else { throw Fail(description: "cmd+c: \(cmdC)") }
+            guard kinds(arrow) == ["key"], arrow[0].ch == nil else { throw Fail(description: "arrow: \(arrow)") }
+            guard run(0, repeat: true).isEmpty else { throw Fail(description: "auto-repeat recorded") }
+            let shiftDown = run(56, .maskShift, type: .flagsChanged), shiftUp = run(56, [], type: .flagsChanged)
+            guard kinds(shiftDown) == ["key"], shiftUp.isEmpty else { throw Fail(description: "modifier-only: \(shiftDown) / \(shiftUp)") }
+            print("key-capture letter=\(letter[0].ch ?? "nil") space/cmd+c/arrow/repeat/modifier OK")
+        },
         "pickers": { @MainActor _ in
             // T-107/T-108 bug fix regression coverage: `SelectionRectView`'s create/resize drag math
             // (AC-AREA-1/2) and `SourcePickerOverlay`'s window hit-test ordering (AC-WIN-1), both driven
