@@ -75,21 +75,7 @@ struct PositionGrid: View {
             VStack(spacing: 0) {
                 ForEach(0..<3) { row in
                     HStack(spacing: 0) {
-                        ForEach(0..<3) { column in
-                            let point = NormPoint(x: Double(column) / 2, y: Double(row) / 2)
-                            let selected = position == point
-                            Button { onSelect(point) } label: {
-                                ZStack {
-                                    Rectangle().fill(selected ? Theme.accentColor : .clear)
-                                    Circle().fill(selected ? Theme.bgWindowColor : Theme.textSecondaryColor)
-                                        .frame(width: selected ? 6 : 3, height: selected ? 6 : 3)
-                                }.frame(width: 32, height: 26).contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(names[row * 3 + column])
-                            .accessibilityAddTraits(selected ? .isSelected : [])
-                            .help(names[row * 3 + column])
-                        }
+                        ForEach(0..<3) { column in cell(row: row, column: column) }
                     }
                 }
             }
@@ -98,6 +84,23 @@ struct PositionGrid: View {
             .overlay(Rectangle().strokeBorder(Theme.strokeStrongColor))
             .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: position)
         }.padding(.vertical, 8)
+    }
+
+    private func cell(row: Int, column: Int) -> some View {
+        let point = NormPoint(x: Double(column) / 2, y: Double(row) / 2)
+        let selected: Bool = position == point
+        let name: String = names[row * 3 + column]
+        return Button { onSelect(point) } label: {
+            ZStack {
+                Rectangle().fill(selected ? Theme.accentColor : .clear)
+                Circle().fill(selected ? Theme.bgWindowColor : Theme.textSecondaryColor)
+                    .frame(width: selected ? 6 : 3, height: selected ? 6 : 3)
+            }.frame(width: 32, height: 26).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(name)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help(name)
     }
 }
 
