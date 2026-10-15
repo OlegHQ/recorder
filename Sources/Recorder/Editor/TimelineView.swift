@@ -1780,6 +1780,7 @@ final class TimelineView: NSView {
         }
         overviewDrag = nil
         dragOrigin = nil
+        dragSelection = []
         needsDisplay = true
         switch dragKind {
         case .createBlock(_, let lane, _):
@@ -1843,6 +1844,7 @@ final class TimelineView: NSView {
         snapGuideX = nil
         onHoverTime?(nil)
         dragKind = nil
+        dragSelection = []
         needsDisplay = true
     }
 

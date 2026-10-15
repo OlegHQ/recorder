@@ -128,6 +128,12 @@ final class PreviewView: MTKView {
                 self.zoomTargetGestureActive = true
             } else { self.zoomTargetDragEnded() }
         }
+        zoomTargetView.onCancelDrag = { [weak self] in
+            guard let self, self.zoomTargetGestureActive else { return }
+            self.zoomTargetGestureActive = false
+            self.model.cancelGesture()
+            self.updateZoomTargetOverlay()
+        }
         addSubview(zoomTargetView)
 
         loadingLabel.font = Theme.headingFont(24)
@@ -317,8 +323,11 @@ final class PreviewView: MTKView {
     override func keyDown(with event: NSEvent) {
         let shift = event.modifierFlags.contains(.shift)
         switch event.keyCode {
-        case 53:
-            if cameraDragActive { cancelOperation(nil) } else { super.keyDown(with: event) }
+        case 53: // Esc (SPEC "Escape"): cancel the open gesture, else keep the selection; never reach the timeline
+            if cameraDragActive { cancelOperation(nil) }
+            else if zoomTargetGestureActive { zoomTargetView.cancelOperation(nil) }
+            else if !zoomTargetView.isHidden || maskOverlayView?.isHidden == false { return }
+            else { super.keyDown(with: event) }
         case 49: togglePlayPause()                              // Space
         case 123: stepFrame(shift ? -1.0 : -1.0 / 60)            // ←
         case 124: stepFrame(shift ? 1.0 : 1.0 / 60)              // →
