@@ -70,7 +70,7 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 | P1 voice | T-625…T-626 | 2/2 |
 | P2 text | T-628…T-630 | 3/3 |
 | P3 visuals | T-631…T-632 | 2/2 |
-| P4 windows | T-633…T-635 | 2/3 |
+| P4 windows | T-633…T-635 | 3/3 |
 
 - [x] **T-619 Zoom spring steps in output time**
   - Do: `CameraPath.init` gains `clips: [Clip]`; each step uses `dt / k`, `k` = `timeScale` of the clip covering source t (1 outside clips). `EditorModel.buildPaths` passes `project.clips`; FrameState's motion-blur previous sample uses `sourceTime - k/60`. Rebuild paths when clip speeds change.
@@ -111,7 +111,7 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 - [x] **T-632 Highlight helpers**
   - Do: ZoomPanel "Highlight this zoom"; `SelectionRectView` snap guides (frame edges/centres + other rects, 6 px, ⌘ bypass); mask context menu (kind, Duplicate).
   - Verify: `mask-overlay`, `zoom-target`, `highlight-manipulation` extended with a snap case.
-- [~] **T-633 Multi-window capture**
+- [x] **T-633 Multi-window capture**
   - Do: `CaptureTarget.windows([SCWindow])`; picker ⌘-click multi-select (≤ 4); one `SCStream` per window (`screen.mov` = window 0, `window-N.mov`), shared t0; EventRecorder polls every window frame at 10 Hz and stores `windowFrames` samples + global mouse points in events.
   - Verify: `pickers`; `record-perf` with 3 windows via LaunchServices; `--selftest record-windows 3` produces N decodable files on one clock.
 - [x] **T-634 Window shots model + lane**
@@ -869,3 +869,5 @@ Merge · 2026-10-15 · all five lanes merged into dev: `make test` 86/86, `make 
 Baseline · 2026-10-15 · pre-roadmap commit acf7f73 (debug build in a temp worktree) fails `workspace-replay` (timeout, key window nil) and `crop` ("Escape did not discard the crop sheet") identically → pre-existing, not caused by T-619…T-635; both need the app to be key/frontmost, which this agent session can't guarantee. Open for a HUMAN run with the app frontmost.
 T-622 · 2026-10-15 · added `--selftest key-capture`: tap decisions extracted to pure `EventRecorder.keyEvents`, driven with synthetic CGEvents (letter → key+typing with ch, Space ch " ", ⌘C key only, arrow ch nil, auto-repeat dropped, Shift press → key, release → nothing) OK; `make test` 86/86. Still HUMAN: live `events 3` once Screen Recording/Accessibility are re-granted (screen was locked during this run).
 Recheck · 2026-10-15 · screen unlocked, app frontmost via LaunchServices: `crop` OK, `workspace-replay` OK on merged dev — earlier failures were the locked session, not code. `events 3` still -3801 (TCC deny entry for Recorder Dev build; needs the user's toggle).
+T-633 · 2026-10-15 · live (Screen Recording granted, LaunchServices): first `record-windows 3` HUNG — merge bug: lane W's window-frame timer called `outputTime` (lane K made it take the NSLock) while holding the same non-recursive lock → deadlock in `EventRecorder.stop()` (sampled). Fixed by reading the time before locking. Then `record-windows 3 10` OK: 3 animated windows (corner square moving at 60 Hz), 3 files at their own sizes, one clock (durations within 0.75 s), centre colours correct, windowFrames for every window, avg CPU 1.1 % of one core (< 25 % AC-REC-1 bar, now asserted in the check); `record-perf 5` display regression OK (0.6 %, hvc1); `events 3` OK.
+

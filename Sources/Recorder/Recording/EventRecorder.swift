@@ -230,11 +230,12 @@ final class EventRecorder {
                 guard let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
                       let boundsDict = info.first?[kCGWindowBounds as String] as? [String: Any],
                       let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
+                let t = max(0, self.outputTime(EventRecorder.hostSeconds())) // before `lock`: outputTime takes it (NSLock isn't recursive)
                 self.lock.lock()
                 if ids.count == 1 { self.currentTargetFrame = rect }
                 else if rect != last[i] {
                     last[i] = rect
-                    self.windowFrames.append(WindowFrame(t: max(0, self.outputTime(EventRecorder.hostSeconds())), i: i,
+                    self.windowFrames.append(WindowFrame(t: t, i: i,
                                                          x: rect.minX, y: rect.minY, w: rect.width, h: rect.height))
                 }
                 self.lock.unlock()

@@ -2324,8 +2324,29 @@ enum SelfTest {
             let cursorsDir = dir.appendingPathComponent("cursors")
             let recorder = EventRecorder(target: .display(display), cursorsDir: cursorsDir)
             recorder.start(t0HostTime: CMClockGetTime(CMClockGetHostTimeClock()))
+            // `events <s> keys` (T-622): post harmless keys through the live tap — Shift alone and F13 (nothing types).
+            let postKeys = args.dropFirst().first == "keys"
+            if postKeys {
+                guard AXIsProcessTrusted() else {
+                    throw NSError(domain: "SelfTest.events", code: 4, userInfo: [NSLocalizedDescriptionKey: "Accessibility not granted"])
+                }
+                try await Task.sleep(nanoseconds: 300_000_000)
+                for (code, down, flags) in [(CGKeyCode(56), true, CGEventFlags.maskShift), (56, false, []), (105, true, []), (105, false, [])] {
+                    let e = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)!
+                    e.flags = flags
+                    if code == 56 { e.type = .flagsChanged }
+                    e.post(tap: .cghidEventTap)
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
             try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             let log = recorder.stop()
+            if postKeys {
+                let keys = log.events.filter { $0.k == .key }.compactMap(\.keyCode)
+                guard keys.contains(56), keys.contains(105), !log.events.contains(where: { $0.k == .typing }) else {
+                    throw NSError(domain: "SelfTest.events", code: 5, userInfo: [NSLocalizedDescriptionKey: "posted keys not captured as expected: \(keys)"])
+                }
+            }
             var counts: [String: Int] = [:]
             for e in log.events { counts[e.k.rawValue, default: 0] += 1 }
             print("SELFTEST events counts=\(counts)")
@@ -2418,6 +2439,10 @@ enum SelfTest {
                     w.isReleasedWhenClosed = false
                     w.backgroundColor = colors[i].0
                     w.level = .floating
+                    // A small corner square moves every frame (below) so each stream keeps delivering frames, like a real app.
+                    let dot = NSView(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
+                    dot.wantsLayer = true; dot.layer?.backgroundColor = NSColor.white.cgColor
+                    w.contentView?.addSubview(dot)
                     w.orderFrontRegardless()
                     return w.windowNumber
                 }
@@ -2435,8 +2460,22 @@ enum SelfTest {
             defer { settings.micID = mic; settings.systemAudio = audio }
             let session = try await CaptureSession(target: .windows(windows), settings: settings, packageURL: packageURL)
             try await session.start()
+            let ticker = await MainActor.run {
+                Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { _ in
+                    MainActor.assumeIsolated {
+                        for w in NSApp.windows where numbers.contains(w.windowNumber) {
+                            if let dot = w.contentView?.subviews.first { dot.frame.origin.x = dot.frame.origin.x >= 80 ? 0 : dot.frame.origin.x + 4 }
+                        }
+                    }
+                }
+            }
+            let startCPU = ProcStats.snapshot().cpuSeconds, started = Date()
             try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            let avgCPU = (ProcStats.snapshot().cpuSeconds - startCPU) / Date().timeIntervalSince(started) * 100
+            await MainActor.run { ticker.invalidate() }
             let source = try await session.finish()
+            print("record-windows: \(count) animated windows, avg CPU \(String(format: "%.1f", avgCPU))% of one core (AC-REC-1 bar: < 25%)")
+            guard avgCPU < 25 else { throw Fail(description: "avg CPU \(avgCPU)% >= 25% with \(count) windows") }
             guard source.windowSizes.count == count else { throw Fail(description: "windowSizes \(source.windowSizes.count) != \(count)") }
             for i in 0..<count {
                 let name = i == 0 ? "screen.mov" : "window-\(i).mov"

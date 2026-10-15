@@ -298,7 +298,7 @@ enum PerfSelfTest {
 
 /// This process's cumulative CPU time (user+system, seconds) and current resident set size (bytes),
 /// via `proc_pid_rusage`/`RUSAGE_INFO_V2` (Darwin, `<sys/resource.h>`) — no XCTest/Instruments needed.
-private enum ProcStats {
+enum ProcStats {
     static func snapshot() -> (cpuSeconds: Double, rssBytes: UInt64) {
         var info = rusage_info_v2()
         let result = withUnsafeMutablePointer(to: &info) { ptr -> Int32 in
