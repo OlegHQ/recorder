@@ -523,7 +523,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     /// T-410 wire: regenerates `project.zooms` from the recording's click events.
     @objc func regenerateAutoZooms(_ sender: Any?) {
-        let zooms = generateAutoZooms(clicks: model.events.clicks(), duration: model.project.source.duration)
+        let zooms = generateAutoZooms(clicks: remapWindowEvents(model.events, project: model.project).events.clicks(), duration: model.project.source.duration)
         model.edit("Regenerate Auto Zooms") { $0.zooms = zooms }
     }
 
