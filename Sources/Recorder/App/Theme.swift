@@ -30,6 +30,7 @@ enum Theme {
     static let zoom = adaptive("#D7EAF0")
     static let layout = adaptive("#DCE8D7")
     static let mask = adaptive("#E5DCEC")
+    static let text = adaptive("#EFDCCF")
     static let warning = adaptive("#D8C86A", light: "#75620B")
     static let danger = adaptive("#E38276", light: "#A13027")
 
@@ -64,6 +65,7 @@ enum Theme {
     static var zoomColor: Color { Color(nsColor: zoom) }
     static var layoutColor: Color { Color(nsColor: layout) }
     static var maskColor: Color { Color(nsColor: mask) }
+    static var textColor: Color { Color(nsColor: text) }
     static var warningColor: Color { Color(nsColor: warning) }
     static var dangerColor: Color { Color(nsColor: danger) }
 

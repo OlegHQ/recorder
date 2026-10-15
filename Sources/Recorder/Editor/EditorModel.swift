@@ -39,6 +39,15 @@ import RecorderCore
         return id
     }
 
+    /// Adds a Title text block (Text lane, `T`, inspector footer) and selects it; one undo step.
+    @discardableResult
+    func addText(atSource time: Double, length: Double = 3) -> UUID? {
+        var id: UUID?
+        edit("Add Text") { id = $0.addText(atSource: time, length: length) }
+        if let id { isPlaying = false; selectedClips = []; selection = [id]; inspectorShowsProject = false }
+        return id
+    }
+
     /// Find a retained point inside an effect interval, accounting for cuts and clip speed.
     func previewTime(start: Double, end: Double) -> Double? {
         for clip in project.clips {

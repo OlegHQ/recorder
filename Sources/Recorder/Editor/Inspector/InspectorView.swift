@@ -20,6 +20,7 @@ struct InspectorView: View {
         case zoom(UUID)
         case layout(UUID)
         case mask(UUID)
+        case text(UUID)
     }
 
     private var selectionCount: Int { model.selectedClips.count + model.selection.count }
@@ -34,6 +35,7 @@ struct InspectorView: View {
             if model.project.zooms.contains(where: { $0.id == id.uuidString }) { return .zoom(id) }
             if model.project.layouts.contains(where: { $0.id == id.uuidString }) { return .layout(id) }
             if model.project.masks.contains(where: { $0.id == id.uuidString }) { return .mask(id) }
+            if model.project.texts.contains(where: { $0.id == id.uuidString }) { return .text(id) }
         }
         return nil
     }
@@ -47,6 +49,7 @@ struct InspectorView: View {
         case .zoom(let id): return "zoom-\(id)"
         case .layout(let id): return "layout-\(id)"
         case .mask(let id): return "mask-\(id)"
+        case .text(let id): return "text-\(id)"
         case nil: return "tab-\(tab.rawValue)"
         }
     }
@@ -131,6 +134,11 @@ struct InspectorView: View {
                 ZoomTimelineActions(model: model)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(12)
             }
+            if selection == nil && tab == .audio {
+                Divider()
+                AddTextButton(model: model)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+            }
             if selection == nil && tab == .keys {
                 Divider()
                 KeysTimelineActions(model: model)
@@ -193,6 +201,7 @@ struct InspectorView: View {
         case .zoom(let id): ZoomPanel(model: model, zoomID: id)
         case .layout(let id): LayoutPanel(model: model, layoutID: id)
         case .mask(let id): MaskPanel(model: model, maskID: id)
+        case .text(let id): TextPanel(model: model, textID: id)
         case nil:
             switch tab {
             case .background: BackgroundTab(model: model)
