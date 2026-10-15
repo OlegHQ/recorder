@@ -65,10 +65,23 @@ struct BackgroundTab: View {
                     }
                     .font(Font(Theme.bodyFont))
                     .foregroundStyle(Theme.textSecondaryColor)
+                    LabeledSlider(title: "Angle", value: fieldBinding(\.background.gradientAngle),
+                                  range: 0...360, defaultValue: 45, format: { "\(Int($0.rounded()))°" },
+                                  onEditingChanged: gesture("Gradient angle"))
+                    presetRow(Self.gradientPresets) { stops in
+                        model.edit("Gradient preset") { $0.background.gradient = stops }
+                    } selected: { background.gradient == $0 } fill: {
+                        LinearGradient(colors: $0.map { Color(nsColor: NSColor(hex: $0)) }, startPoint: .topLeading, endPoint: .bottomTrailing)
+                    }
                 case .color:
                     ColorPicker("Color", selection: colorBinding)
                         .font(Font(Theme.bodyFont))
                         .foregroundStyle(Theme.textSecondaryColor)
+                    presetRow(Self.colorPresets.map { [$0] }) { hexes in
+                        model.edit("Color preset") { $0.background.color = hexes[0] }
+                    } selected: { background.color.caseInsensitiveCompare($0[0]) == .orderedSame } fill: {
+                        LinearGradient(colors: [Color(nsColor: NSColor(hex: $0[0]))], startPoint: .top, endPoint: .bottom)
+                    }
                 case .image:
                     imageChooser
                 }
@@ -82,6 +95,24 @@ struct BackgroundTab: View {
                 Text("Edge to edge. Enable background and frame to add padding, corners, and shadow.")
                     .font(Font(Theme.captionFont))
                     .foregroundStyle(Theme.textSecondaryColor)
+            }
+        }
+    }
+
+    // Cool slate / blue / frost.
+    static let gradientPresets: [[String]] = [
+        ["#1B2230", "#2F3E57"], ["#0F2A4A", "#2A5C9A"], ["#2A5C9A", "#8FB8E8"], ["#2B3340", "#6B7C93"],
+        ["#3A4A63", "#9DB4D3"], ["#8FA6C4", "#DCE6F2"], ["#17304F", "#4F86C6"], ["#6B7C93", "#E4EBF3"],
+    ]
+    static let colorPresets = ["#111827", "#1B2230", "#2F3E57", "#2A5C9A", "#4F86C6", "#8FA6C4", "#BCCFE6", "#E4EBF3"]
+
+    /// One row of 8 preset tiles (colour stops); `apply` is what a click writes, `fill` how the tile looks.
+    private func presetRow(_ items: [[String]], apply: @escaping ([String]) -> Void,
+                           selected: @escaping ([String]) -> Bool, fill: @escaping ([String]) -> some View) -> some View {
+        HStack(spacing: 6) {
+            ForEach(items.indices, id: \.self) { i in
+                Button { apply(items[i]) } label: { fill(items[i]).frame(maxWidth: .infinity).frame(height: 22) }
+                    .buttonStyle(TechSelectableTileStyle(selected: selected(items[i])))
             }
         }
     }
@@ -199,7 +230,7 @@ struct BackgroundTab: View {
 /// `/System/Library/Desktop Pictures/*.heic`, read-only, listed live (SPEC §6.6).
 private struct WallpaperGrid: View {
     let model: EditorModel
-    private let bundled = (1...12).map { String(format: "%02d", $0) }
+    private let bundled = (1...16).map { String(format: "%02d", $0) }
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 6)
 
     var body: some View {

@@ -51,3 +51,22 @@ precondition(process.terminationStatus == 0, "iconutil failed")
 try render("Resources/DMGBackground.svg", pixels: 1320, to: "Resources/DMGBackground.png", points: 660)
 try FileManager.default.createDirectory(atPath: "build", withIntermediateDirectories: true)
 try render("Resources/AppIcon.svg", pixels: 512, to: "build/app-icon.png")
+
+// Bundled wallpapers 13-16 (cool slate / blue / frost): three-stop diagonal gradients, 1280x800 JPEG.
+let wallpapers: [(String, [String], CGFloat)] = [
+    ("13", ["#1B2230", "#2F3E57", "#566A86"], -35), ("14", ["#0F2A4A", "#2A5C9A", "#8FB8E8"], -50),
+    ("15", ["#DCE6F2", "#BCCFE6", "#8FA6C4"], -30), ("16", ["#2B3340", "#6B7C93", "#E4EBF3"], -60),
+]
+func hexColor(_ hex: String) -> NSColor {
+    let v = Int(hex.dropFirst(), radix: 16)!
+    return NSColor(srgbRed: CGFloat(v >> 16 & 255) / 255, green: CGFloat(v >> 8 & 255) / 255, blue: CGFloat(v & 255) / 255, alpha: 1)
+}
+for (name, stops, angle) in wallpapers {
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1280, pixelsHigh: 800, bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+    NSGradient(colors: stops.map(hexColor), atLocations: [0, 0.5, 1], colorSpace: .sRGB)!.draw(in: NSRect(x: 0, y: 0, width: 1280, height: 800), angle: angle)
+    NSGraphicsContext.restoreGraphicsState()
+    try bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.9])!.write(to: URL(fileURLWithPath: "Resources/Wallpapers/\(name).jpg"))
+}

@@ -235,8 +235,7 @@ final class Compositor {
                 u.mode = 2
                 encoder.setFragmentTexture(texture, index: 0)
             } else {
-                // ponytail: `image` needs the project package URL, which `FrameState` doesn't carry
-                // yet. Fall back to a flat fill.
+                // Missing/undecodable image or wallpaper: flat fill.
                 u.mode = 0
                 u.color = colorSIMD(bg.color)
             }
@@ -249,6 +248,7 @@ final class Compositor {
     /// `"12"`) or an absolute path to a system wallpaper the Background tab's grid also offers
     /// (`/System/Library/Desktop Pictures/*.heic`) — load both, instead of only bundled ids.
     private func backgroundTexture(_ bg: Background, outputSize: CGSize) -> MTLTexture? {
+        if bg.kind == .image { return imageTexture(bg, outputSize: outputSize) }
         guard bg.kind == .wallpaper else { return nil }
         let key = "wallpaper-\(bg.wallpaper)-blur\(bg.blur)-\(Int(outputSize.width))x\(Int(outputSize.height))"
         if let cached = backgroundCache[key] { return cached }
@@ -259,6 +259,32 @@ final class Compositor {
             texture = try? textureLoader.newTexture(URL: url, options: [.SRGB: false])
         }
         guard var texture else { return nil }
+        if bg.blur > 0, let blurred = blurred(texture, amount: bg.blur) { texture = blurred }
+        backgroundCache[key] = texture
+        return texture
+    }
+
+    /// `bg.imagePath` (relative to the package) drawn aspect-fill into an output-sized bitmap, then blurred.
+    private func imageTexture(_ bg: Background, outputSize: CGSize) -> MTLTexture? {
+        guard let package, !bg.imagePath.isEmpty else { return nil }
+        let url = package.appendingPathComponent(bg.imagePath)
+        let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
+        let key = "image-\(bg.imagePath)-\(mtime)-blur\(bg.blur)-\(Int(outputSize.width))x\(Int(outputSize.height))"
+        if let cached = backgroundCache[key] { return cached }
+        let w = Int(outputSize.width), h = Int(outputSize.height)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: max(w, h),
+                kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
+        let fill = max(CGFloat(w) / CGFloat(image.width), CGFloat(h) / CGFloat(image.height))
+        let (dw, dh) = (CGFloat(image.width) * fill, CGFloat(image.height) * fill)
+        ctx.draw(image, in: CGRect(x: (CGFloat(w) - dw) / 2, y: (CGFloat(h) - dh) / 2, width: dw, height: dh))
+        guard let filled = ctx.makeImage(), var texture = try? textureLoader.newTexture(cgImage: filled, options: [.SRGB: false]) else { return nil }
         if bg.blur > 0, let blurred = blurred(texture, amount: bg.blur) { texture = blurred }
         backgroundCache[key] = texture
         return texture
