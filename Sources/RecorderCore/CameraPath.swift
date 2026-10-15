@@ -19,10 +19,14 @@ public struct CameraPath: Sendable {
     private let duration: Double
     private let table: [ViewTransform]
 
-    public init(zooms: [Zoom], cursor: CursorPath, spring: Spring, duration: Double, rate: Double = 240) {
+    public init(zooms: [Zoom], cursor: CursorPath, spring: Spring, duration: Double, rate: Double = 240, clips: [Clip] = []) {
         self.rate = rate
         self.duration = max(duration, 0)
         let dt = 1 / rate
+        // Springs advance in output time: a source step spans `timeScale` times less wall time (1 outside clips).
+        func timeScale(at t: Double) -> Double {
+            clips.first { !$0.isEmpty && t >= $0.sourceStart && t < $0.sourceEnd }?.timeScale ?? 1
+        }
         let steps = max(1, Int((self.duration * rate).rounded()) + 1)
 
         func activeZoom(at t: Double) -> Zoom? {
@@ -43,6 +47,7 @@ public struct CameraPath: Sendable {
         for i in 0..<steps {
             let t = Double(i) * dt
             let zoom = activeZoom(at: t)
+            let stepDt = dt / timeScale(at: t)
 
             let targetScale = zoom?.scale ?? 1
             let targetCX: Double, targetCY: Double
@@ -65,9 +70,9 @@ public struct CameraPath: Sendable {
                 cx = targetCX; cy = targetCY; scale = targetScale
                 vx = 0; vy = 0; vScale = 0
             } else {
-                spring.step(x: &cx, v: &vx, target: targetCX, dt: dt)
-                spring.step(x: &cy, v: &vy, target: targetCY, dt: dt)
-                spring.step(x: &scale, v: &vScale, target: targetScale, dt: dt)
+                spring.step(x: &cx, v: &vx, target: targetCX, dt: stepDt)
+                spring.step(x: &cy, v: &vy, target: targetCY, dt: stepDt)
+                spring.step(x: &scale, v: &vScale, target: targetScale, dt: stepDt)
             }
 
             // Clamp the viewport [c - 0.5/scale, c + 0.5/scale] inside 0...1 (AC-ZM-2).

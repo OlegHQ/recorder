@@ -51,14 +51,14 @@ struct FrameState {
 ///
 /// `view`/`prevView`/`cursor` come from `model`'s cached `CameraPath`/`CursorPath` (rebuilt on edit,
 /// not here — T-413) sampled at `outputTime`'s SOURCE time via `TimeMap`, per SPEC §6.2's
-/// `FrameState(t_out)` formula: `prevView` samples the camera path `1/60 s` earlier in source time
+/// `FrameState(t_out)` formula: `prevView` samples the camera path `timeScale/60` source seconds (1/60 s of output) earlier
 /// (for motion blur, T-501), not through `TimeMap` a second time.
 @MainActor
 func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.Texture?, camera: FrameState.Texture?, size: CGSize) -> FrameState {
     let sourceTime = model.timeMap.sourceTime(atOutput: outputTime)
     let view = model.cameraPath.sample(atSource: sourceTime)
-    let prevView = model.cameraPath.sample(atSource: sourceTime - 1.0 / 60)
     let clip = model.project.clipIndex(atOutput: outputTime).map { model.project.clips[$0] }
+    let prevView = model.cameraPath.sample(atSource: sourceTime - (clip?.timeScale ?? 1) / 60)
     let mediaTime = clip.map { $0.mediaTime(atSource: sourceTime) } ?? sourceTime
     let cursor = model.cursorPath.sample(atSource: mediaTime)
     let (layoutKind, layoutAmount) = layoutMix(layouts: model.project.layouts, atSource: sourceTime)

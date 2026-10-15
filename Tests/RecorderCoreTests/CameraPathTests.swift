@@ -73,3 +73,20 @@ private func emptyCursor(duration: Double) -> CursorPath {
     #expect(abs(v.cy - 0.5) < 1e-4)
     #expect(abs(v.scale - 1) < 1e-4)
 }
+
+@Test func zoomTransitionSpeedIndependent() {
+    // Same manual zoom at output t=1 on a 1x clip and at output t=0.5 on a 2x clip (source 1...2): equal output offsets must match.
+    func path(_ speed: Double) -> CameraPath {
+        let clip = Clip(sourceStart: 0, sourceEnd: 8, speed: speed)
+        let zoom = Zoom(start: 1, end: 6, scale: 2.5, mode: .manual, center: NormPoint(x: 0.3, y: 0.6), instant: false)
+        return CameraPath(zooms: [zoom], cursor: emptyCursor(duration: 8), spring: .focused, duration: 8, clips: [clip])
+    }
+    let tol = 0.03 // ponytail: the zoom edge lands on a step boundary, so 1x/2x differ by up to one 240 Hz step of peak speed (~0.025); a continuous-time spring would reach 1e-3
+    let p1 = path(1), p2 = path(2)
+    for out in stride(from: 0.0, through: 1.5, by: 0.1) {
+        let a = p1.sample(atSource: 1 + out), b = p2.sample(atSource: 1 + out * 2)
+        #expect(abs(a.scale - b.scale) < tol)
+        #expect(abs(a.cx - b.cx) < tol)
+        #expect(abs(a.cy - b.cy) < tol)
+    }
+}
