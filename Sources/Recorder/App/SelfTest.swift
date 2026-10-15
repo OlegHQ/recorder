@@ -1038,6 +1038,13 @@ enum SelfTest {
                 // mask [20, 26) source, inside the 2× clip1 -> output [17.5, 20.5); mask
                 // row is the 4th (ruler 22 + clip 44 + zoom 32 + layout 28 = 98...126, mask 126...154).
                 expect(CGPoint(x: x(19), y: view.laneMidY(.mask)), .blockBody(mask0ID), "maskBody")
+                // T-632: the mask context menu offers the kind submenu items + Duplicate.
+                let maskEvent = NSEvent.mouseEvent(with: .rightMouseDown, location: CGPoint(x: x(19), y: view.frame.height - view.laneMidY(.mask)), modifierFlags: [],  // flipped view, no window
+                                                   timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                let maskTitles = view.menu(for: maskEvent)?.items.map(\.title) ?? []
+                if !(["Cover", "Blur", "Highlight"].allSatisfy(maskTitles.contains) && maskTitles.contains(where: { $0.hasPrefix("Duplicate") })) {
+                    errors.append("mask context menu: \(maskTitles)")
+                }
                 expect(CGPoint(x: x(3), y: 10), .ruler, "ruler")
                 expect(CGPoint(x: x(25), y: 18), .cutBubble(afterClip: 1), "cutBubble")
                 if case .emptyLane(.zoom, _) = view.hitTest(at: CGPoint(x: x(40), y: view.laneMidY(.zoom))) {} else {

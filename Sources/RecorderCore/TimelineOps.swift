@@ -930,6 +930,21 @@ public extension Project {
         return newID
     }
 
+    /// T-632 "Highlight this zoom": a highlight mask over the zoom's target rect (`1/scale` of the frame
+    /// around `center`, kept inside it) with the zoom's timing. `nil` if `id` isn't a zoom or a mask already sits there.
+    @discardableResult
+    mutating func highlightZoom(_ id: UUID) -> UUID? {
+        guard let zoom = zooms.first(where: { $0.id == id.uuidString }) else { return nil }
+        let size = 1 / max(zoom.scale, 1)
+        let rect = NormRect(x: min(max(zoom.center.x - size / 2, 0), 1 - size), y: min(max(zoom.center.y - size / 2, 0), 1 - size), w: size, h: size)
+        let newID = UUID()
+        guard masks.addBlock(atSource: zoom.start, length: zoom.end - zoom.start, duration: timelineSourceDuration, minLength: Self.minBlockLength, make: { start, end in
+            Mask(id: newID.uuidString, start: start, end: end, kind: .highlight, rect: rect, opacity: 0.6)
+        }) != nil else { return nil }
+        assert(checkInvariants() == nil)
+        return newID
+    }
+
     /// Non-mutating preview of where `addZoom(atSource:length:)` would place a new block — for the
     /// empty zoom-lane "ghost" (SPEC §7.2 "Zoom blocks"). `nil` exactly when `addZoom` would also fail.
     func previewZoomPlacement(atSource s: Double, length: Double = 3) -> (start: Double, end: Double)? {

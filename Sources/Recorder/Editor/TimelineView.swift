@@ -1332,6 +1332,15 @@ final class TimelineView: NSView {
             if lane(ofBlock: id) == .zoom { return zoomContextMenu(id: id) }
             selectBlock(id, addToSelection: false)
             let menu = NSMenu()
+            if let mask = model?.project.masks.first(where: { $0.id == id.uuidString }) {
+                for (kind, title) in [(Mask.Kind.mask, "Cover"), (.blur, "Blur"), (.highlight, "Highlight")] {
+                    let item = actionItem(title, action: #selector(menuSetMaskKind(_:)), represented: MaskKindTarget(id: id, kind: kind))
+                    item.state = mask.kind == kind ? .on : .off
+                    menu.addItem(item)
+                }
+                menu.addItem(actionItem("Duplicate (\u{2318}D)", action: #selector(menuDuplicateBlock(_:)), represented: id))
+                menu.addItem(.separator())
+            }
             menu.addItem(actionItem("Split at Playhead (C)", action: #selector(menuSplitAtPlayhead)))
             menu.addItem(actionItem("Remove", action: #selector(menuRemoveBlock(_:)), represented: id))
             return menu
@@ -2154,6 +2163,20 @@ final class TimelineView: NSView {
         model?.edit("Toggle Instant") { project in
             if let i = project.zooms.firstIndex(where: { $0.id == id.uuidString }) { project.zooms[i].instant.toggle() }
         }
+    }
+
+    private struct MaskKindTarget { let id: UUID; let kind: Mask.Kind }
+
+    @objc private func menuSetMaskKind(_ sender: NSMenuItem) {
+        guard let t = sender.representedObject as? MaskKindTarget else { return }
+        model?.edit("Mask kind") { project in
+            if let i = project.masks.firstIndex(where: { $0.id == t.id.uuidString }) { project.masks[i].kind = t.kind }
+        }
+    }
+
+    @objc private func menuDuplicateBlock(_ sender: NSMenuItem) {
+        guard sender.representedObject is UUID else { return }
+        duplicateSelection() // the menu selected the block first
     }
 
     @objc private func menuRemoveBlock(_ sender: NSMenuItem) {

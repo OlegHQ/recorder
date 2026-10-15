@@ -209,3 +209,16 @@ private struct LCG: RandomNumberGenerator {
     #expect(p.clips.map { $0.sourceEnd } == [5, 8, 12, 15, 20])
     #expect(p.clips.allSatisfy { $0.speed == 1 })
 }
+
+@Test func highlightZoomCopiesTimingAndTarget() {
+    var p = Project(source: Source(duration: 20), clips: [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)])
+    let id = p.addZoom(atSource: 4, length: 3, mode: .manual)!
+    let zi = p.zooms.firstIndex { $0.id == id.uuidString }!
+    p.zooms[zi].scale = 2; p.zooms[zi].center = NormPoint(x: 0.9, y: 0.5)
+    let mid = p.highlightZoom(id)
+    #expect(mid != nil && p.checkInvariants() == nil)
+    let m = p.masks[0]
+    #expect(m.kind == .highlight && m.start == p.zooms[zi].start && m.end == p.zooms[zi].end)
+    #expect(abs(m.rect.w - 0.5) < 1e-9 && abs(m.rect.x - 0.5) < 1e-9 && abs(m.rect.y - 0.25) < 1e-9) // clamped inside the frame
+    #expect(p.highlightZoom(id) == nil) // a mask already covers it
+}

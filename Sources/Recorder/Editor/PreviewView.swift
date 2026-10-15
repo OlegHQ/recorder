@@ -704,6 +704,7 @@ final class PreviewView: MTKView {
         let content = ZoomTargetMapping.contentRect(viewBounds: bounds.size, project: model.project)
         zoomTargetContentRect = content
         zoomTargetView.limit = content
+        zoomTargetView.snapTargets = model.project.masks.map { CropMapping.viewRect(from: $0.rect, imageRect: content) }
         zoomTargetView.aspect = content.height > 0 ? content.width / content.height : nil
         // Don't fight the mouse mid-drag (same guard `CropSheet`/`AreaSelectionOverlay` use for their
         // own field-commit races) — `zoomTargetRectChanged` is already updating `zoom.center` live.
