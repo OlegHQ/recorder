@@ -193,18 +193,11 @@ final class EventRecorder {
         let ch = str.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f && !(0xF700...0xF8FF).contains($0.value) }) && n > 0 ? str : nil
         var out = [InputEvent(t: t, k: .key, keyCode: keyCode, mods: UInt(flags.rawValue), ch: ch)]
         let hasModifier = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
-        if !hasModifier && !EventRecorder.nonPrintingKeyCodes.contains(keyCode) { out.append(InputEvent(t: t, k: .typing)) }
+        if !hasModifier && ch != nil { out.append(InputEvent(t: t, k: .typing)) } // typing = produced a printable character
         return out
     }
 
     // Virtual keycodes (Carbon `HIToolbox/Events.h`) for arrows, return, esc, tab, delete, F-keys.
-    private static let nonPrintingKeyCodes: Set<Int> = [
-        36, 48, 51, 53, 76,                          // return, tab, delete, esc, keypadEnter
-        123, 124, 125, 126,                          // left, right, down, up
-        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, // F1–F10
-        103, 111,                                      // F11, F12
-    ]
-
     // MARK: - Position
 
     /// `event.location` (global, top-left origin) → normalised 0…1 of the captured target rect.

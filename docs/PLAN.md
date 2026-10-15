@@ -66,7 +66,7 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 
 | Scope | Tasks | Done |
 |---|---|---|
-| P0 bugs | T-619…T-624 | 5/6 |
+| P0 bugs | T-619…T-624 | 6/6 |
 | P1 voice | T-625…T-626 | 2/2 |
 | P2 text | T-628…T-630 | 3/3 |
 | P3 visuals | T-631…T-632 | 2/2 |
@@ -81,7 +81,7 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 - [x] **T-621 Selection survives undo/redo**
   - Do: `EditorModel.undo/redo` keep selection ids that still exist (SPEC §7.2); `undo()` clears `gestureSnapshot`.
   - Verify: `menu-actions` extended: select a zoom, edit, ⌘Z → zoom still selected; deleted-block undo/redo leaves no dangling id.
-- [~] **T-622 Capture every key**
+- [x] **T-622 Capture every key**
   - Do: delete `recordAllKeys` setting + Settings row; `EventRecorder` records every keyDown and modifier-only flagsChanged (no `.typing` from flagsChanged), drops events while paused (lock-protected `pausedSoFar`), skips auto-repeat, stores the typed character (`UCKeyTranslate`) in the key event (optional field, Codable default nil).
   - Verify: `make test FILTER=events` (decode old events w/o char); `make app`; `open -n … --selftest events 3` via LaunchServices.
 - [x] **T-623 Key display categories and merged chips**
@@ -870,4 +870,5 @@ Baseline · 2026-10-15 · pre-roadmap commit acf7f73 (debug build in a temp work
 T-622 · 2026-10-15 · added `--selftest key-capture`: tap decisions extracted to pure `EventRecorder.keyEvents`, driven with synthetic CGEvents (letter → key+typing with ch, Space ch " ", ⌘C key only, arrow ch nil, auto-repeat dropped, Shift press → key, release → nothing) OK; `make test` 86/86. Still HUMAN: live `events 3` once Screen Recording/Accessibility are re-granted (screen was locked during this run).
 Recheck · 2026-10-15 · screen unlocked, app frontmost via LaunchServices: `crop` OK, `workspace-replay` OK on merged dev — earlier failures were the locked session, not code. `events 3` still -3801 (TCC deny entry for Recorder Dev build; needs the user's toggle).
 T-633 · 2026-10-15 · live (Screen Recording granted, LaunchServices): first `record-windows 3` HUNG — merge bug: lane W's window-frame timer called `outputTime` (lane K made it take the NSLock) while holding the same non-recursive lock → deadlock in `EventRecorder.stop()` (sampled). Fixed by reading the time before locking. Then `record-windows 3 10` OK: 3 animated windows (corner square moving at 60 Hz), 3 files at their own sizes, one clock (durations within 0.75 s), centre colours correct, windowFrames for every window, avg CPU 1.1 % of one core (< 25 % AC-REC-1 bar, now asserted in the check); `record-perf 5` display regression OK (0.6 %, hvc1); `events 3` OK.
+T-622 · 2026-10-15 · live (Screen Recording + Accessibility granted): new `events 3 keys` posts Shift-alone and F13 through the real tap → captured as `key` 56/105. First run FOUND A BUG: F13 also logged `.typing` (hand-kept non-printing keycode list lacked F13–F20) → root fix: `.typing` only when the key produced a printable character (`ch != nil`); list deleted. Re-run: `events 3 keys` OK (key ×2, no typing), `key-capture` OK, `make test` 86/86, parity M6 maxDelta=0.
 
