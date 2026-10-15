@@ -3169,6 +3169,23 @@ enum SelfTest {
             try JSONEncoder().encode(events).write(to: url.appendingPathComponent("events.json"))
             print("wrote \(url.path)")
         },
+        // T-629: /tmp/TextFixture.recorder — a caption (with word timings), a title and a label, back to back.
+        "make-text-fixture": { _ in
+            let url = URL(fileURLWithPath: "/tmp/TextFixture.recorder")
+            try? FileManager.default.removeItem(at: url)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try await Self.synthesizeGradientMovie(at: url.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 3, frameCount: 9)
+            var project = Project(title: "Text Fixture", source: Source(kind: .display, pixelWidth: 640, pixelHeight: 360, scale: 1, duration: 3.0))
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 3.0, speed: 1)]
+            let words = ["Hello", "there", "big", "world"].enumerated().map { Word(text: $1, start: Double($0) * 0.25, end: Double($0 + 1) * 0.25) }
+            project.texts = [
+                TextBlock(start: 0, end: 1, text: "Hello there big world", words: words, style: .caption, size: 56),
+                TextBlock(start: 1, end: 2, text: "Quarterly review", style: .title, position: NormPoint(x: 0.5, y: 0.3), size: 64),
+                TextBlock(start: 2, end: 3, text: "Step 3 of 5", style: .label, position: NormPoint(x: 0.2, y: 0.15), size: 64),
+            ]
+            try project.save(to: url.appendingPathComponent("project.json"))
+            print("wrote \(url.path)")
+        },
         // T-610: `StateSnapshot.dump(to:pasteboard:)` over a real offscreen editor (one edit + a
         // selected zoom) — everything is injected (a tmp "Snapshots" directory, a private named
         // pasteboard) so this never touches the user's real Logs folder or clipboard.

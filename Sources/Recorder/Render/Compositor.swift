@@ -71,6 +71,7 @@ final class Compositor {
     // T-602: chip label -> its rendered texture (rounded background + Core-Text-drawn label baked
     // in together, straight alpha) — cached per string so a repeated shortcut doesn't re-render.
     private var keyChipTextureCache: [String: MTLTexture] = [:]
+    private var textTextureCache: [String: MTLTexture] = [:]
 
     /// `package` is the project's `.recorder` directory, for `cursors/<id>.png`/`.json` (T-413);
     /// `nil` for the synthetic `render` selftest, which never sets `FrameState.cursor`.
@@ -195,6 +196,9 @@ final class Compositor {
         if let chip = s.keyChip {
             drawKeyChip(chip, keys: overlayKeys(project: s.project, atSource: s.sourceTime), outputSize: s.outputSize, encoder: encoder)
         }
+
+        // Pass 6: Text-lane blocks (captions / titles / labels), on top of everything, canvas space.
+        for (block, word) in s.texts { drawText(block, word: word, outputSize: s.outputSize, encoder: encoder) }
 
         encoder.endEncoding()
     }
@@ -605,25 +609,105 @@ final class Compositor {
         let textSize = text.size()
         let paddingX: CGFloat = 26, paddingY: CGFloat = 15
         let size = CGSize(width: max(1, ceil(textSize.width + paddingX * 2)), height: max(1, ceil(textSize.height + paddingY * 2)))
-        let width = Int(size.width), height = Int(size.height)
-
-        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                   space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            return nil
-        }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-        let bgRect = CGRect(origin: .zero, size: size)
-        NSBezierPath(roundedRect: bgRect, xRadius: size.height / 2, yRadius: size.height / 2).addClip()
-        NSColor.black.withAlphaComponent(0.72).setFill()
-        bgRect.fill()
-        text.draw(at: CGPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2))
-        NSGraphicsContext.restoreGraphicsState()
-
-        guard let cgImage = ctx.makeImage(),
-              let texture = try? textureLoader.newTexture(cgImage: cgImage, options: [.SRGB: false]) else { return nil }
+        guard let texture = bitmapTexture(size: size, draw: {
+            let bgRect = CGRect(origin: .zero, size: size)
+            NSBezierPath(roundedRect: bgRect, xRadius: size.height / 2, yRadius: size.height / 2).addClip()
+            NSColor.black.withAlphaComponent(0.72).setFill()
+            bgRect.fill()
+            text.draw(at: CGPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2))
+        }) else { return nil }
         keyChipTextureCache[label] = texture
         return texture
+    }
+
+    /// Renders `draw` (AppKit drawing into a straight-alpha RGBA bitmap of `size` px) to a texture.
+    private func bitmapTexture(size: CGSize, draw: () -> Void) -> MTLTexture? {
+        guard let ctx = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: 0,
+                                   space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        draw()
+        NSGraphicsContext.restoreGraphicsState()
+        guard let cgImage = ctx.makeImage() else { return nil }
+        return try? textureLoader.newTexture(cgImage: cgImage, options: [.SRGB: false])
+    }
+
+    // MARK: - Pass 6: text (SPEC "Editor roadmap" Text)
+
+    /// Sizes are in px at a 1080 px short edge and scale with the output, so preview and export agree.
+    /// Caption = outlined white text, the spoken word inverted in a white box; Title = Barlow on a black bar;
+    /// Label = mono on a square chip. ponytail: Barlow Semi Condensed ships only in Light, so the Caption
+    /// uses Light at 1.15x size with the outline for weight; bundle the 500 weight to match the SPEC exactly.
+    private func drawText(_ block: TextBlock, word: Int?, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        guard !block.text.isEmpty else { return }
+        let shortEdge = min(outputSize.width, outputSize.height)
+        let px = CGFloat(block.size) * shortEdge / 1080
+        let key = "\(block.style)|\(block.text)|\(word ?? -1)|\(px)|\(Int(outputSize.width))"
+        let texture: MTLTexture
+        if let cached = textTextureCache[key] { texture = cached } else {
+            let maxWidth = outputSize.width * 0.8
+            let text = NSMutableAttributedString(string: block.text)
+            let para = NSMutableParagraphStyle(); para.alignment = .center
+            let all = NSRange(location: 0, length: text.length)
+            var pad = CGSize.zero
+            var hot: NSRange?
+            switch block.style {
+            case .caption:
+                text.addAttributes([.font: Theme.headingFont(px * 1.15), .foregroundColor: NSColor.white, .paragraphStyle: para], range: all)
+                if let word, let words = block.words, words.indices.contains(word) {
+                    var from = block.text.startIndex
+                    for (i, w) in words.enumerated() {
+                        guard let r = block.text.range(of: w.text, range: from..<block.text.endIndex) else { break }
+                        from = r.upperBound
+                        if i == word {
+                            let range = NSRange(r, in: block.text)
+                            text.addAttributes([.foregroundColor: NSColor.black, .backgroundColor: NSColor.white], range: range)
+                            hot = range
+                        }
+                    }
+                }
+            case .title:
+                text.addAttributes([.font: Theme.headingFont(px), .foregroundColor: NSColor.white, .paragraphStyle: para], range: all)
+                pad = CGSize(width: px * 0.6, height: px * 0.3)
+            case .label:
+                text.addAttributes([.font: NSFont.monospacedSystemFont(ofSize: px * 0.5, weight: .regular), .foregroundColor: NSColor.black, .paragraphStyle: para], range: all)
+                pad = CGSize(width: px * 0.3, height: px * 0.2)
+            }
+            let box = text.boundingRect(with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin])
+            let size = CGSize(width: ceil(box.width + pad.width * 2) + 8, height: ceil(box.height + pad.height * 2) + 8)
+            guard let made = bitmapTexture(size: size, draw: {
+                let inner = CGRect(origin: .zero, size: size).insetBy(dx: 4, dy: 4)
+                switch block.style {
+                case .caption: break
+                case .title: NSColor.black.withAlphaComponent(0.85).setFill(); inner.fill()
+                case .label: NSColor.white.setFill(); inner.fill()
+                }
+                let rect = inner.insetBy(dx: pad.width, dy: pad.height)
+                if block.style == .caption { // outline pass first (stroke-only), then the fill on top
+                    let outline = NSMutableAttributedString(attributedString: text)
+                    outline.addAttributes([.strokeColor: NSColor.black, .strokeWidth: 8], range: all)
+                    outline.removeAttribute(.backgroundColor, range: all)
+                    if let hot { outline.addAttributes([.foregroundColor: NSColor.clear, .strokeWidth: 0], range: hot) }
+                    outline.draw(with: rect, options: [.usesLineFragmentOrigin])
+                }
+                text.draw(with: rect, options: [.usesLineFragmentOrigin])
+            }) else { return }
+            if textTextureCache.count > 96 { textTextureCache.removeAll() }
+            textTextureCache[key] = made
+            texture = made
+        }
+        let w = CGFloat(texture.width), h = CGFloat(texture.height)
+        let safeBottom = block.style == .caption && outputSize.height > outputSize.width ? outputSize.height * 0.82 : outputSize.height
+        let cx = min(max(CGFloat(block.position.x) * outputSize.width, w / 2), outputSize.width - w / 2)
+        let cy = min(max(CGFloat(block.position.y) * outputSize.height, h / 2), safeBottom - h / 2)
+        var u = Uniforms()
+        u.rectNDC = ndcRect(CGRect(x: (cx - w / 2).rounded(), y: (cy - h / 2).rounded(), width: w, height: h), in: outputSize)
+        u.uvRect = SIMD4(0, 0, 1, 1)
+        u.mode = 2
+        u.globalAlpha = 1
+        encoder.setFragmentTexture(texture, index: 0)
+        draw(u, encoder: encoder)
+        encoder.setFragmentTexture(dummyTexture, index: 0)
     }
 
     // MARK: - Shared helpers
