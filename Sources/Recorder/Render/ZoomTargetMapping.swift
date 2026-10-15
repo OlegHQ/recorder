@@ -185,6 +185,35 @@ extension ZoomTargetMapping {
         guard model.project == projectBefore, model.undoStepCount == undoBefore, model.selection == selectedBefore, probe.escapes == 0 else {
             throw SelfTestArgError.usage("Esc mid-drag didn't revert (undo steps \(model.undoStepCount - undoBefore), escapes \(probe.escapes))")
         }
+        // T-624: the target keeps first responder after a click (arrow nudge), and a held arrow is one gesture.
+        let window = NSWindow(contentRect: probe.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = probe
+        guard let target = view.subviews.first(where: { $0 is SelectionRectView }) as? SelectionRectView else {
+            throw SelfTestArgError.usage("no zoom target view")
+        }
+        let nudgeRect = rect(center: model.project.zooms[0].center, scale: zoom.scale, in: fixtureContent)
+        let click = CGPoint(x: nudgeRect.midX, y: nudgeRect.midY)
+        func windowEvent(_ type: NSEvent.EventType, _ p: CGPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        view.mouseDown(with: windowEvent(.leftMouseDown, click))
+        view.mouseUp(with: windowEvent(.leftMouseUp, click))
+        guard window.firstResponder === target else { throw SelfTestArgError.usage("zoom target lost keyboard focus after a click") }
+        let steps = model.undoStepCount, xBefore = model.project.zooms[0].center.x
+        func arrow(_ type: NSEvent.EventType, repeated: Bool) -> NSEvent {
+            NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [.shift], timestamp: 0, windowNumber: window.windowNumber,
+                             context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: repeated, keyCode: 123)!
+        }
+        target.keyDown(with: arrow(.keyDown, repeated: false))
+        target.keyDown(with: arrow(.keyDown, repeated: true))
+        target.keyDown(with: arrow(.keyDown, repeated: true))
+        target.keyUp(with: arrow(.keyUp, repeated: false))
+        guard model.project.zooms[0].center.x < xBefore, model.undoStepCount == steps + 1 else {
+            throw SelfTestArgError.usage("held arrow: expected 1 undo step, got \(model.undoStepCount - steps)")
+        }
         print("zoom-target OK: mapping round trip, drag moved center by expected amount (1 undo step), far drag clamped, Esc keeps selection / reverts drag")
     }
 

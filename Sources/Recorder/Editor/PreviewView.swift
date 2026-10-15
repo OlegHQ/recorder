@@ -220,6 +220,9 @@ final class PreviewView: MTKView {
         model.isPlaying ? pause() : setRate(1)
     }
 
+    /// One frame at the project's output rate (the export fps setting).
+    var frameStep: Double { 1 / Double(max(ExportSettings.loadDefault().fps, 1)) }
+
     func stepFrame(_ deltaSeconds: Double) {
         pause()
         seek(toOutput: model.playhead + deltaSeconds)
@@ -329,8 +332,10 @@ final class PreviewView: MTKView {
             else if !zoomTargetView.isHidden || maskOverlayView?.isHidden == false { return }
             else { super.keyDown(with: event) }
         case 49: togglePlayPause()                              // Space
-        case 123: stepFrame(shift ? -1.0 : -1.0 / 60)            // ←
-        case 124: stepFrame(shift ? 1.0 : 1.0 / 60)              // →
+        case 123: stepFrame(shift ? -1.0 : -frameStep)           // ←
+        case 124: stepFrame(shift ? 1.0 : frameStep)             // →
+        case 126, 125:                                           // ↑ ↓: previous / next edit point
+            if let t = model.editPoint(from: model.playhead, forward: event.keyCode == 125) { pause(); seek(toOutput: t) }
         case 115: pause(); seek(toOutput: 0)                     // Home
         case 119: pause(); seek(toOutput: model.timeMap.outputDuration) // End
         case 38: setRate(-1)                                     // J
@@ -794,7 +799,8 @@ final class PreviewView: MTKView {
             return // The rectangle retains first responder for arrow nudges and Escape rollback.
         }
         let p = convert(event.locationInWindow, from: nil)
-        if model.project.source.hasCamera, cameraBubbleRectInBounds().contains(p) {
+        if model.project.source.hasCamera, zoomTargetView.isHidden || !zoomTargetView.rect.contains(p),
+           cameraBubbleRectInBounds().contains(p) {
             pause()
             cameraDragActive = true
             cameraDidDrag = false
@@ -814,7 +820,7 @@ final class PreviewView: MTKView {
             cameraDragActive = false
             guard zoomTargetView.isHidden else {
                 zoomTargetView.mouseDown(with: event)
-                window?.makeFirstResponder(self)   // keep Space/←/→ (SPEC §7.3) on the preview itself
+                // The target keeps first responder (arrow nudge, like masks); Space/J/K/L bubble up to `self`.
                 return
             }
             super.mouseDown(with: event)
@@ -928,9 +934,9 @@ struct TransportBar: View {
         HStack(spacing: 0) {
             HStack(spacing: 2) {
                 transportButton("backward.end.fill", label: "Go to beginning") { preview.seek(toOutput: 0) }
-                transportButton("backward.frame.fill", label: "Previous frame") { preview.stepFrame(-1.0 / 60) }
+                transportButton("backward.frame.fill", label: "Previous frame") { preview.stepFrame(-preview.frameStep) }
                 transportButton(model.isPlaying ? "pause.fill" : "play.fill", label: model.isPlaying ? "Pause" : "Play", primary: true) { preview.togglePlayPause() }
-                transportButton("forward.frame.fill", label: "Next frame") { preview.stepFrame(1.0 / 60) }
+                transportButton("forward.frame.fill", label: "Next frame") { preview.stepFrame(preview.frameStep) }
                 transportButton("forward.end.fill", label: "Go to end") { preview.seek(toOutput: model.timeMap.outputDuration) }
             }
             Spacer(minLength: 16)

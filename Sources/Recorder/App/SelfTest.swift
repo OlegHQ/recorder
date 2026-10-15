@@ -839,8 +839,17 @@ enum SelfTest {
                     timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
                     isARepeat: false, keyCode: 124)!
                 rectangle.keyDown(with: right)
-                guard abs(model.project.masks[0].rect.x - 0.11) < 1e-6,
-                      model.undoStepCount == beforeKeyboard + 1 else { throw Fail(description: "keyboard move did not commit once") }
+                guard abs(model.project.masks[0].rect.x - 0.11) < 1e-6 else { throw Fail(description: "keyboard move missing") }
+                // T-624: a held arrow (auto-repeat) is one gesture, committed at key-up.
+                let repeated = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .shift,
+                    timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
+                    isARepeat: true, keyCode: 124)!
+                rectangle.keyDown(with: repeated)
+                rectangle.keyUp(with: NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: .shift,
+                    timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
+                    isARepeat: false, keyCode: 124)!)
+                guard abs(model.project.masks[0].rect.x - 0.12) < 1e-6,
+                      model.undoStepCount == beforeKeyboard + 1 else { throw Fail(description: "keyboard move + repeat did not commit once") }
                 model.undo()
                 model.selection = [maskID]
             }
@@ -1973,6 +1982,31 @@ enum SelfTest {
                 guard model.project.zooms.isEmpty, model.selection.isEmpty else { throw Fail(description: "T-621: dangling selection after undoing the zoom") }
                 controller.performRedo(nil)
                 controller.performRedo(nil)
+                model.selection = []
+
+                // T-624: ↑/↓ edit points and ⌘D over every selected block (one undo step), on a scratch copy of the zoom list.
+                let zoomsBefore = model.project.zooms
+                var twoIDs: [UUID] = []
+                model.edit("Setup: two zooms") { project in
+                    for start in [20.0, 25.0] { if let id = project.addZoom(atSource: start, length: 1, mode: .manual) { twoIDs.append(id) } }
+                }
+                guard twoIDs.count == 2 else { throw Fail(description: "T-624: setup zooms") }
+                guard model.editPoint(from: 12, forward: true) == 20, model.editPoint(from: 25.5, forward: true) == 26,
+                      model.editPoint(from: 20, forward: false) == 8, model.editPoint(from: 30, forward: true) == nil else {
+                    throw Fail(description: "T-624: editPoint wrong: \(String(describing: model.editPoint(from: 12, forward: true)))")
+                }
+                let dupView = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 250))
+                dupView.model = model
+                model.selection = Set(twoIDs)
+                let stepsBeforeDup = model.undoStepCount
+                dupView.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                    windowNumber: 0, context: nil, characters: "d", charactersIgnoringModifiers: "d", isARepeat: false, keyCode: 2)!)
+                guard model.project.zooms.count == zoomsBefore.count + 4, model.selection.count == 2,
+                      model.undoStepCount == stepsBeforeDup + 1, model.project.checkInvariants() == nil else {
+                    throw Fail(description: "T-624: ⌘D didn't duplicate both selected zooms in one step: \(model.project.zooms.count)")
+                }
+                controller.performUndo(nil); controller.performUndo(nil)
+                guard model.project.zooms == zoomsBefore else { throw Fail(description: "T-624: undo didn't restore zooms") }
                 model.selection = []
 
                 // (3) `validateMenuItem`: Undo/Redo track the stack (and pick up the edit's name),

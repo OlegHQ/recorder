@@ -1939,12 +1939,15 @@ final class TimelineView: NSView {
         addBlock(lane: .zoom, atSource: model.timeMap.sourceTime(atOutput: t))
     }
 
-    /// `⌘D` duplicates the selected zoom/mask right after itself (SPEC §7.3).
+    /// `⌘D` duplicates every selected zoom/mask right after itself (SPEC §7.3).
     private func duplicateSelection() {
-        guard let model, let id = model.selection.first else { return }
-        var newID: UUID?
-        model.edit("Duplicate") { newID = $0.duplicateBlock(id) }
-        if let newID { selectBlock(newID, addToSelection: false) }
+        guard let model, !model.selection.isEmpty else { return }
+        var copies: [UUID] = []
+        model.edit("Duplicate") { project in
+            // Sorted so the result doesn't depend on Set order; each copy lands in the gap after its original.
+            for id in model.selection.sorted(by: { $0.uuidString < $1.uuidString }) { if let copy = project.duplicateBlock(id) { copies.append(copy) } }
+        }
+        if !copies.isEmpty { model.selectedClip = nil; model.selection = Set(copies) }
     }
 
     /// "Double-click = select + move playhead to its start" (SPEC §7.2 "Zoom blocks" — zoom-only).

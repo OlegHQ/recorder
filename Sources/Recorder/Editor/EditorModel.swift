@@ -39,6 +39,18 @@ import RecorderCore
         return id
     }
 
+    /// SPEC §7.3 ↑/↓: the nearest edit point (clip boundary or block edge, output time) before/after `t`.
+    func editPoint(from t: Double, forward: Bool) -> Double? {
+        var points: [Double] = [0]
+        var end = 0.0
+        for clip in project.clips { end += clip.outputDuration; points.append(end) }
+        let edges = project.zooms.map { ($0.start, $0.end) } + project.layouts.map { ($0.start, $0.end) }
+            + project.masks.map { ($0.start, $0.end) } + project.keystrokeClips.map { ($0.start, $0.end) }
+            + project.cameraClips.map { ($0.start, $0.end) }
+        for (a, b) in edges { points += [a, b].compactMap { timeMap.outputTime(atSource: $0) } }
+        return forward ? points.filter { $0 > t + 1e-4 }.min() : points.filter { $0 < t - 1e-4 }.max()
+    }
+
     /// Find a retained point inside an effect interval, accounting for cuts and clip speed.
     func previewTime(start: Double, end: Double) -> Double? {
         for clip in project.clips {
