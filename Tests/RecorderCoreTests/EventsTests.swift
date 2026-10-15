@@ -50,3 +50,11 @@ private func typing(_ t: Double) -> InputEvent { InputEvent(t: t, k: .typing) }
     #expect(typingRanges(events: []).isEmpty)
     #expect(typingRanges(events: [InputEvent(t: 0, k: .move, x: 0, y: 0)]).isEmpty)
 }
+
+@Test func eventsDecodeLegacyKeyWithoutChar() throws {
+    let old = #"{"t":1.5,"k":"key","keyCode":8,"mods":1048576}"#.data(using: .utf8)!
+    let e = try JSONDecoder().decode(InputEvent.self, from: old)
+    #expect(e.ch == nil && e.keyCode == 8)
+    let round = try JSONDecoder().decode(InputEvent.self, from: JSONEncoder().encode(InputEvent(t: 1, k: .key, keyCode: 8, ch: "c")))
+    #expect(round.ch == "c")
+}

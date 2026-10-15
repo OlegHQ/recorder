@@ -52,7 +52,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         self.target = target
         self.settings = settings
         self.packageURL = packageURL
-        self.eventRecorder = EventRecorder(target: target, cursorsDir: packageURL.appendingPathComponent("cursors"), recordAllKeys: settings.recordAllKeys)
+        self.eventRecorder = EventRecorder(target: target, cursorsDir: packageURL.appendingPathComponent("cursors"))
 
         if let micID = settings.micID {
             let allowed = await AVCaptureDevice.requestAccess(for: .audio)
