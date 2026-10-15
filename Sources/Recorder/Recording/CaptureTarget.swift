@@ -6,7 +6,7 @@ import ScreenCaptureKit
 /// What SCStream captures. SPEC §4.8 (normative capture configuration).
 enum CaptureTarget {
     case display(SCDisplay)
-    case window(SCWindow)
+    case windows([SCWindow]) // one stream each; window 0 is `screen.mov` (SPEC "Windows as layers")
     case area(SCDisplay, CGRect) // display points, top-left origin
 }
 
@@ -30,8 +30,8 @@ extension CaptureTarget {
                 }
             }
             return SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: excluded)
-        case .window(let window):
-            return SCContentFilter(desktopIndependentWindow: window)
+        case .windows(let windows):
+            return SCContentFilter(desktopIndependentWindow: windows[0])
         }
     }
 
@@ -42,7 +42,7 @@ extension CaptureTarget {
         config.ignoreShadowsSingleWindow = true // The compositor supplies the window shadow.
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        if case .window = self {
+        if case .windows = self {
             // Keep the native corner alpha available for measurement before HEVC flattens it.
             config.pixelFormat = kCVPixelFormatType_32BGRA
         }
@@ -62,12 +62,18 @@ extension CaptureTarget {
         return config
     }
 
+    /// One single-window target per recorded window (just `self` otherwise).
+    var windowTargets: [CaptureTarget] {
+        if case .windows(let windows) = self { return windows.map { .windows([$0]) } }
+        return [self]
+    }
+
     /// Even-rounded output pixel size (source points × `scale`).
     var pixelSize: CGSize {
         let points: CGSize
         switch self {
         case .display(let display): points = CGSize(width: display.width, height: display.height)
-        case .window(let window): points = window.frame.size
+        case .windows(let windows): points = windows[0].frame.size
         case .area(_, let rect): points = rect.size
         }
         func evenRound(_ v: CGFloat) -> CGFloat { (v * scale / 2).rounded() * 2 }
@@ -79,7 +85,7 @@ extension CaptureTarget {
         switch self {
         case .display(let display), .area(let display, _):
             return CaptureTarget.screen(displayID: display.displayID)?.backingScaleFactor ?? 2
-        case .window:
+        case .windows:
             // ponytail: a window's own display isn't exposed by SCWindow; main-screen scale covers the
             // common single/matched-scale-monitor case. Upgrade path: match by frame.intersects once needed.
             return NSScreen.main?.backingScaleFactor ?? 2
@@ -90,7 +96,7 @@ extension CaptureTarget {
     var frameInScreenPoints: CGRect {
         switch self {
         case .display(let display): return display.frame
-        case .window(let window): return window.frame
+        case .windows(let windows): return windows.dropFirst().reduce(windows[0].frame) { $0.union($1.frame) }
         case .area(_, let rect): return rect
         }
     }
@@ -100,7 +106,8 @@ extension CaptureTarget {
     var targetDescription: String {
         switch self {
         case .display(let display): return "display \(display.displayID) \(Int(display.width))x\(Int(display.height))"
-        case .window(let window):
+        case .windows(let windows):
+            let window = windows[0]
             return "window \"\(window.title ?? "")\" (\(window.owningApplication?.applicationName ?? "unknown app"))"
         case .area(let display, let rect):
             return "area \(Int(rect.width))x\(Int(rect.height)) on display \(display.displayID)"

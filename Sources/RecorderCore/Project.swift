@@ -52,6 +52,12 @@ public struct NormRect: Codable, Equatable, Sendable {
 
 // MARK: - Project sections
 
+public struct PixelSize: Codable, Equatable, Sendable {
+    public var w: Int
+    public var h: Int
+    public init(w: Int, h: Int) { self.w = w; self.h = h }
+}
+
 public struct Source: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable { case display, window, area }
     public var kind: Kind
@@ -62,12 +68,14 @@ public struct Source: Codable, Equatable, Sendable {
     public var hasCamera: Bool
     public var hasMic: Bool
     public var hasSystemAudio: Bool
+    /// Pixel size of every recorded window (`screen.mov`, `window-1.mov`…); empty unless more than one.
+    public var windowSizes: [PixelSize] = []
     public init(kind: Kind = .display, pixelWidth: Int = 0, pixelHeight: Int = 0, scale: Double = 1,
                 duration: Double = 0, hasCamera: Bool = false, hasMic: Bool = false, hasSystemAudio: Bool = false) {
         self.kind = kind; self.pixelWidth = pixelWidth; self.pixelHeight = pixelHeight; self.scale = scale
         self.duration = duration; self.hasCamera = hasCamera; self.hasMic = hasMic; self.hasSystemAudio = hasSystemAudio
     }
-    enum CodingKeys: String, CodingKey { case kind, pixelWidth, pixelHeight, scale, duration, hasCamera, hasMic, hasSystemAudio }
+    enum CodingKeys: String, CodingKey { case kind, pixelWidth, pixelHeight, scale, duration, hasCamera, hasMic, hasSystemAudio, windowSizes }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         kind = try c.value(.kind, default: .display)
@@ -78,6 +86,7 @@ public struct Source: Codable, Equatable, Sendable {
         hasCamera = try c.value(.hasCamera, default: false)
         hasMic = try c.value(.hasMic, default: false)
         hasSystemAudio = try c.value(.hasSystemAudio, default: false)
+        windowSizes = try c.value(.windowSizes, default: [])
     }
 }
 

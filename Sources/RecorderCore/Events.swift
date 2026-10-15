@@ -21,9 +21,23 @@ public struct InputEvent: Codable, Equatable, Sendable {
     }
 }
 
+/// Multi-window recordings (SPEC "Windows as layers"): window `i`'s frame in global screen points
+/// (top-left origin) from time `t` on. Samples are written only when a frame changes.
+public struct WindowFrame: Codable, Equatable, Sendable {
+    public var t: Double
+    public var i: Int
+    public var x, y, w, h: Double
+    public init(t: Double, i: Int, x: Double, y: Double, w: Double, h: Double) {
+        self.t = t; self.i = i; self.x = x; self.y = y; self.w = w; self.h = h
+    }
+}
+
 public struct EventLog: Codable, Sendable {
     public var events: [InputEvent]
-    public init(events: [InputEvent] = []) { self.events = events }
+    /// Non-nil only for multi-window recordings, whose pointer events then carry *global points*
+    /// instead of 0…1 values (normalised per visible window at render time).
+    public var windowFrames: [WindowFrame]?
+    public init(events: [InputEvent] = [], windowFrames: [WindowFrame]? = nil) { self.events = events; self.windowFrames = windowFrames }
 
     /// Pointer motion, including drags (a drag is a move with a button held).
     public func moves() -> [InputEvent] { events.filter { $0.k == .move || $0.k == .drag } }

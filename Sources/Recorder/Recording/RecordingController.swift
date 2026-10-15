@@ -98,8 +98,10 @@ import RecorderCore
             self.currentTarget = target
             state = .recording
             applyDockIconPolicy(hiddenWhileRecording: true)
-            if case .window(let window) = target, let pid = window.owningApplication?.processID {
-                WindowResizer.focus(pid: pid, windowTitle: window.title, frame: window.frame)
+            if case .windows(let windows) = target {
+                for window in windows.reversed() { // window 0 ends up frontmost
+                    if let pid = window.owningApplication?.processID { WindowResizer.focus(pid: pid, windowTitle: window.title, frame: window.frame) }
+                }
             }
         } catch {
             NSLog("Recorder: capture failed to start: \(error)")
@@ -268,7 +270,7 @@ import RecorderCore
         guard settings.highlightArea else { return }
         switch target {
         case .display: return // whole display is already fully recorded — nothing to outline
-        case .window, .area: break
+        case .windows, .area: break
         }
         let rect = SourcePickerOverlay.flip(target.frameInScreenPoints, in: NSScreen.screens[0])
         let window = HighlightWindow(rect: rect)

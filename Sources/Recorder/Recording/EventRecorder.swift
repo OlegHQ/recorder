@@ -25,6 +25,13 @@ final class EventRecorder {
     private var knownCursorIDs = Set<String>()
     private var lastCursorID: String?
     private var currentTargetFrame: CGRect
+    /// Multi-window: pointer events keep global points; each window's frame is sampled instead (SPEC "Windows as layers").
+    private var windowFrames: [WindowFrame] = []
+    private var multiWindow: Bool { windowIDs.count > 1 }
+    private var windowIDs: [CGWindowID] {
+        if case .windows(let windows) = target { return windows.map(\.windowID) }
+        return []
+    }
 
     private var tapThread: Thread?
     private var eventTap: CFMachPort?
@@ -48,7 +55,7 @@ final class EventRecorder {
         t0Seconds = CMTimeGetSeconds(t0HostTime)
         startEventTap()
         startCursorTimer()
-        if case .window = target { startWindowFrameTimer() }
+        if case .windows = target { startWindowFrameTimer() }
     }
 
     func pause() { pauseStartSeconds = EventRecorder.hostSeconds() }
@@ -68,7 +75,7 @@ final class EventRecorder {
         cursorTimer?.cancel(); cursorTimer = nil
         windowFrameTimer?.cancel(); windowFrameTimer = nil
         lock.lock(); defer { lock.unlock() }
-        return EventLog(events: events.sorted { $0.t < $1.t })
+        return EventLog(events: events.sorted { $0.t < $1.t }, windowFrames: multiWindow ? windowFrames : nil)
     }
 
     // MARK: - Clock
@@ -196,6 +203,7 @@ final class EventRecorder {
 
     /// `event.location` (global, top-left origin) → normalised 0…1 of the captured target rect.
     private func normalized(_ globalPoint: CGPoint) -> (x: Double, y: Double) {
+        if multiWindow { return (Double(globalPoint.x), Double(globalPoint.y)) }
         let frame = currentFrame()
         guard frame.width > 0, frame.height > 0 else { return (0, 0) }
         return (Double((globalPoint.x - frame.minX) / frame.width), Double((globalPoint.y - frame.minY) / frame.height))
@@ -206,16 +214,25 @@ final class EventRecorder {
     /// Window capture: the window can move while recording, so re-read its frame at 10 Hz (SPEC §4.8)
     /// via Quartz's window list (no extra TCC grant beyond what capture itself already needs).
     private func startWindowFrameTimer() {
-        guard case .window(let window) = target else { return }
-        let windowID = window.windowID
+        let ids = windowIDs
+        var last = [CGRect?](repeating: nil, count: ids.count)
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         timer.schedule(deadline: .now(), repeating: 0.1)
         timer.setEventHandler { [weak self] in
-            guard let self,
-                  let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
-                  let boundsDict = info.first?[kCGWindowBounds as String] as? [String: Any],
-                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { return }
-            self.lock.lock(); self.currentTargetFrame = rect; self.lock.unlock()
+            guard let self else { return }
+            for (i, windowID) in ids.enumerated() {
+                guard let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+                      let boundsDict = info.first?[kCGWindowBounds as String] as? [String: Any],
+                      let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
+                self.lock.lock()
+                if ids.count == 1 { self.currentTargetFrame = rect }
+                else if rect != last[i] {
+                    last[i] = rect
+                    self.windowFrames.append(WindowFrame(t: max(0, self.outputTime(EventRecorder.hostSeconds())), i: i,
+                                                         x: rect.minX, y: rect.minY, w: rect.width, h: rect.height))
+                }
+                self.lock.unlock()
+            }
         }
         timer.resume()
         windowFrameTimer = timer

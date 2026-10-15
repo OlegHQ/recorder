@@ -15,6 +15,13 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private var stream: SCStream?
     private var audioStream: SCStream?
+    /// Windows 1…N of a multi-window recording (SPEC "Windows as layers"): one stream + `window-N.mov` each.
+    private var extraStreams: [SCStream] = []
+    private var extraWriters: [TrackWriter] = []
+    private var extraSizes: [CGSize] = []
+    /// Newest frame of a window that arrived before `t0` (window 0's first frame); flushed at offset 0.
+    private var pendingFirst: [Int: CMSampleBuffer] = [:]
+    private var extraLast: [Int: CMTime] = [:]
     // ponytail: one queue for all three outputs; split if audio ever drops.
     private let outputQueue = DispatchQueue(label: "CaptureSession.output")
 
@@ -67,16 +74,19 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         pixelWidth = Int(size.width)
         pixelHeight = Int(size.height)
 
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.hevc,
-            AVVideoWidthKey: pixelWidth,
-            AVVideoHeightKey: pixelHeight,
-            AVVideoColorPropertiesKey: VideoColor.properties,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: min(60_000_000, pixelWidth * pixelHeight * 4),
-            ],
-        ]
-        screenWriter = try TrackWriter(url: packageURL.appendingPathComponent("screen.mov"), videoSettings: videoSettings)
+        func videoSettings(_ size: CGSize) -> [String: Any] {
+            [AVVideoCodecKey: AVVideoCodecType.hevc,
+             AVVideoWidthKey: Int(size.width),
+             AVVideoHeightKey: Int(size.height),
+             AVVideoColorPropertiesKey: VideoColor.properties,
+             AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: min(60_000_000, Int(size.width * size.height) * 4)]]
+        }
+        screenWriter = try TrackWriter(url: packageURL.appendingPathComponent("screen.mov"), videoSettings: videoSettings(size))
+        let extraTargets = target.windowTargets.dropFirst()
+        extraSizes = extraTargets.map(\.pixelSize)
+        for (n, size) in extraSizes.enumerated() {
+            extraWriters.append(try TrackWriter(url: packageURL.appendingPathComponent("window-\(n + 1).mov"), videoSettings: videoSettings(size)))
+        }
 
         if settings.systemAudio != .off {
             systemWriter = try TrackWriter(url: packageURL.appendingPathComponent("system.m4a"),
@@ -119,14 +129,24 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
         if config.captureMicrophone { try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: outputQueue) }
         self.stream = stream
+        for extra in extraTargets {
+            let config = extra.configuration(settings: settings)
+            config.capturesAudio = false
+            config.captureMicrophone = false // the mic rides on window 0's stream
+            let extraStream = SCStream(filter: extra.filter(content: content, settings: settings), configuration: config, delegate: self)
+            try extraStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
+            extraStreams.append(extraStream)
+        }
     }
 
     func start() async throws {
         do {
             try await audioStream?.startCapture()
+            for extra in extraStreams { try await extra.startCapture() }
             try await stream?.startCapture()
         } catch {
             try? await audioStream?.stopCapture()
+            for extra in extraStreams { try? await extra.stopCapture() }
             throw error
         }
     }
@@ -153,40 +173,50 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     func finish() async throws -> Source {
         let endTime = CMTime(seconds: elapsed, preferredTimescale: 60000)
         try? await stream?.stopCapture()
+        for extra in extraStreams { try? await extra.stopCapture() }
         try? await audioStream?.stopCapture()
         stream = nil
         audioStream = nil
+        extraStreams = []
         // Drain callbacks before closing their inputs.
         await withCheckedContinuation { continuation in
             outputQueue.async { continuation.resume() }
         }
 
         await screenWriter.finish(at: endTime)
+        for writer in extraWriters { await writer.finish(at: endTime) }
         await systemWriter?.finish()
         await micWriter?.finish()
 
         let log = eventRecorder.stop()
         try JSONEncoder().encode(log).write(to: packageURL.appendingPathComponent("events.json"), options: .atomic)
 
-        if let error = screenWriter.error ?? systemWriter?.error ?? micWriter?.error { throw error }
+        if let error = screenWriter.error ?? extraWriters.compactMap(\.error).first ?? systemWriter?.error ?? micWriter?.error { throw error }
         let asset = AVURLAsset(url: packageURL.appendingPathComponent("screen.mov"))
         let duration = try await asset.load(.duration).seconds
 
-        return Source(kind: sourceKind, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
+        var source = Source(kind: sourceKind, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
                                scale: Double(target.scale), duration: duration, hasCamera: hasCamera,
                                hasMic: micWriter?.hasSamples == true, hasSystemAudio: systemWriter?.hasSamples == true)
+        if !extraSizes.isEmpty {
+            source.windowSizes = ([CGSize(width: pixelWidth, height: pixelHeight)] + extraSizes).map { PixelSize(w: Int($0.width), h: Int($0.height)) }
+        }
+        return source
     }
 
     /// Stops capture, discards every writer, and deletes `packageURL` (no project should be left behind).
     func cancel() async {
         try? await stream?.stopCapture()
+        for extra in extraStreams { try? await extra.stopCapture() }
         try? await audioStream?.stopCapture()
         stream = nil
         audioStream = nil
+        extraStreams = []
         await withCheckedContinuation { continuation in
             outputQueue.async { continuation.resume() }
         }
         screenWriter.cancel()
+        extraWriters.forEach { $0.cancel() }
         systemWriter?.cancel()
         micWriter?.cancel()
         _ = eventRecorder.stop()
@@ -196,7 +226,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private var sourceKind: Source.Kind {
         switch target {
         case .display: return .display
-        case .window: return .window
+        case .windows: return .window
         case .area: return .area
         }
     }
@@ -219,7 +249,14 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
                   let statusRaw = attachmentsArray.first?[.status] as? Int,
                   SCFrameStatus(rawValue: statusRaw) == .complete else { return }
 
-            if case .window = target, let buffer = sampleBuffer.imageBuffer,
+            if let index = extraStreams.firstIndex(where: { $0 === stream }) {
+                // Windows 1…N: same clock; a frame older than t0 (static window) is clamped to 0.
+                guard let t0 else { pendingFirst[index] = sampleBuffer; return }
+                let offset = max(.zero, sampleBuffer.presentationTimeStamp - t0 - pausedSoFar)
+                if offset > (extraLast[index] ?? .negativeInfinity) { extraLast[index] = offset; extraWriters[index].append(sampleBuffer, offset: offset) }
+                return
+            }
+            if case .windows = target, let buffer = sampleBuffer.imageBuffer,
                CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA {
                 CVPixelBufferLockBaseAddress(buffer, .readOnly)
                 if let base = CVPixelBufferGetBaseAddress(buffer) {
@@ -237,6 +274,8 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
             if t0 == nil {
                 t0 = pts
                 eventRecorder.start(t0HostTime: pts)
+                for (index, pending) in pendingFirst { extraLast[index] = .zero; extraWriters[index].append(pending, offset: .zero) }
+                pendingFirst = [:]
             }
             guard let t0 else { return }
             let offset = pts - t0 - pausedSoFar
