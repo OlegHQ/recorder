@@ -174,6 +174,79 @@ public struct Mask: Codable, Equatable, Sendable {
     }
 }
 
+/// On-screen text (SPEC "Editor roadmap" Text). `words` times are seconds relative to `start`, so moving a
+/// block never rewrites them.
+public struct Word: Codable, Equatable, Sendable {
+    public var text: String
+    public var start: Double
+    public var end: Double
+    public init(text: String, start: Double, end: Double) { self.text = text; self.start = start; self.end = end }
+}
+
+public struct TextBlock: Codable, Equatable, Sendable {
+    public enum Style: String, Codable, Sendable, CaseIterable { case caption, title, label }
+    public var id: String
+    public var start: Double
+    public var end: Double
+    public var text: String
+    public var words: [Word]?
+    public var style: Style
+    public var position: NormPoint
+    public var size: Double
+
+    public init(id: String = UUID().uuidString, start: Double = 0, end: Double = 0, text: String = "Text", words: [Word]? = nil,
+                style: Style = .title, position: NormPoint? = nil, size: Double = 48) {
+        self.id = id; self.start = start; self.end = end; self.text = text; self.words = words; self.style = style
+        self.position = position ?? NormPoint(x: 0.5, y: style == .caption ? 0.8 : 0.5); self.size = size
+    }
+    enum CodingKeys: String, CodingKey { case id, start, end, text, words, style, position, size }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.value(.id, default: UUID().uuidString)
+        start = try c.value(.start, default: 0)
+        end = try c.value(.end, default: 0)
+        text = try c.value(.text, default: "")
+        words = try c.decodeIfPresent([Word].self, forKey: .words)
+        style = try c.value(.style, default: .title)
+        position = try c.value(.position, default: NormPoint())
+        size = try c.value(.size, default: 48)
+    }
+
+    /// Index into `words` of the word being spoken at source time `t` (the last one that has started).
+    public func wordIndex(atSource t: Double) -> Int? {
+        guard let words, let i = words.lastIndex(where: { start + $0.start <= t }) else { return nil }
+        return i
+    }
+
+    /// Replaces the text; if it had word timings, re-spreads the new words evenly over the same span.
+    public mutating func setText(_ new: String) {
+        text = new
+        guard words != nil else { return }
+        let parts = new.split(separator: " ").map(String.init)
+        let step = (end - start) / Double(max(parts.count, 1))
+        words = parts.enumerated().map { Word(text: $1, start: Double($0) * step, end: Double($0 + 1) * step) }
+    }
+}
+
+/// Groups spoken `words` (absolute source seconds) into caption blocks of <= `maxWords`, breaking on a gap > `gap`
+/// seconds or after sentence punctuation. Word times in each block are relative to its start.
+public func captionPhrases(words: [Word], maxWords: Int = 4, gap: Double = 0.5) -> [TextBlock] {
+    var groups: [[Word]] = []
+    for w in words where !w.text.isEmpty {
+        if let last = groups.last?.last, groups[groups.count - 1].count < maxWords, w.start - last.end <= gap,
+           !(last.text.last.map { ".!?".contains($0) } ?? false) {
+            groups[groups.count - 1].append(w)
+        } else { groups.append([w]) }
+    }
+    return groups.enumerated().map { i, g in
+        let start = g[0].start
+        let nextStart = i + 1 < groups.count ? groups[i + 1][0].start : .infinity
+        let end = max(start + 0.1, min(g[g.count - 1].end, nextStart))
+        return TextBlock(start: start, end: end, text: g.map(\.text).joined(separator: " "),
+                         words: g.map { Word(text: $0.text, start: $0.start - start, end: $0.end - start) }, style: .caption, size: 48)
+    }
+}
+
 /// Camera footage occupies its own interval; moving it preserves the media in-point.
 public struct CameraClip: Codable, Equatable, Sendable {
     public var id: String
@@ -438,6 +511,7 @@ public struct Project: Codable, Equatable, Sendable {
     public var keystrokeClips: [Layout]
     public var cameraClips: [CameraClip]
     public var masks: [Mask]
+    public var texts: [TextBlock]
     public var cursorHidden: [TimeRange]
     public var crop: NormRect
     public var output: Output
@@ -461,6 +535,7 @@ public struct Project: Codable, Equatable, Sendable {
         cameraClips: [CameraClip]? = nil,
         keystrokeClips: [Layout] = [],
         masks: [Mask] = [],
+        texts: [TextBlock] = [],
         cursorHidden: [TimeRange] = [],
         crop: NormRect = NormRect(),
         output: Output = Output(),
@@ -475,14 +550,14 @@ public struct Project: Codable, Equatable, Sendable {
         self.version = version; self.id = id; self.title = title; self.createdAt = createdAt
         self.keystrokeClips = keystrokeClips + layouts.filter { $0.kind == .settings }
         self.cameraClips = cameraClips ?? (source.hasCamera && source.duration > 0 ? [CameraClip(start: 0, end: source.duration)] : [])
-        self.source = source; self.clips = clips; self.zooms = zooms; self.layouts = layouts.filter { $0.kind != .settings }; self.masks = masks
+        self.source = source; self.clips = clips; self.zooms = zooms; self.layouts = layouts.filter { $0.kind != .settings }; self.masks = masks; self.texts = texts
         self.cursorHidden = cursorHidden; self.crop = crop; self.output = output; self.background = background
         self.frame = frame; self.cursor = cursor; self.animation = animation; self.camera = camera
         self.audio = audio; self.keys = keys
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, id, title, createdAt, source, linkVideoEdits, rippleDelete, clips, zooms, layouts, cameraClips, keystrokeClips, masks, cursorHidden, crop, output,
+        case version, id, title, createdAt, source, linkVideoEdits, rippleDelete, clips, zooms, layouts, cameraClips, keystrokeClips, masks, texts, cursorHidden, crop, output,
              background, frame, cursor, animation, camera, audio, keys
     }
 
@@ -502,6 +577,7 @@ public struct Project: Codable, Equatable, Sendable {
         layouts.removeAll { $0.kind == .settings }
         cameraClips = try c.value(.cameraClips, default: source.hasCamera && source.duration > 0 ? [CameraClip(start: 0, end: source.duration)] : [])
         masks = try c.value(.masks, default: [])
+        texts = try c.value(.texts, default: [])
         cursorHidden = try c.value(.cursorHidden, default: [])
         crop = try c.value(.crop, default: NormRect())
         output = try c.value(.output, default: Output())

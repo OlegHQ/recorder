@@ -80,7 +80,7 @@ public extension Project {
             }
             blocks = (stationary + moved).sorted { $0.start < $1.start }
         }
-        edit(&cameraClips); edit(&zooms); edit(&keystrokeClips); edit(&layouts); edit(&masks)
+        edit(&cameraClips); edit(&zooms); edit(&keystrokeClips); edit(&layouts); edit(&masks); edit(&texts)
     }
 
     /// Lift video without changing the timing of any other lane.
@@ -137,7 +137,7 @@ public extension Project {
         }
         retimeMedia(&cameraClips, rate: \.mediaRate)
         retimeMedia(&keystrokeClips, rate: \.mediaRate)
-        retime(&zooms); retime(&layouts); retime(&masks)
+        retime(&zooms); retime(&layouts); retime(&masks); retime(&texts) // ponytail: caption word offsets keep source seconds, not rescaled by speed
         var time = 0.0
         clips = original.map { clip in
             var moved = clip
@@ -176,17 +176,18 @@ public extension Project {
         copied.keystrokeClips = selectedBlocks(keystrokeClips)
         copied.layouts = selectedBlocks(layouts)
         copied.masks = selectedBlocks(masks)
+        copied.texts = selectedBlocks(texts)
         copied.useOutputClock()
         copied.clips = copied.clips.enumerated().filter { selected.contains($0.offset) }.map(\.element)
         let starts = copied.clips.map(\.sourceStart) + copied.cameraClips.map(\.start) + copied.zooms.map(\.start)
-            + copied.keystrokeClips.map(\.start) + copied.layouts.map(\.start) + copied.masks.map(\.start)
+            + copied.keystrokeClips.map(\.start) + copied.layouts.map(\.start) + copied.masks.map(\.start) + copied.texts.map(\.start)
         guard let origin = starts.min() else { return nil }
         func offset<T: TimedBlock>(_ blocks: inout [T]) {
             for i in blocks.indices { blocks[i].start -= origin; blocks[i].end -= origin }
         }
         for i in copied.clips.indices { copied.clips[i].sourceStart -= origin; copied.clips[i].sourceEnd -= origin }
         offset(&copied.cameraClips); offset(&copied.zooms); offset(&copied.keystrokeClips)
-        offset(&copied.layouts); offset(&copied.masks)
+        offset(&copied.layouts); offset(&copied.masks); offset(&copied.texts)
         return copied
     }
 
@@ -250,6 +251,7 @@ public extension Project {
         paste(copied.keystrokeClips, into: &result.keystrokeClips)
         paste(copied.layouts, into: &result.layouts)
         paste(copied.masks, into: &result.masks)
+        paste(copied.texts, into: &result.texts)
 
         var before: [Clip] = [], after: [Clip] = []
         for clip in result.clips {
@@ -291,6 +293,7 @@ public extension Project {
         ends += result.keystrokeClips.map(\.end)
         ends += result.layouts.map(\.end)
         ends += result.masks.map(\.end)
+        ends += result.texts.map(\.end)
         let end = ends.max() ?? 0
         let videoEnd = result.clips.last?.sourceEnd ?? 0
         if end > videoEnd {
@@ -468,7 +471,8 @@ public extension Project {
         if split(&zooms) { return true }
         if split(&keystrokeClips) { return true }
         if split(&layouts) { return true }
-        return split(&masks)
+        if split(&masks) { return true }
+        return split(&texts)
     }
 
     /// Removes clip `i` entirely (its source range disappears from the output). Returns `false`
@@ -677,6 +681,7 @@ public extension Project {
         if let e = zooms.blockInvariantError(kind: "zoom", duration: timelineSourceDuration) { return e }
         if let e = layouts.blockInvariantError(kind: "layout", duration: timelineSourceDuration) { return e }
         if let e = masks.blockInvariantError(kind: "mask", duration: timelineSourceDuration) { return e }
+        if let e = texts.blockInvariantError(kind: "text", duration: timelineSourceDuration) { return e }
         return nil
     }
 }
@@ -702,6 +707,9 @@ extension CameraClip: TimedBlock {
     mutating func advanceMedia(by delta: Double) { mediaStart += delta * (mediaRate ?? 1) }
 }
 extension Mask: TimedBlock {}
+extension TextBlock: TimedBlock {
+    mutating func advanceMedia(by delta: Double) { if words != nil { words = words!.map { Word(text: $0.text, start: $0.start - delta, end: $0.end - delta) } } }
+}
 
 private extension Array where Element: TimedBlock {
     /// `nil` when every element is sorted by `start`, non-overlapping, >= `minLength`, and within
@@ -891,11 +899,31 @@ public extension Project {
         return (mask.start, mask.end)
     }
 
-    /// Removes the zoom, layout or mask block with `id`, whichever track it's in.
+    // MARK: - Text
+
+    /// Replaces every Caption-style block with `captions`; a new caption that would overlap a surviving block or leave
+    /// `[0, duration]` is dropped (ponytail: drop rather than trim).
+    mutating func replaceCaptions(_ captions: [TextBlock]) {
+        texts.removeAll { $0.style == .caption }
+        for c in captions where c.end <= timelineSourceDuration + 1e-9 && !texts.contains(where: { c.start < $0.end && c.end > $0.start }) {
+            texts.append(c)
+        }
+        texts.sort { $0.start < $1.start }
+        assert(checkInvariants() == nil)
+    }
+
+    @discardableResult
+    mutating func addText(atSource s: Double, length: Double = 3, style: TextBlock.Style = .title, text: String = "Text") -> UUID? {
+        addBlock(atSource: s, length: length, in: \.texts) { id, start, end in TextBlock(id: id, start: start, end: end, text: text, style: style) }
+    }
+    mutating func moveText(_ id: UUID, toStart s: Double) { moveBlock(id, in: \.texts, toStart: s) }
+    mutating func resizeText(_ id: UUID, edge: Edge, to s: Double) { resizeBlock(id, in: \.texts, edge: edge, to: s) }
+
+    /// Removes the zoom, layout, mask or text block with `id`, whichever track it's in.
     mutating func removeBlock(_ id: UUID) {
         let key = id.uuidString
-        if !keystrokeClips.removeBlock(id: key), !cameraClips.removeBlock(id: key), !zooms.removeBlock(id: key), !layouts.removeBlock(id: key) {
-            masks.removeBlock(id: key)
+        if !keystrokeClips.removeBlock(id: key), !cameraClips.removeBlock(id: key), !zooms.removeBlock(id: key), !layouts.removeBlock(id: key), !masks.removeBlock(id: key) {
+            texts.removeBlock(id: key)
         }
         assert(checkInvariants() == nil)
     }
@@ -915,6 +943,10 @@ public extension Project {
         } else if let mask = masks.first(where: { $0.id == key }) {
             guard masks.addBlock(atSource: mask.end, length: mask.end - mask.start, duration: timelineSourceDuration, minLength: Self.minBlockLength, make: { start, end in
                 Mask(id: newID.uuidString, start: start, end: end, kind: mask.kind, rect: mask.rect, opacity: mask.opacity, transition: mask.transition)
+            }) != nil else { return nil }
+        } else if let text = texts.first(where: { $0.id == key }) {
+            guard texts.addBlock(atSource: text.end, length: text.end - text.start, duration: timelineSourceDuration, minLength: Self.minBlockLength, make: { start, end in
+                var copy = text; copy.id = newID.uuidString; copy.start = start; copy.end = end; return copy
             }) != nil else { return nil }
         } else {
             return nil

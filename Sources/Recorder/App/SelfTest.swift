@@ -1663,6 +1663,20 @@ enum SelfTest {
             guard await model.project == beforeMaskAdd else { throw Fail(description: "undo 4 should restore the pre-add project") }
             await model.redo(); await model.redo(); await model.redo(); await model.redo()
             guard await model.project == afterMaskRemove else { throw Fail(description: "redo didn't replay all 4 mask steps") }
+
+            // T-628 Text panel: add (own lane), text gesture = one undo step, caption words re-spread, remove.
+            var textID = UUID()
+            await model.edit("Add Text") { textID = $0.addText(atSource: 12, style: .caption, text: "one two")! }
+            await model.beginGesture()
+            await model.update { project in project.texts[0].setText("a b c") }
+            await model.commitGesture("Edit text")
+            let afterText = await model.project
+            guard afterText.texts.count == 1, afterText.texts[0].text == "a b c", afterText.texts[0].words == nil,
+                  afterText.checkInvariants() == nil else { throw Fail(description: "text edit: \(afterText.texts)") }
+            await model.edit("Remove text") { $0.removeBlock(textID) }
+            guard await model.project.texts.isEmpty else { throw Fail(description: "text remove didn't delete it") }
+            await model.undo(); await model.undo()
+            guard await model.project.texts.count == 1, await model.project.texts[0].text == "one two" else { throw Fail(description: "text undo steps") }
         },
         // Integration check: opens `EditorWindowController`'s real window offscreen (never ordered
         // front — `EditorWindowController.makeOffscreen`) for a fixture package and caches its
@@ -2858,13 +2872,15 @@ enum SelfTest {
                     project.keystrokeClips = [Layout(start: 2, end: 6, kind: .settings, keys: Keys(show: true))]
                     project.layouts = [Layout(start: 2, end: 6, kind: .bubble)]
                     project.masks = [Mask(start: 2, end: 6, kind: .blur)]
+                    project.texts = [TextBlock(start: 2, end: 6)]
                     let model = EditorModel(packageURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
                                             project: project, events: EventLog())
                     let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 250))
                     view.model = model
                     view.clipboardPasteboard = pasteboard
                     let ids: [Lane: String] = [.camera: project.cameraClips[0].id, .zoom: project.zooms[0].id,
-                        .keys: project.keystrokeClips[0].id, .layout: project.layouts[0].id, .mask: project.masks[0].id]
+                        .keys: project.keystrokeClips[0].id, .layout: project.layouts[0].id, .mask: project.masks[0].id,
+                        .text: project.texts[0].id]
                     if lane == .clip { model.selectedClips = [0] }
                     else { model.selection = [UUID(uuidString: ids[lane]!)!] }
                     model.playhead = 10 // Cut must ignore the playhead, including outside the selection.
@@ -2885,7 +2901,7 @@ enum SelfTest {
                     } else {
                         let blocks = model.project.cameraClips.map { ($0.id, $0.start) } + model.project.zooms.map { ($0.id, $0.start) }
                             + model.project.keystrokeClips.map { ($0.id, $0.start) } + model.project.layouts.map { ($0.id, $0.start) }
-                            + model.project.masks.map { ($0.id, $0.start) }
+                            + model.project.masks.map { ($0.id, $0.start) } + model.project.texts.map { ($0.id, $0.start) }
                         guard blocks.contains(where: { UUID(uuidString: $0.0).map(model.selection.contains) == true && $0.1 == 8 })
                         else { throw Fail(message: "Pasted layer position: \(lane)") }
                     }
@@ -3151,6 +3167,33 @@ enum SelfTest {
                 InputEvent(t: 2.0, k: .key, keyCode: 0x01, mods: 0x120000),        // ⇧⌘S
             ])
             try JSONEncoder().encode(events).write(to: url.appendingPathComponent("events.json"))
+            print("wrote \(url.path)")
+        },
+        // T-630: on-device transcription of an audio file -> caption phrases. Needs the Speech permission (run via LaunchServices).
+        "captions": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: captions <audio.m4a>") }
+            let words = try await Transcriber.words(in: URL(fileURLWithPath: path))
+            let phrases = captionPhrases(words: words)
+            print("words:", words.map(\.text).joined(separator: " "))
+            print("phrases:", phrases.map(\.text))
+            guard !words.isEmpty, !phrases.isEmpty, phrases.allSatisfy({ ($0.words?.count ?? 0) <= 4 }) else { throw Fail(description: "no words/phrases") }
+        },
+        // T-629: /tmp/TextFixture.recorder — a caption (with word timings), a title and a label, back to back.
+        "make-text-fixture": { _ in
+            let url = URL(fileURLWithPath: "/tmp/TextFixture.recorder")
+            try? FileManager.default.removeItem(at: url)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try await Self.synthesizeGradientMovie(at: url.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 3, frameCount: 9)
+            var project = Project(title: "Text Fixture", source: Source(kind: .display, pixelWidth: 640, pixelHeight: 360, scale: 1, duration: 3.0))
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 3.0, speed: 1)]
+            let words = ["Hello", "there", "big", "world"].enumerated().map { Word(text: $1, start: Double($0) * 0.25, end: Double($0 + 1) * 0.25) }
+            project.texts = [
+                TextBlock(start: 0, end: 1, text: "Hello there big world", words: words, style: .caption, size: 56),
+                TextBlock(start: 1, end: 2, text: "Quarterly review", style: .title, position: NormPoint(x: 0.5, y: 0.3), size: 64),
+                TextBlock(start: 2, end: 3, text: "Step 3 of 5", style: .label, position: NormPoint(x: 0.2, y: 0.15), size: 64),
+            ]
+            try project.save(to: url.appendingPathComponent("project.json"))
             print("wrote \(url.path)")
         },
         // T-610: `StateSnapshot.dump(to:pasteboard:)` over a real offscreen editor (one edit + a

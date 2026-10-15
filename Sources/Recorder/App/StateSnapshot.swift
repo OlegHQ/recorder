@@ -249,6 +249,7 @@ enum StateSnapshot {
             if model.project.zooms.contains(where: { $0.id == key }) { return "Zoom panel" }
             if model.project.layouts.contains(where: { $0.id == key }) { return "Layout panel" }
             if model.project.masks.contains(where: { $0.id == key }) { return "Mask panel" }
+            if model.project.texts.contains(where: { $0.id == key }) { return "Text panel" }
         }
         return "\(controller.currentInspectorTab.title) tab"
     }

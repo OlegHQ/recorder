@@ -5,7 +5,7 @@ import Testing
 private func linkedFixture() -> Project {
     var p = Project(source: Source(duration: 12, hasCamera: true), clips: [Clip(sourceStart: 0, sourceEnd: 12)],
                     zooms: [Zoom(start: 2, end: 10)], keystrokeClips: [Layout(start: 2, end: 10, kind: .settings, keys: Keys(show: true))],
-                    masks: [Mask(start: 4, end: 9)])
+                    masks: [Mask(start: 4, end: 9)], texts: [TextBlock(start: 4, end: 9, text: "hi there", words: [Word(text: "hi", start: 0, end: 2), Word(text: "there", start: 2, end: 5)])])
     p.linkVideoEdits = true
     return p
 }
@@ -14,7 +14,8 @@ private func linkedFixture() -> Project {
     var p = linkedFixture()
     let split = p.split(atOutput: 6)
     #expect(split)
-    #expect(p.cameraClips.count == 2 && p.zooms.count == 2 && p.keystrokeClips.count == 2 && p.masks.count == 2)
+    #expect(p.cameraClips.count == 2 && p.zooms.count == 2 && p.keystrokeClips.count == 2 && p.masks.count == 2 && p.texts.count == 2)
+    #expect(p.texts[1].words?.first?.start == -2) // words are relative to the block start
     let leftCamera = p.cameraClips[0]
     let moved = p.placeClip(1, start: 9, end: 15, moving: true)
     #expect(p.clips[moved].sourceStart == 9 && p.clips[1].isEmpty)
@@ -28,7 +29,7 @@ private func linkedFixture() -> Project {
     #expect(p.clips == video && p.cameraClips == camera && p.keystrokeClips == keys)
     p.liftClip(moved)
     #expect(p.cameraClips == [leftCamera])
-    #expect(p.zooms.allSatisfy { $0.end <= 6 })
+    #expect(p.zooms.allSatisfy { $0.end <= 6 } && p.texts.allSatisfy { $0.end <= 6 })
     #expect(p.checkInvariants() == nil)
     #expect(try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(p)) == p)
 }
@@ -186,4 +187,32 @@ private func linkedFixture() -> Project {
     #expect(p.videoOpacity(atOutput: 1) == 1)
     p.clips[0].fadeIn = .nan
     #expect(p.videoOpacity(atOutput: 0) == 1)
+}
+
+@Test func textBlocksDuplicateRemoveAndRespreadWords() {
+    var p = linkedFixture()
+    let id = UUID(uuidString: p.texts[0].id)!
+    p.moveText(id, toStart: 1)
+    #expect(p.texts[0].start == 1 && p.texts[0].words?.count == 2)
+    p.texts[0].setText("a b c d 5")
+    #expect(p.texts[0].words?.count == 5 && p.texts[0].words?.last?.end == 5)
+    #expect(p.texts[0].wordIndex(atSource: 1.5) == 0 && p.texts[0].wordIndex(atSource: 3.2) == 2)
+    #expect(p.duplicateBlock(id) != nil && p.texts.count == 2)
+    p.removeBlock(id)
+    #expect(p.texts.count == 1 && p.checkInvariants() == nil)
+    #expect(try! JSONDecoder().decode(Project.self, from: JSONEncoder().encode(p)) == p)
+}
+
+@Test func captionPhrasesGroupByCountGapAndPunctuation() {
+    func w(_ t: String, _ s: Double) -> Word { Word(text: t, start: s, end: s + 0.3) }
+    let words = [w("a", 0), w("b", 0.4), w("c", 0.8), w("d", 1.2), w("e", 1.6), w("Hi.", 2.0), w("there", 2.4), w("late", 5)]
+    let phrases = captionPhrases(words: words)
+    #expect(phrases.map(\.text) == ["a b c d", "e Hi.", "there", "late"])
+    #expect(phrases[0].start == 0 && phrases[0].words?.last?.start == 1.2)
+    #expect(phrases.allSatisfy { $0.style == .caption } && zip(phrases, phrases.dropFirst()).allSatisfy { $0.end <= $1.start })
+    var p = linkedFixture()
+    p.texts[0].style = .title
+    p.replaceCaptions(phrases)
+    #expect(p.texts.contains { $0.style == .title } && p.checkInvariants() == nil)
+    #expect(captionPhrases(words: []).isEmpty)
 }

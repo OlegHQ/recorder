@@ -636,6 +636,10 @@ enum ExporterSelfTest {
         for mask in project.masks {
             if let inside = timeMap.outputTime(atSource: (mask.start + mask.end) / 2) { times.insert(inside) }
         }
+        // T-629: inside each text block, and 0.1 s in (a caption's first word is already inverted).
+        for text in project.texts {
+            for s in [(text.start + text.end) / 2, text.start + 0.1] { if let t = timeMap.outputTime(atSource: s) { times.insert(t) } }
+        }
         let orderedTimes = times.filter { $0 >= 0 && $0 < duration }.sorted()
 
         guard let device = MTLCreateSystemDefaultDevice() else { throw SelfTestArgError.usage("no Metal device") }

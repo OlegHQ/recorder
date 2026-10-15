@@ -8,7 +8,7 @@ import SwiftUI
 /// matches this declaration order (SPEC §7.1): clip, zoom, layout (only if `source.hasCamera`),
 /// mask.
 enum Lane: CaseIterable, Sendable {
-    case clip, camera, zoom, keys, layout, mask
+    case clip, camera, zoom, keys, layout, mask, text
 }
 
 /// What a point in `TimelineView` is over (SPEC §7.2 hit-testing table). `hitTest(at:)` checks in
@@ -380,7 +380,7 @@ final class TimelineView: NSView {
         case .zoom: return Self.zoomHeight
         case .keys: return Self.layoutHeight
         case .layout: return hasLayoutLane ? Self.layoutHeight : 0
-        case .mask: return Self.maskHeight
+        case .mask, .text: return Self.maskHeight
         }
     }
 
@@ -433,6 +433,7 @@ final class TimelineView: NSView {
         drawKeysLane(project, timeMap)
         if hasLayoutLane { drawLayoutLane(project, timeMap) }
         drawMaskLane(project, timeMap)
+        drawTextLane(project, timeMap)
         drawPlayhead(model.playhead)
         // Drawn after the playhead/its timecode chip so a cut near the playhead is never hidden
         // behind them — the ✂ bubble is an actionable affordance, the chip is informational.
@@ -494,12 +495,12 @@ final class TimelineView: NSView {
     private func drawLaneLabels() {
         Theme.bgPanel.setFill()
         CGRect(x: 0, y: 0, width: Self.gutter, height: contentHeight).fill()
-        let labels: [Lane: String] = [.clip: "Video", .camera: "Camera", .zoom: "Zoom", .layout: "Layout", .keys: "Keys", .mask: "Mask"]
-        let colors: [Lane: NSColor] = [.clip: Theme.clip, .camera: Theme.layout, .keys: Theme.layout, .zoom: Theme.zoom, .layout: Theme.layout, .mask: Theme.mask]
+        let labels: [Lane: String] = [.clip: "Video", .camera: "Camera", .zoom: "Zoom", .layout: "Layout", .keys: "Keys", .mask: "Mask", .text: "Text"]
+        let colors: [Lane: NSColor] = [.clip: Theme.clip, .camera: Theme.layout, .keys: Theme.layout, .zoom: Theme.zoom, .layout: Theme.layout, .mask: Theme.mask, .text: Theme.text]
         let project = model?.project
         let clipCount = project?.clips.filter { !$0.isEmpty }.count ?? 0
         let counts = [clipCount, project?.cameraClips.count ?? 0, project?.zooms.count ?? 0,
-                      project?.keystrokeClips.count ?? 0, project?.layouts.count ?? 0, project?.masks.count ?? 0]
+                      project?.keystrokeClips.count ?? 0, project?.layouts.count ?? 0, project?.masks.count ?? 0, project?.texts.count ?? 0]
         for (i, lane) in Lane.allCases.enumerated() {
             let row = laneRow(lane)
             guard row.height > 0 else { continue }
@@ -556,6 +557,7 @@ final class TimelineView: NSView {
             + model.project.cameraClips.map { ($0.id, $0.start, $0.end) }
             + model.project.layouts.map { ($0.id, $0.start, $0.end) }
             + model.project.masks.map { ($0.id, $0.start, $0.end) }
+            + model.project.texts.map { ($0.id, $0.start, $0.end) }
         let segments = blocks.filter { UUID(uuidString: $0.0).map(model.selection.contains) ?? false }
             .flatMap { visibleSegments(start: $0.1, end: $0.2, project: model.project, timeMap: model.timeMap) }
         guard let start = segments.map(\.outStart).min(), let end = segments.map(\.outEnd).max() else { return nil }
@@ -805,6 +807,20 @@ final class TimelineView: NSView {
                                    width: max(0, x(forOutput: segment.outEnd) - x(forOutput: segment.outStart)), height: row.height - 4)
                 guard rect.width > 0.5 else { continue }
                 drawBlock(rect, fill: Theme.mask, tornLeft: segment.tornLeft, tornRight: segment.tornRight, label: label, selected: selected)
+            }
+        }
+    }
+
+    private func drawTextLane(_ project: Project, _ timeMap: TimeMap) {
+        let row = laneRow(.text)
+        let selection = model?.selection ?? []
+        for text in project.texts {
+            let selected = UUID(uuidString: text.id).map(selection.contains) ?? false
+            for segment in visibleSegments(start: text.start, end: text.end, project: project, timeMap: timeMap) {
+                let rect = CGRect(x: x(forOutput: segment.outStart), y: row.minY + 2,
+                                   width: max(0, x(forOutput: segment.outEnd) - x(forOutput: segment.outStart)), height: row.height - 4)
+                guard rect.width > 0.5 else { continue }
+                drawBlock(rect, fill: Theme.text, tornLeft: segment.tornLeft, tornRight: segment.tornRight, label: text.text, selected: selected)
             }
         }
     }
@@ -1071,6 +1087,7 @@ final class TimelineView: NSView {
             project.cameraClips.map { ($0.id, $0.start, $0.end) },
             project.layouts.map { ($0.id, $0.start, $0.end) },
             project.masks.map { ($0.id, $0.start, $0.end) },
+            project.texts.map { ($0.id, $0.start, $0.end) },
         ]
         for blocks in laneBlocks {
             for b in blocks where UUID(uuidString: b.id) != excludingBlock {
@@ -1134,6 +1151,7 @@ final class TimelineView: NSView {
             return hit
         }
         if let hit = hitBlockLane(p, model, lane: .mask, blocks: model.project.masks.map { ($0.id, $0.start, $0.end) }) { return hit }
+        if let hit = hitBlockLane(p, model, lane: .text, blocks: model.project.texts.map { ($0.id, $0.start, $0.end) }) { return hit }
         if let hit = hitCutBubble(p, model) { return hit }
         if let hit = hitEmptyLane(p, model) { return hit }
         if p.y <= Self.rulerHeight { return .ruler }
@@ -1224,7 +1242,7 @@ final class TimelineView: NSView {
     }
 
     private func hitEmptyLane(_ p: CGPoint, _ model: EditorModel) -> TimelineHit? {
-        for lane: Lane in [.camera, .zoom, .keys, .layout, .mask] {
+        for lane: Lane in [.camera, .zoom, .keys, .layout, .mask, .text] {
             guard laneHeight(lane) > 0 else { continue }
             let row = laneRow(lane)
             guard p.y >= row.minY, p.y <= row.maxY, p.x >= Self.gutter else { continue }
@@ -1256,6 +1274,7 @@ final class TimelineView: NSView {
         if model.project.zooms.contains(where: { $0.id == key }) { return .zoom }
         if model.project.layouts.contains(where: { $0.id == key }) { return .layout }
         if model.project.masks.contains(where: { $0.id == key }) { return .mask }
+        if model.project.texts.contains(where: { $0.id == key }) { return .text }
         return nil
     }
 
@@ -1540,6 +1559,8 @@ final class TimelineView: NSView {
             exitSplitMode()
         } else if !cmd, !shift, chars?.lowercased() == "z" { // `Z` = add a zoom at the playhead
             addZoom(atOutput: model?.playhead ?? 0)
+        } else if !cmd, !shift, chars?.lowercased() == "t", let model { // `T` = add text at the playhead
+            model.addText(atSource: model.timeMap.sourceTime(atOutput: model.playhead))
         } else if cmd, chars?.lowercased() == "d" { // `⌘D` = duplicate the selected zoom/mask after itself
             duplicateSelection()
         } else {
@@ -1568,7 +1589,8 @@ final class TimelineView: NSView {
             (.keys, model.project.keystrokeClips.map { ($0.start, $0.end) }),
             (.camera, model.project.cameraClips.map { ($0.start, $0.end) }),
             (.layout, model.project.layouts.map { ($0.start, $0.end) }),
-            (.mask, model.project.masks.map { ($0.start, $0.end) })]
+            (.mask, model.project.masks.map { ($0.start, $0.end) }),
+            (.text, model.project.texts.map { ($0.start, $0.end) })]
         for (lane, blocks) in tracks where laneRow(lane).contains(p) {
             for (start, end) in blocks {
                 for segment in visibleSegments(start: start, end: end, project: model.project, timeMap: model.timeMap) {
@@ -1666,6 +1688,7 @@ final class TimelineView: NSView {
                     case .keys: id = project.addKeys(atSource: source)
                     case .layout: id = project.addLayout(atSource: source, kind: .bubble)
                     case .mask: id = project.addMask(atSource: source, kind: .blur, opacity: 1)
+                    case .text: id = project.addText(atSource: source)
                     case .clip: break
                     }
                 }
@@ -1738,6 +1761,10 @@ final class TimelineView: NSView {
                     project.resizeMask(id, edge: .leading, to: min(anchor, source))
                     project.resizeMask(id, edge: .trailing, to: max(anchor, source))
                     project.resizeMask(id, edge: .leading, to: min(anchor, source))
+                case .text:
+                    project.resizeText(id, edge: .leading, to: min(anchor, source))
+                    project.resizeText(id, edge: .trailing, to: max(anchor, source))
+                    project.resizeText(id, edge: .leading, to: min(anchor, source))
                 case .keys:
                     project.resizeKeys(id, edge: .leading, to: min(anchor, source))
                     project.resizeKeys(id, edge: .trailing, to: max(anchor, source))
@@ -1912,6 +1939,7 @@ final class TimelineView: NSView {
         case .camera: return "Camera"
         case .layout: return "Layout"
         case .mask: return "Mask"
+        case .text: return "Text"
         }
     }
 
@@ -1926,6 +1954,7 @@ final class TimelineView: NSView {
         case .camera: model.edit("Add Camera") { newID = $0.addCamera(atSource: s) }
         case .layout: model.edit("Add Layout") { newID = $0.addLayout(atSource: s, kind: .bubble) }
         case .mask: model.edit("Add Mask") { newID = $0.addMask(atSource: s, kind: .mask) }
+        case .text: newID = model.addText(atSource: s)
         case .clip: break // clips are never added this way (SPEC's hit-test table only lists zoom/layout/mask)
         }
         if let newID { selectBlock(newID, addToSelection: false) }
@@ -1962,6 +1991,7 @@ final class TimelineView: NSView {
         case .camera: return model.project.cameraClips.first { $0.id == id.uuidString }?.start
         case .layout: return model.project.layouts.first { $0.id == id.uuidString }?.start
         case .mask: return model.project.masks.first { $0.id == id.uuidString }?.start
+        case .text: return model.project.texts.first { $0.id == id.uuidString }?.start
         case .clip: return nil
         }
     }
@@ -1990,6 +2020,7 @@ final class TimelineView: NSView {
             case .camera: project.moveCamera(id, toStart: toStart)
             case .layout: project.moveLayout(id, toStart: toStart)
             case .mask: project.moveMask(id, toStart: toStart)
+            case .text: project.moveText(id, toStart: toStart)
             case .clip: break
             }
         }
@@ -2016,6 +2047,7 @@ final class TimelineView: NSView {
             case .camera: project.resizeCamera(id, edge: edge, to: source)
             case .layout: project.resizeLayout(id, edge: edge, to: source)
             case .mask: project.resizeMask(id, edge: edge, to: source)
+            case .text: project.resizeText(id, edge: edge, to: source)
             case .clip: break
             }
         }
@@ -2038,6 +2070,10 @@ final class TimelineView: NSView {
             return (clip.start, clip.end)
         case .layout: return model?.project.previewLayoutPlacement(atSource: s)
         case .mask: return model?.project.previewMaskPlacement(atSource: s)
+        case .text:
+            guard var trial = model?.project, let id = trial.addText(atSource: s),
+                  let block = trial.texts.first(where: { $0.id == id.uuidString }) else { return nil }
+            return (block.start, block.end)
         case .clip: return nil
         }
     }
@@ -2050,6 +2086,7 @@ final class TimelineView: NSView {
         case .camera: return Theme.layout
         case .layout: return Theme.layout
         case .mask: return Theme.mask
+        case .text: return Theme.text
         }
     }
 
@@ -2062,13 +2099,14 @@ final class TimelineView: NSView {
         case .camera: return "+ Camera"
         case .layout: return "+ Layout"
         case .mask: return "+ Mask"
+        case .text: return "+ Text"
         }
     }
 
     /// "Empty zoom/layout/mask lane: ghost block under pointer" (SPEC §7.1/§7.2).
     private func drawEmptyLaneGhost() {
         guard dragKind == nil, !isSplitMode, let model, let hoverX, let hoverY, hoverX > Self.gutter else { return }
-        guard let lane = [Lane.camera, .zoom, .keys, .layout, .mask].first(where: { laneHeight($0) > 0 && hoverY >= laneRow($0).minY && hoverY <= laneRow($0).maxY }) else { return }
+        guard let lane = [Lane.camera, .zoom, .keys, .layout, .mask, .text].first(where: { laneHeight($0) > 0 && hoverY >= laneRow($0).minY && hoverY <= laneRow($0).maxY }) else { return }
         let row = laneRow(lane)
         let s = model.timeMap.sourceTime(atOutput: geometry.output(forX: geometryX(NSPoint(x: hoverX, y: 0))))
         guard model.timeMap.outputTime(atSource: s) != nil else { return } // hovering a removed segment: no gap to add into
@@ -2246,6 +2284,15 @@ final class TimelineView: NSView {
                                          id: { $0.id }, start: { $0.start }, end: { $0.end },
                                          label: { "\($0.kind == .highlight ? "Highlight" : ($0.kind == .blur ? "Blur" : "Mask")), opacity \(Int(($0.opacity * 100).rounded()))%" },
                                          nudge: { [weak self] id, frames in self?.nudgeMask(id, frames: frames) })
+        }
+        if laneHeight(.text) > 0 {
+            elements += axBlockElements(model.project.texts, lane: .text, model: model,
+                                         id: { $0.id }, start: { $0.start }, end: { $0.end },
+                                         label: { "Text, \($0.text)" },
+                                         nudge: { [weak self] id, frames in
+                                             guard let self, let model = self.model, let t = model.project.texts.first(where: { $0.id == id.uuidString }) else { return }
+                                             model.edit("Move Text") { $0.moveText(id, toStart: t.start + Double(frames) * Self.axFrameSeconds) }
+                                         })
         }
         if bounds.height >= contentHeight + 26 {
             let overview = axElement(frame: overviewRect, label: "Timeline overview", nudge: { [weak self] direction in
