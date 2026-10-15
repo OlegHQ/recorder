@@ -25,6 +25,16 @@ notarize() {
     fi
 }
 
+# Stapling looks the ticket up on Apple's CDN; CI runners intermittently lose that connection (-1005).
+retry() {
+    for attempt in 1 2 3 4 5; do
+        "$@" && return 0
+        echo "retry $attempt/5 failed: $*" >&2
+        sleep 30
+    done
+    return 1
+}
+
 for arch in arm64 x86_64; do
     triple="$arch-apple-macosx15.0"
     scratch="$work/$arch"
@@ -47,8 +57,8 @@ codesign --verify --deep --strict --verbose=2 "$app"
 if [ -n "${NOTARY_PROFILE:-}" ]; then
     ditto -c -k --keepParent "$app" "$work/Recorder.zip"
     notarize "$work/Recorder.zip"
-    xcrun stapler staple "$app"
-    xcrun stapler validate "$app"
+    retry xcrun stapler staple "$app"
+    retry xcrun stapler validate "$app"
     spctl --assess --type execute --verbose=2 "$app"
 fi
 
@@ -72,8 +82,8 @@ hdiutil verify "$dmg"
 if [ -n "${NOTARY_PROFILE:-}" ]; then
     codesign --sign "$SIGN_ID" --timestamp "$dmg"
     notarize "$dmg"
-    xcrun stapler staple "$dmg"
-    xcrun stapler validate "$dmg"
+    retry xcrun stapler staple "$dmg"
+    retry xcrun stapler validate "$dmg"
     spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 fi
 printf '%s\n' "$dmg"
