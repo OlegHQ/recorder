@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreMedia
+import RecorderCore
 
 /// SPEC §5/§6 timeline audio lane: peak-extracts a project's mic track (else system) with
 /// `AVAssetReader` into an in-memory cache, for drawing inside clip blocks mapped through
@@ -27,6 +28,12 @@ enum Waveform {
         let result = try await extractPeaks(from: url)
         cache[url] = result
         return result
+    }
+
+    /// SPEC "Voice": silent source-time spans of the mic track (shared by the timeline hatching and Split at Pauses).
+    static func silent(in url: URL) async -> [TimeRange] {
+        let peaks = (try? await peaks(for: url)) ?? []
+        return silentRanges(levels: peaks, perSecond: Double(peaksPerSecond))
     }
 
     private static func extractPeaks(from url: URL) async throws -> [Float] {

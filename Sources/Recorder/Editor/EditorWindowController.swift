@@ -543,6 +543,16 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         model.edit("Speed Up Typing") { $0.speedUpTyping(ranges) }
     }
 
+    /// T-626: splits clips at both edges of every silent mic span (`Project.splitAtPauses`); never removes anything.
+    @objc func splitAtPauses(_ sender: Any?) { Task { @MainActor in await splitAtPausesAsync() } }
+
+    func splitAtPausesAsync() async {
+        guard model.project.source.hasMic, let url = Waveform.audioURL(in: model.packageURL) else { return }
+        let ranges = await Waveform.silent(in: url)
+        guard !ranges.isEmpty else { return }
+        model.edit("Split at Pauses") { $0.splitAtPauses(ranges) }
+    }
+
     /// T-604 wire: appends the selected clip's SOURCE range to `cursorHidden`, merged/sorted with
     /// whatever ranges were already hidden.
     @objc func hideCursorInSelectedClip(_ sender: Any?) {
