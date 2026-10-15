@@ -20,7 +20,7 @@ private let keyNames: [Int: String] = [
     0x12: "1", 0x13: "2", 0x14: "3", 0x15: "4", 0x16: "6", 0x17: "5", 0x19: "9", 0x1A: "7",
     0x1C: "8", 0x1D: "0",
 
-    0x29: ";", 0x27: "′", 0x2B: ",", 0x2F: ".", 0x2C: "/", 0x2A: "\\",
+    0x29: ";", 0x27: "'", 0x2B: ",", 0x2F: ".", 0x2C: "/", 0x2A: "\\",
     0x21: "[", 0x1E: "]", 0x1B: "-", 0x18: "=", 0x32: "`",
     0x38: "Shift", 0x3C: "Shift", 0x37: "Command", 0x36: "Command",
     0x3B: "Control", 0x3E: "Control", 0x3A: "Option", 0x3D: "Option", 0x39: "Caps Lock",
@@ -39,8 +39,22 @@ private let keyNames: [Int: String] = [
     0x62: "F7", 0x64: "F8", 0x65: "F9", 0x6D: "F10", 0x67: "F11", 0x6F: "F12",
 ]
 
-/// The chip text for a key event: macOS modifier order `⌃ ⌥ ⇧ ⌘`, then the key name.
-public func keyChipLabel(keyCode: Int, mods: UInt) -> String {
+public enum KeyCategory: Sendable { case shortcut, typing, navigation, modifier }
+
+/// Modifier-only presses, then ⌘/⌃/⌥ combos, then arrows/⏎ ⇥ ⌫ ⌦ ⎋/Home/End/PgUp/PgDn/F-keys, else typing (incl. Space, ⇧+letter).
+public func keyCategory(keyCode: Int, mods: UInt) -> KeyCategory {
+    if (54...63).contains(keyCode) { return .modifier }
+    if mods & (commandFlag | controlFlag | optionFlag) != 0 { return .shortcut }
+    let navigation: Set<Int> = [36, 48, 51, 53, 76, 117, 115, 119, 116, 121, 123, 124, 125, 126,
+                                122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
+    return navigation.contains(keyCode) ? .navigation : .typing
+}
+
+/// The chip text for a key event: macOS modifier order `⌃ ⌥ ⇧ ⌘`, then the key name. A plain typed key
+/// uses the recorded character (layout-aware); modifier-only presses are just the modifier's name.
+public func keyChipLabel(keyCode: Int, mods: UInt, ch: String? = nil) -> String {
+    if (54...63).contains(keyCode) { return keyNames[keyCode] ?? "Key \(keyCode)" }
+    if let ch, ch != " ", mods & (commandFlag | controlFlag | optionFlag) == 0 { return ch }
     var parts: [String] = []
     if mods & controlFlag != 0 { parts.append("⌃") }
     if mods & optionFlag != 0 { parts.append("⌥") }
@@ -50,16 +64,22 @@ public func keyChipLabel(keyCode: Int, mods: UInt) -> String {
     return parts.joined(separator: " ")
 }
 
-/// The most recent `.key` event within `hold` seconds before `t`, as a chip label + its age
-/// (seconds since that key was pressed). `nil` once it has aged out. Pure and order-independent:
-/// the result only depends on event timestamps, not on `events`' array order.
-public func activeKeyChip(events: [InputEvent], atSource t: Double, hold: Double = 1.2, allKeys: Bool = true) -> (label: String, age: Double)? {
-    let candidates = events.filter { $0.k == .key && $0.t <= t && t - $0.t < hold && (allKeys || isShortcutKey(code: $0.keyCode ?? -1, mods: $0.mods ?? 0)) }
-    guard let latest = candidates.max(by: { $0.t < $1.t }) else { return nil }
-    return (keyChipLabel(keyCode: latest.keyCode ?? 0, mods: latest.mods ?? 0), t - latest.t)
-}
-
-public func isShortcutKey(code: Int, mods: UInt) -> Bool {
-    mods & (commandFlag | controlFlag | optionFlag) != 0 ||
-    [36, 48, 51, 53, 76, 123, 124, 125, 126, 122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111].contains(code)
+/// Every enabled-category `.key` event within `hold` seconds before `t` (last 8), joined into one label, plus the
+/// age of the newest. Plain typed characters run together (`hello`), others are space-separated (`⌘ C ⌘ V`).
+/// `nil` once all have aged out. Pure and order-independent: only event timestamps matter.
+public func activeKeyChip(events: [InputEvent], atSource t: Double, hold: Double = 1.2,
+                          categories: Set<KeyCategory> = [.shortcut, .typing, .navigation, .modifier]) -> (label: String, age: Double)? {
+    let active = events.filter {
+        $0.k == .key && $0.t <= t && t - $0.t < hold && categories.contains(keyCategory(keyCode: $0.keyCode ?? -1, mods: $0.mods ?? 0))
+    }.sorted { $0.t < $1.t }.suffix(8)
+    guard let latest = active.last else { return nil }
+    var label = ""
+    var previousTyped = false
+    for e in active {
+        let part = keyChipLabel(keyCode: e.keyCode ?? 0, mods: e.mods ?? 0, ch: e.ch)
+        let typed = e.ch != nil && part == e.ch
+        label += (label.isEmpty || (previousTyped && typed) ? "" : " ") + part
+        previousTyped = typed
+    }
+    return (label, t - latest.t)
 }

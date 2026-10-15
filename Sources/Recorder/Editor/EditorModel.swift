@@ -234,7 +234,7 @@ import RecorderCore
                                         hidden: [], duration: project.timelineSourceDuration)
         let cameraPath = CameraPath(zooms: project.zooms, cursor: timelineCursor,
                                      spring: project.animation.screen == .focused ? .focused : .smooth,
-                                     duration: project.timelineSourceDuration)
+                                     duration: project.timelineSourceDuration, clips: project.clips)
         return (cursorPath, cameraPath)
     }
 

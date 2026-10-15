@@ -13,11 +13,12 @@ public struct InputEvent: Codable, Equatable, Sendable {
     public var keyCode: Int?   // only for k == .key
     public var mods: UInt?     // only for k == .key
     public var id: String?     // cursor image hash for k == .cursor
+    public var ch: String?     // typed character in the recording layout, only for k == .key (absent in older projects)
 
     public init(t: Double, k: Kind, x: Double? = nil, y: Double? = nil, b: Int? = nil,
-                keyCode: Int? = nil, mods: UInt? = nil, id: String? = nil) {
+                keyCode: Int? = nil, mods: UInt? = nil, id: String? = nil, ch: String? = nil) {
         self.t = t; self.k = k; self.x = x; self.y = y; self.b = b
-        self.keyCode = keyCode; self.mods = mods; self.id = id
+        self.keyCode = keyCode; self.mods = mods; self.id = id; self.ch = ch
     }
 }
 

@@ -117,7 +117,7 @@ public func cameraCrop(source: CGSize, destination: CGSize) -> CGRect {
 /// Settings clips use the same source-time ranges as camera layouts.
 public func overlayKeys(project: Project, atSource t: Double) -> (settings: Keys, opacity: Double) {
     let base = project.keys
-    guard let block = project.keystrokeClips.first(where: { t >= $0.start && t <= $0.end }),
+    guard let block = project.keystrokeClips.first(where: { t >= $0.start && t < $0.end }),
           let target = block.keys else { return (base, base.show ? 1 : 0) }
     let amount = layoutMix(layouts: project.keystrokeClips, atSource: t).amount
     func mix(_ a: Double, _ b: Double) -> Double { a + (b - a) * amount }

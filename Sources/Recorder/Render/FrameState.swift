@@ -51,14 +51,14 @@ struct FrameState {
 ///
 /// `view`/`prevView`/`cursor` come from `model`'s cached `CameraPath`/`CursorPath` (rebuilt on edit,
 /// not here — T-413) sampled at `outputTime`'s SOURCE time via `TimeMap`, per SPEC §6.2's
-/// `FrameState(t_out)` formula: `prevView` samples the camera path `1/60 s` earlier in source time
+/// `FrameState(t_out)` formula: `prevView` samples the camera path `timeScale/60` source seconds (1/60 s of output) earlier
 /// (for motion blur, T-501), not through `TimeMap` a second time.
 @MainActor
 func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.Texture?, camera: FrameState.Texture?, size: CGSize) -> FrameState {
     let sourceTime = model.timeMap.sourceTime(atOutput: outputTime)
     let view = model.cameraPath.sample(atSource: sourceTime)
-    let prevView = model.cameraPath.sample(atSource: sourceTime - 1.0 / 60)
     let clip = model.project.clipIndex(atOutput: outputTime).map { model.project.clips[$0] }
+    let prevView = model.cameraPath.sample(atSource: sourceTime - (clip?.timeScale ?? 1) / 60)
     let mediaTime = clip.map { $0.mediaTime(atSource: sourceTime) } ?? sourceTime
     let cursor = model.cursorPath.sample(atSource: mediaTime)
     let (layoutKind, layoutAmount) = layoutMix(layouts: model.project.layouts, atSource: sourceTime)
@@ -67,8 +67,8 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
     var keyChip: FrameState.KeyChipState?
     let keys = overlayKeys(project: model.project, atSource: sourceTime)
     let keysBlock = model.project.keystrokeClips.first { sourceTime >= $0.start && sourceTime < $0.end }
-    let keyTime = keysBlock.map { ($0.mediaStart ?? $0.start) + (sourceTime - $0.start) * ($0.mediaRate ?? 1) } ?? sourceTime
-    if keys.opacity > 0, let chip = activeKeyChip(events: model.events.events, atSource: keyTime, hold: keys.settings.hold, allKeys: keys.settings.allKeys) {
+    let keyTime = keysBlock.map { ($0.mediaStart ?? $0.start) + (sourceTime - $0.start) * ($0.mediaRate ?? 1) } ?? mediaTime // media clock, like the cursor
+    if keys.opacity > 0, let chip = activeKeyChip(events: model.events.events, atSource: keyTime, hold: keys.settings.hold, categories: keys.settings.categories) {
         keyChip = FrameState.KeyChipState(label: chip.label, age: chip.age)
     }
     let videoVisible = model.project.clipIndex(atOutput: outputTime).map { !model.project.clips[$0].isEmpty } ?? false

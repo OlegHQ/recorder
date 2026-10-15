@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import RecorderCore
 
@@ -33,9 +34,9 @@ import Testing
         InputEvent(t: 5.0, k: .move, x: 0.5, y: 0.5),                // non-key, must be ignored
     ]
 
-    // Just after the second key: it's the most recent one within the hold window.
+    // Just after the second key: both are within the hold window, so they merge into one label (age = newest).
     let hit = activeKeyChip(events: events, atSource: 1.6, hold: 1.2)
-    #expect(hit?.label == "C")
+    #expect(hit?.label == "⌘ A C")
     #expect(hit.map { abs($0.age - 0.1) < 1e-9 } == true)
 
     // Right at the edge of the hold window for the second key (age == hold): expired.
@@ -44,7 +45,7 @@ import Testing
     // Well before either key: nothing active yet.
     #expect(activeKeyChip(events: events, atSource: 0.5, hold: 1.2) == nil)
 
-    // Between the two keys, but still within hold of the first: the first key is still shown.
+    // Between the two keys: only the first exists yet.
     let mid = activeKeyChip(events: events, atSource: 1.2, hold: 1.2)
     #expect(mid?.label == "⌘ A")
 
@@ -53,4 +54,40 @@ import Testing
     let shuffledHit = activeKeyChip(events: shuffled, atSource: 1.6, hold: 1.2)
     #expect(shuffledHit?.label == hit?.label)
     #expect(shuffledHit.map { abs($0.age - (hit?.age ?? -1)) < 1e-9 } == true)
+}
+
+@Test func keyCategories() {
+    let command: UInt = 0x100000, shift: UInt = 0x20000
+    #expect(keyCategory(keyCode: 0x08, mods: command) == .shortcut)
+    #expect(keyCategory(keyCode: 0x00, mods: 0) == .typing)
+    #expect(keyCategory(keyCode: 0x00, mods: shift) == .typing)
+    #expect(keyCategory(keyCode: 0x31, mods: 0) == .typing) // Space
+    #expect(keyCategory(keyCode: 0x7B, mods: 0) == .navigation)
+    #expect(keyCategory(keyCode: 0x33, mods: 0) == .navigation)
+    #expect(keyCategory(keyCode: 0x73, mods: 0) == .navigation) // Home
+    #expect(keyCategory(keyCode: 0x7A, mods: 0) == .navigation) // F1
+    #expect(keyCategory(keyCode: 0x37, mods: command) == .modifier) // ⌘ press itself
+    #expect(keyCategory(keyCode: 0x38, mods: shift) == .modifier)
+}
+
+@Test func keyChipMergesAndFilters() {
+    let events = [
+        InputEvent(t: 1.0, k: .key, keyCode: 0x08, mods: 0x100000, ch: "c"),
+        InputEvent(t: 1.2, k: .key, keyCode: 0x09, mods: 0x100000, ch: "v"),
+        InputEvent(t: 1.4, k: .key, keyCode: 0x04, mods: 0, ch: "h"),
+        InputEvent(t: 1.5, k: .key, keyCode: 0x22, mods: 0, ch: "i"),
+        InputEvent(t: 1.6, k: .key, keyCode: 0x7B, mods: 0),
+    ]
+    #expect(activeKeyChip(events: events, atSource: 1.7)?.label == "⌘ C ⌘ V hi ←")
+    #expect(activeKeyChip(events: events, atSource: 1.7, categories: [.shortcut])?.label == "⌘ C ⌘ V")
+    #expect(activeKeyChip(events: events, atSource: 1.7, categories: [.typing])?.label == "hi")
+    #expect(activeKeyChip(events: events, atSource: 1.7, categories: [])  == nil)
+    #expect(keyChipLabel(keyCode: 0x27, mods: 0) == "'")
+}
+
+@Test func keysLegacyAllKeysDecode() throws {
+    #expect(try JSONDecoder().decode(Keys.self, from: Data(#"{"show":true,"allKeys":false}"#.utf8)).typing == false)
+    #expect(try JSONDecoder().decode(Keys.self, from: Data(#"{"show":true,"allKeys":true}"#.utf8)).typing == true)
+    let fresh = try JSONDecoder().decode(Keys.self, from: Data(#"{"show":true}"#.utf8))
+    #expect(fresh.shortcuts && fresh.typing && fresh.navigation && fresh.modifiers)
 }

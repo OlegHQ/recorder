@@ -9,9 +9,8 @@ import ScreenCaptureKit
 
 /// Records mouse/keyboard/cursor activity during a recording (SPEC §4.8) into normalised source
 /// coordinates, on the same "seconds since first screen frame" clock as the media writers (T-110).
-/// Typed key codes are captured only when Record all keystrokes is explicitly enabled.
+/// Every key is captured (decision 2026-10-15); the editor filters by category. Keys stay local.
 final class EventRecorder {
-    private let recordAllKeys: Bool
     private let target: CaptureTarget
     private let cursorsDir: URL
 
@@ -33,8 +32,7 @@ final class EventRecorder {
     private var cursorTimer: DispatchSourceTimer?
     private var windowFrameTimer: DispatchSourceTimer?
 
-    init(target: CaptureTarget, cursorsDir: URL, recordAllKeys: Bool = false) {
-        self.recordAllKeys = recordAllKeys
+    init(target: CaptureTarget, cursorsDir: URL) {
         self.target = target
         self.cursorsDir = cursorsDir
         self.currentTargetFrame = target.frameInScreenPoints
@@ -51,9 +49,10 @@ final class EventRecorder {
         if case .window = target { startWindowFrameTimer() }
     }
 
-    func pause() { pauseStartSeconds = EventRecorder.hostSeconds() }
+    func pause() { lock.lock(); pauseStartSeconds = EventRecorder.hostSeconds(); lock.unlock() }
 
     func resume() {
+        lock.lock(); defer { lock.unlock() }
         guard let started = pauseStartSeconds else { return }
         pausedSoFar += EventRecorder.hostSeconds() - started
         pauseStartSeconds = nil
@@ -81,7 +80,8 @@ final class EventRecorder {
         return Double(ticks) * Double(info.numer) / Double(info.denom) / 1_000_000_000
     }
 
-    private func outputTime(_ hostSeconds: Double) -> Double { hostSeconds - t0Seconds - pausedSoFar }
+    private func outputTime(_ hostSeconds: Double) -> Double { lock.lock(); defer { lock.unlock() }; return hostSeconds - t0Seconds - pausedSoFar }
+    private var isPaused: Bool { lock.lock(); defer { lock.unlock() }; return pauseStartSeconds != nil }
 
     private func record(_ event: InputEvent) { lock.lock(); events.append(event); lock.unlock() }
 
@@ -135,7 +135,7 @@ final class EventRecorder {
         // `CGEvent.timestamp` is already nanoseconds (not mach ticks): on Apple Silicon the 125/3
         // timebase would inflate it ~41.7× and push every event past the end of the recording.
         let t = outputTime(Double(event.timestamp) / 1_000_000_000)
-        guard t >= 0 else { return } // pre-t0 stragglers
+        guard t >= 0, !isPaused else { return } // pre-t0 stragglers; nothing is recorded while paused
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             guard t - lastMoveT >= 1.0 / 240 else { return } // coalesce moves closer than 1/240 s
@@ -157,7 +157,10 @@ final class EventRecorder {
             let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
             let flags: [Int: CGEventFlags] = [54: .maskCommand, 55: .maskCommand, 56: .maskShift, 60: .maskShift,
                 58: .maskAlternate, 61: .maskAlternate, 59: .maskControl, 62: .maskControl, 57: .maskAlphaShift, 63: .maskSecondaryFn]
-            if let flag = flags[code], event.flags.contains(flag) { recordKey(t: t, event: event) }
+            // Modifier-only press (not release): a `.key` event, never `.typing`.
+            if let flag = flags[code], event.flags.contains(flag) {
+                record(InputEvent(t: t, k: .key, keyCode: code, mods: UInt(event.flags.rawValue)))
+            }
         default:
             break
         }
@@ -171,14 +174,18 @@ final class EventRecorder {
         }
     }
 
-    /// Shortcuts-only by default; recording all keys is an explicit recording preference.
     private func recordKey(t: Double, event: CGEvent) {
+        guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { return }
         let flags = event.flags
-        let hasModifier = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-        if recordAllKeys || hasModifier || EventRecorder.nonPrintingKeyCodes.contains(keyCode) {
-            record(InputEvent(t: t, k: .key, keyCode: keyCode, mods: UInt(flags.rawValue)))
-        }
+        // The typed character in the current layout (nil for control/function keys).
+        var buf = [UniChar](repeating: 0, count: 4)
+        var n = 0
+        event.keyboardGetUnicodeString(maxStringLength: 4, actualStringLength: &n, unicodeString: &buf)
+        let str = String(utf16CodeUnits: buf, count: n)
+        let ch = str.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f && !(0xF700...0xF8FF).contains($0.value) }) && n > 0 ? str : nil
+        record(InputEvent(t: t, k: .key, keyCode: keyCode, mods: UInt(flags.rawValue), ch: ch))
+        let hasModifier = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
         if !hasModifier && !EventRecorder.nonPrintingKeyCodes.contains(keyCode) {
             record(InputEvent(t: t, k: .typing))
         }
