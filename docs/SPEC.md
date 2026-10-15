@@ -406,7 +406,7 @@ is recorded to `camera.mov` and composited in the editor. Its corner becomes the
 - `t0` = PTS of the first complete screen frame. Every sample/event is stored as `pts − t0 − pausedSoFar`.
 - `EventRecorder`: listen-only `CGEventTap` for `mouseMoved`, `left/right/otherMouseDown/Up`, `*MouseDragged`, `scrollWheel`, `keyDown`, `flagsChanged`.
   Position is converted to **normalised source coordinates** (0…1, origin top-left of the captured rect/window) at record time; for window capture re-read the window frame (`SCWindow.frame` via a 10 Hz poll) so moves are tolerated.
-  Key events store `keyCode` + modifier flags + the typed character (`UCKeyTranslate`, current layout). Every key is recorded (decision 2026-10-15; the Record all keystrokes setting is removed); the editor turns key categories off (§Editor roadmap). Secure-input fields are already invisible to the event tap. Keys pressed while paused are dropped. Modifier-only presses never produce `.typing` events. Older timestamp-only events cannot be reconstructed.
+  Key events store `keyCode` + modifier flags + the typed character `ch` (`CGEvent.keyboardGetUnicodeString`, current layout). Every key is recorded (decision 2026-10-15; the Record all keystrokes setting is removed); the editor turns key categories off (§Editor roadmap). Secure-input fields are already invisible to the event tap. Keys pressed while paused are dropped. Modifier-only presses never produce `.typing` events. Older timestamp-only events cannot be reconstructed.
 - Cursor image: 60 Hz timer reads `NSCursor.currentSystem` (deprecated but functional; ponytail: replace if Apple removes it); hash the image, write new ones to `cursors/<hash>.png` at the largest representation with hot-spot, and log `cursorChange` events.
 
 ---
@@ -912,4 +912,6 @@ Source: proposal https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA (decisions 20
   cursor is normalised against the visible window at render time (hidden outside it). `Project.windowShots` (source-time
   blocks holding a window index) drive a Window lane; they are auto-generated at the end of recording (switch to the
   clicked window, min shot 1.5 s). The visible window is aspect-fit like a single-window recording; hard cut. Crop is
-  disabled for multi-window projects.
+  disabled for multi-window projects. Implementation: the composition inserts the visible window's footage into the one
+  screen video track, split at shot edges (no per-window tracks); `Source.windowSizes` holds each window's pixel size and
+  `events.json` `windowFrames` holds global-point frame samples written only on change.

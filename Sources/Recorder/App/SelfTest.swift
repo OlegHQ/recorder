@@ -3000,7 +3000,7 @@ enum SelfTest {
             try await MainActor.run {
                 let pasteboard = NSPasteboard(name: NSPasteboard.Name("recorder-clipboard-test-\(UUID().uuidString)"))
                 defer { pasteboard.releaseGlobally() }
-                for lane in Lane.allCases {
+                for lane in Lane.allCases where lane != .window { // Window lane exists only in multi-window projects
                     var project = Project(source: Source(duration: 12, hasCamera: true), clips: [Clip(sourceStart: 0, sourceEnd: 12)])
                     project.linkVideoEdits = false
                     project.zooms = [Zoom(start: 2, end: 6, scale: 3)]

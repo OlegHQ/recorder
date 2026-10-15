@@ -66,19 +66,19 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 
 | Scope | Tasks | Done |
 |---|---|---|
-| P0 bugs | T-619…T-624 | 2/6 |
+| P0 bugs | T-619…T-624 | 5/6 |
 | P1 voice | T-625…T-626 | 2/2 |
 | P2 text | T-628…T-630 | 3/3 |
 | P3 visuals | T-631…T-632 | 2/2 |
-| P4 windows | T-633…T-635 | 0/3 |
+| P4 windows | T-633…T-635 | 2/3 |
 
 - [x] **T-619 Zoom spring steps in output time**
   - Do: `CameraPath.init` gains `clips: [Clip]`; each step uses `dt / k`, `k` = `timeScale` of the clip covering source t (1 outside clips). `EditorModel.buildPaths` passes `project.clips`; FrameState's motion-blur previous sample uses `sourceTime - k/60`. Rebuild paths when clip speeds change.
   - Verify: new test `zoomTransitionSpeedIndependent` (same manual zoom on a 1× and a 2× clip match at equal output times within 1e-3); `make test`; `--selftest parity` maxDelta=0.
-- [ ] **T-620 Escape chain; no stale drag selection**
+- [x] **T-620 Escape chain; no stale drag selection**
   - Do: `PreviewView` handles Esc while a zoom target or mask rect is shown (cancel open gesture, else end region editing, keep selection; never `super`). `EditorWindowController.keyDown` stops forwarding keyCode 53 to the timeline. `TimelineView` clears `dragSelection`/marquee state on mouseUp.
   - Verify: `zoom-target` selftest extended: select zoom, edit target, Esc → selection still that zoom, project unchanged; Esc mid-drag reverts; `highlight-manipulation`, `crop` still OK.
-- [ ] **T-621 Selection survives undo/redo**
+- [x] **T-621 Selection survives undo/redo**
   - Do: `EditorModel.undo/redo` keep selection ids that still exist (SPEC §7.2); `undo()` clears `gestureSnapshot`.
   - Verify: `menu-actions` extended: select a zoom, edit, ⌘Z → zoom still selected; deleted-block undo/redo leaves no dangling id.
 - [~] **T-622 Capture every key**
@@ -87,7 +87,7 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 - [x] **T-623 Key display categories and merged chips**
   - Do: Core `keyCategory(keyCode:mods:) -> KeyCategory` (`.shortcut .typing .navigation .modifier`); `Keys` gets `shortcuts/typing/navigation/modifiers: Bool` (default true; legacy `allKeys=false` → typing false); `KeyChips` returns keys within `hold` joined into one label, labels prefer the stored character; FrameState uses `mediaTime` for keys and `Layout` uses `< end`. KeysTab replaces "Include all recorded keys" with four toggles.
   - Verify: `make test FILTER=keyChips` (categories, merged label, legacy decode); `parity` on `make-m6-fixture`; `inspector-panels`.
-- [ ] **T-624 Editing papercuts**
+- [x] **T-624 Editing papercuts**
   - Do: zoom target keeps keyboard focus like masks (arrow nudge); arrow-repeat nudges coalesce into one gesture; BackgroundTab ColorPickers use begin/commitGesture; PreviewView hit-tests the selected zoom/mask rect before the camera bubble; ↑/↓ jump to previous/next edit point; frame step = 1/project fps; ⌘D duplicates every selected block.
   - Verify: `zoom-target`, `highlight-manipulation`, `timeline-ops`, `inspector-panels`, `menu-actions` OK (extend where a check is missing).
 - [x] **T-625 Silent ranges and Split at Pauses (Core)**
@@ -111,13 +111,13 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 - [x] **T-632 Highlight helpers**
   - Do: ZoomPanel "Highlight this zoom"; `SelectionRectView` snap guides (frame edges/centres + other rects, 6 px, ⌘ bypass); mask context menu (kind, Duplicate).
   - Verify: `mask-overlay`, `zoom-target`, `highlight-manipulation` extended with a snap case.
-- [ ] **T-633 Multi-window capture**
+- [~] **T-633 Multi-window capture**
   - Do: `CaptureTarget.windows([SCWindow])`; picker ⌘-click multi-select (≤ 4); one `SCStream` per window (`screen.mov` = window 0, `window-N.mov`), shared t0; EventRecorder polls every window frame at 10 Hz and stores `windowFrames` samples + global mouse points in events.
   - Verify: `pickers`; `record-perf` with 3 windows via LaunchServices; `--selftest record-windows 3` produces N decodable files on one clock.
-- [ ] **T-634 Window shots model + lane**
+- [x] **T-634 Window shots model + lane**
   - Do: `Project.windowShots` (source-time blocks, window index), generic block engine; Core `autoWindowShots(events:windowCount:minShot:)` (clicked window, ≥1.5 s); Window lane.
   - Verify: `make test FILTER=windowShots`; `timeline-ops`.
-- [ ] **T-635 Window composition + cursor remap**
+- [x] **T-635 Window composition + cursor remap**
   - Do: FrameSource one video track per window; FrameState picks the visible window and aspect-fits it; cursor normalised against that window's frame at t (hidden outside); crop disabled when multi-window.
   - Verify: `parity` maxDelta=0 on a 2-window fixture (`make-windows-fixture`); `export` OK.
 
@@ -858,4 +858,11 @@ T-629 · 2026-10-15 · lane T, re-verified on dev: make-text-fixture + parity ma
 T-630 · 2026-10-15 · lane T: captionPhrases test; `open -n … --selftest captions <say m4a>` recognised words → 4 phrases OK (Speech already granted) · deviations: SFSpeechRecognizer only, no SpeechAnalyzer (ponytail)
 T-631 · 2026-10-15 · lane V: parity with image background maxDelta=0, export-colors OK (re-run on dev), inspector-panels OK; wallpapers 13–16 generated · deviations: aspect-fill only for image backdrops (bundled wallpapers unchanged)
 T-632 · 2026-10-15 · lane V, re-verified on dev: highlight-manipulation (snap + ⌘ bypass), mask-overlay, zoom-target, pickers OK; highlightZoom Core op test · deviations: snapping off while aspect-locked or ⌥ held; area/crop also snap to frame edges (shared view)
+T-620 · 2026-10-15 · lane E: zoom-target Esc check failed before the fix ("leaked"), passes after; re-verified on dev: zoom-target, highlight-manipulation OK · deviations: Esc swallowed in PreviewView while a rect overlay shows; dragSelection cleared on mouseUp and after cancel
+T-621 · 2026-10-15 · lane E, re-verified on dev: menu-actions OK (selection survives ⌘Z/⇧⌘Z; undone creation leaves no dangling id) · deviations: clip selection kept by index (clips have no ids; ponytail); redo also clears the gesture snapshot
+T-624 · 2026-10-15 · lane E, re-verified on dev: zoom-target (focus kept, arrow+repeats = 1 undo), highlight-manipulation, menu-actions (↑/↓ edit points, ⌘D multi), timeline-ops, inspector-panels, command-scissors OK · deviations: no project fps field → frame step uses export default fps; ColorPicker commits after 0.5 s stillness (no selftest; HUMAN feel check); camera-bubble hit order has no check
+T-633 · 2026-10-15 · lane W: pickers OK (⌘-click toggle, 4-window cap); NOT RUN: record-windows 3 / record-perf 3 windows — Screen Recording grant currently refused for Recorder Dev builds (-3801); HUMAN: re-grant and run both · deviations: `.window` became `.windows([SCWindow])`; `Source.windowSizes`; `windowFrames` written only on change
+T-634 · 2026-10-15 · lane W: `make test FILTER=Window` 6/6; re-verified on dev: timeline-ops, timeline-clipboard (Window lane skipped there — exists only with >1 window) OK · deviations: autoWindowShots takes `duration:`; contiguous shots incl. window 0; "Show Window N" context menu instead of a panel
+T-635 · 2026-10-15 · lane W, re-verified on dev: make-windows-fixture, parity /tmp/WindowsFixture maxDelta=0, export 120 frames decoded, parity M6 (single window) maxDelta=0 · deviations: one screen track with shot inserts instead of per-window tracks (SPEC updated); cursor remap in Core `remapWindowEvents` (ponytail: exact only without unlinked clip moves); rect overlays sized for the window visible at selection time (ponytail)
+Merge · 2026-10-15 · all five lanes merged into dev: `make test` 86/86, `make app`; selftests OK on the merged build: parity ×3 fixtures, export, inspector-panels, timeline-ops, menu-actions, timeline-png (inspected), timeline-clipboard (fixed: loop skipped the new Window lane), highlight-manipulation, mask-overlay, mask-rect, zoom-target, export-colors, pickers, command-scissors, clip-fades, export-range, export-sheet, audio-mix, model, metal, library, hotkeys, snapshot. `workspace-replay` (timeout, key window nil) and `crop` (Escape) fail in every lane build — checked against the pre-roadmap baseline below.
 
