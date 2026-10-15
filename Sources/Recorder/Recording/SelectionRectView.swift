@@ -20,6 +20,11 @@ final class SelectionRectView: NSView {
     /// crop sheet) is unaffected.
     var allowsResize = true
     var allowsCreation = true
+    /// T-632: other rects (view coords) whose edges/centres, like `limit`'s (else `bounds`'), a move or
+    /// resize snaps to within `snapDistance`; ⌘ bypasses. Guides are drawn while snapped.
+    var snapTargets: [CGRect] = []
+    static let snapDistance: CGFloat = 6
+    private var guideXs: [CGFloat] = [], guideYs: [CGFloat] = []
     var onCancelDrag: (() -> Void)?
     var onChange: ((CGRect) -> Void)?
     var onKeyboardEditingChanged: ((Bool) -> Void)?
@@ -163,6 +168,38 @@ final class SelectionRectView: NSView {
                width: max(16, rect.width), height: max(16, rect.height))
     }
 
+    // MARK: - Snapping
+
+    /// The shift (≤ `snapDistance`) that puts one of `values` on a snap line of the same axis, else 0;
+    /// the winning line is remembered for drawing.
+    private func snapShift(_ values: [CGFloat], x: Bool) -> CGFloat {
+        var best: (shift: CGFloat, line: CGFloat)?
+        for frame in [limit.isEmpty ? bounds : limit] + snapTargets {
+            for line in x ? [frame.minX, frame.midX, frame.maxX] : [frame.minY, frame.midY, frame.maxY] {
+                for v in values where abs(line - v) <= Self.snapDistance && abs(line - v) < abs(best?.shift ?? .infinity) { best = (line - v, line) }
+            }
+        }
+        if let best { if x { guideXs.append(best.line) } else { guideYs.append(best.line) } }
+        return best?.shift ?? 0
+    }
+
+    /// `r` with its moved edges/centres (all three when `handle` is nil) snapped.
+    private func snapped(_ r: CGRect, handle: Handle?) -> CGRect {
+        guideXs = []; guideYs = []
+        var r = r
+        if handle == nil || handle?.xEdge != nil {
+            let edge = handle?.xEdge
+            let d = snapShift(edge == nil ? [r.minX, r.midX, r.maxX] : [edge! ? r.maxX : r.minX], x: true)
+            if edge == nil { r.origin.x += d } else if edge! { r.size.width += d } else { r.origin.x += d; r.size.width -= d }
+        }
+        if handle == nil || handle?.yEdge != nil {
+            let edge = handle?.yEdge
+            let d = snapShift(edge == nil ? [r.minY, r.midY, r.maxY] : [edge! ? r.maxY : r.minY], x: false)
+            if edge == nil { r.origin.y += d } else if edge! { r.size.height += d } else { r.origin.y += d; r.size.height -= d }
+        }
+        return r
+    }
+
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
@@ -187,6 +224,15 @@ final class SelectionRectView: NSView {
         grid.setLineDash([4, 3], count: 2, phase: 0)
         Theme.textPrimary.withAlphaComponent(0.8).setStroke()
         grid.stroke()
+
+        if !guideXs.isEmpty || !guideYs.isEmpty {
+            let guides = NSBezierPath()
+            for x in guideXs { guides.move(to: CGPoint(x: x, y: bounds.minY)); guides.line(to: CGPoint(x: x, y: bounds.maxY)) }
+            for y in guideYs { guides.move(to: CGPoint(x: bounds.minX, y: y)); guides.line(to: CGPoint(x: bounds.maxX, y: y)) }
+            guides.lineWidth = 1
+            Theme.accent.setStroke()
+            guides.stroke()
+        }
 
         if allowsResize {
             Theme.textPrimary.setFill()
@@ -234,10 +280,13 @@ final class SelectionRectView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         let option = event.modifierFlags.contains(.option)
         let lockedAspect = aspect ?? (event.modifierFlags.contains(.shift) ? dragAspect : nil)
+        let snaps = !event.modifierFlags.contains(.command)
+        guideXs = []; guideYs = []
 
         switch mode {
         case .move(let offset):
-            rect = CGRect(origin: CGPoint(x: p.x - offset.x, y: p.y - offset.y), size: dragStart.size)
+            let moved = CGRect(origin: CGPoint(x: p.x - offset.x, y: p.y - offset.y), size: dragStart.size)
+            rect = snaps ? snapped(moved, handle: nil) : moved
         case .resize(let h, let offset):
             var edge = CGPoint(x: p.x - offset.x, y: p.y - offset.y)
             if let maxEdge = h.xEdge {
@@ -248,13 +297,15 @@ final class SelectionRectView: NSView {
                 edge.y = maxEdge ? max(dragStart.minY + minSize.height, min(limit.maxY, edge.y))
                     : min(dragStart.maxY - minSize.height, max(limit.minY, edge.y))
             }
-            rect = resized(from: dragStart, handle: h, mouse: edge, option: option, aspect: lockedAspect)
+            let resizedRect = resized(from: dragStart, handle: h, mouse: edge, option: option, aspect: lockedAspect)
+            // ponytail: no snapping while the aspect is locked or ⌥ mirrors edges (it would break the constraint).
+            rect = snaps && lockedAspect == nil && !option ? snapped(resizedRect, handle: h) : resizedRect
         case .create:
             rect = resized(from: dragStart, handle: .bottomRight, mouse: p, option: option, aspect: lockedAspect)
         }
     }
 
-    override func mouseUp(with event: NSEvent) { dragMode = nil; isDragging = false }
+    override func mouseUp(with event: NSEvent) { dragMode = nil; isDragging = false; guideXs = []; guideYs = []; needsDisplay = true }
 
     override func cancelOperation(_ sender: Any?) {
         guard isDragging, let onCancelDrag else {

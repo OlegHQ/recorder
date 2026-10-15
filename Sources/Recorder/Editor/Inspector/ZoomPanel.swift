@@ -44,6 +44,14 @@ struct ZoomPanel: View {
                 Toggle("Instant (no animation)", isOn: instantBinding)
                     .modifier(InspectorReveal(identity: zoomID.uuidString, order: 3))
 
+                Button("Highlight this zoom") {
+                    var maskID: UUID?
+                    model.edit("Highlight zoom") { maskID = $0.highlightZoom(zoomID) }
+                    if let maskID { model.selection = [maskID] }
+                }
+                .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
+                .modifier(InspectorReveal(identity: zoomID.uuidString, order: 3))
+
                 HStack {
                     Button(zoom.enabled ? "Disable" : "Enable", action: toggleEnabled)
                         .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))

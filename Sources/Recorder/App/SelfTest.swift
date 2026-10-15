@@ -975,7 +975,7 @@ enum SelfTest {
 
             var project = Project(
                 title: "Fixture",
-                source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 2, duration: 60, hasCamera: true)
+                source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 2, duration: 60, hasCamera: true, hasMic: true)
             )
             project.clips = [
                 Clip(sourceStart: 0, sourceEnd: 15, speed: 1),
@@ -995,7 +995,7 @@ enum SelfTest {
             defer { try? fm.removeItem(at: tmp) }
 
             // T-416: a short synthetic mic track so the clip lane actually has a waveform to draw.
-            try synthesizeSineM4A(at: tmp.appendingPathComponent("mic.m4a"), duration: 15)
+            try synthesizeSineM4A(at: tmp.appendingPathComponent("mic.m4a"), duration: 15, silence: 6...10)
 
             let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
             let outputDuration = model.timeMap.outputDuration
@@ -1038,6 +1038,13 @@ enum SelfTest {
                 // mask [20, 26) source, inside the 2× clip1 -> output [17.5, 20.5); mask
                 // row is the 4th (ruler 22 + clip 44 + zoom 32 + layout 28 = 98...126, mask 126...154).
                 expect(CGPoint(x: x(19), y: view.laneMidY(.mask)), .blockBody(mask0ID), "maskBody")
+                // T-632: the mask context menu offers the kind submenu items + Duplicate.
+                let maskEvent = NSEvent.mouseEvent(with: .rightMouseDown, location: CGPoint(x: x(19), y: view.frame.height - view.laneMidY(.mask)), modifierFlags: [],  // flipped view, no window
+                                                   timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                let maskTitles = view.menu(for: maskEvent)?.items.map(\.title) ?? []
+                if !(["Cover", "Blur", "Highlight"].allSatisfy(maskTitles.contains) && maskTitles.contains(where: { $0.hasPrefix("Duplicate") })) {
+                    errors.append("mask context menu: \(maskTitles)")
+                }
                 expect(CGPoint(x: x(3), y: 10), .ruler, "ruler")
                 expect(CGPoint(x: x(25), y: 18), .cutBubble(afterClip: 1), "cutBubble")
                 if case .emptyLane(.zoom, _) = view.hitTest(at: CGPoint(x: x(40), y: view.laneMidY(.zoom))) {} else {
@@ -1836,8 +1843,9 @@ enum SelfTest {
             defer { try? fm.removeItem(at: tmp) }
 
             var fixtureProject = Project(title: "Menu Actions",
-                                          source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 1, duration: 30))
+                                          source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 1, duration: 30, hasMic: true))
             fixtureProject.clips = [Clip(sourceStart: 0, sourceEnd: 30, speed: 1)]
+            try synthesizeSineM4A(at: packageURL.appendingPathComponent("mic.m4a"), duration: 30, silence: 12...20) // T-626: Split at Pauses
             try fixtureProject.save(to: packageURL.appendingPathComponent("project.json"))
 
             var fixtureEvents = EventLog()
@@ -1857,7 +1865,7 @@ enum SelfTest {
                     ("File", "Save"), ("File", "Save As…"), ("File", "Show Raw Files"),
                     ("Edit", "Undo"), ("Edit", "Redo"), ("Edit", "Split"), ("Edit", "Remove"),
                     ("Edit", "Add Zoom"), ("Edit", "Regenerate Auto Zooms"), ("Edit", "Remove All Zooms"),
-                    ("Edit", "Restore All Cuts"), ("Edit", "Speed Up Typing"), ("Edit", "Hide Cursor in Selected Clip"),
+                    ("Edit", "Restore All Cuts"), ("Edit", "Speed Up Typing"), ("Edit", "Split at Pauses"), ("Edit", "Hide Cursor in Selected Clip"),
                     ("View", "Canvas"), ("View", "Cursor"), ("View", "Camera"), ("View", "Sound"),
                     ("View", "Motion"), ("View", "Keystrokes"), ("View", "Zoom In"), ("View", "Zoom Out"),
                     ("View", "Fit"), ("View", "Crop…"),
@@ -2043,6 +2051,19 @@ enum SelfTest {
             let expectedHeight = await MainActor.run { controller.model.project.source.pixelHeight }
             guard rep.pixelsWide == expectedWidth, rep.pixelsHigh == expectedHeight else {
                 throw Fail(description: "Copy Frame as Image: expected \(expectedWidth)x\(expectedHeight), got \(rep.pixelsWide)x\(rep.pixelsHigh)")
+            }
+
+            // T-626 Split at Pauses: mic silent 12...20 -> padded 12.15...19.85; splits only, one undo step.
+            let beforePauses = await MainActor.run { controller.model.project }
+            await controller.splitAtPausesAsync()
+            try await MainActor.run {
+                let clips = controller.model.project.clips
+                guard clips.count == 3, abs(clips[1].sourceStart - 12.15) < 0.1, abs(clips[1].sourceEnd - 19.85) < 0.1,
+                      clips.allSatisfy({ $0.speed == 1 }), controller.model.project.checkInvariants() == nil else {
+                    throw Fail(description: "Split at Pauses: unexpected clips \(clips)")
+                }
+                controller.performUndo(nil)
+                guard controller.model.project == beforePauses else { throw Fail(description: "Split at Pauses wasn't exactly one undo step") }
             }
         },
         // T-605 (non-Core half): `PresetStore` file storage + applying a saved preset through a real
@@ -3410,7 +3431,7 @@ private extension Array {
 
 // MARK: - T-416: a synthetic `mic.m4a` fixture (used by "timeline-png") so the waveform draws.
 
-private func synthesizeSineM4A(at url: URL, duration: Double, sampleRate: Double = 44_100) throws {
+private func synthesizeSineM4A(at url: URL, duration: Double, sampleRate: Double = 44_100, silence: ClosedRange<Double>? = nil) throws {
     struct Fail: Error, CustomStringConvertible { let description: String }
     let settings: [String: Any] = [
         AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000,
@@ -3425,7 +3446,7 @@ private func synthesizeSineM4A(at url: URL, duration: Double, sampleRate: Double
     for i in 0..<Int(buffer.frameLength) {
         let t = Double(i) / sampleRate
         let envelope = 0.15 + 0.45 * abs(sin(2 * .pi * 0.6 * t)) // varying peaks, like SPEC §7.1's mockup
-        channel[i] = Float(sin(2 * .pi * 220 * t) * envelope)
+        channel[i] = silence?.contains(t) == true ? 0 : Float(sin(2 * .pi * 220 * t) * envelope)
     }
     try file.write(from: buffer)
 }

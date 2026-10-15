@@ -131,6 +131,7 @@ final class MaskRectOverlay {
         }
         view.isHidden = false
         guard !selectionView.isDragging else { return } // an external change can't fight the mouse mid-drag
+        selectionView.snapTargets = model.project.masks.filter { $0.id != mask.id }.map { CropMapping.viewRect(from: $0.rect, imageRect: imageRect) }
         let local = CropMapping.viewRect(from: mask.rect, imageRect: imageRect)
         if selectionView.rect != local { selectionView.rect = local }
     }
@@ -280,6 +281,31 @@ extension MaskRectOverlay {
             drag(CGPoint(x: size.width - 5, y: size.height - 5), CGPoint(x: size.width / 2, y: size.height / 2))
             try check(model.project.masks[0].rect == saved, "outside drag recreated mask")
         }
+        // T-632 snapping: a move ending 3 px from the frame edge snaps to it (guide drawn); ⌘ bypasses;
+        // 20 px away does nothing; a nearby second mask's edge is a snap line too.
+        model.edit("Reset") { $0.masks = project.masks }
+        overlay.layout(in: CGSize(width: 1000, height: 1000))
+        let snapStart = rectangle.rect, snapW = overlay.imageRect.width
+        func moveBody(by dx: CGFloat, modifiers: NSEvent.ModifierFlags = []) {
+            let c = CGPoint(x: snapStart.midX, y: snapStart.midY)
+            overlay.view.mouseDown(with: event(.leftMouseDown, c))
+            overlay.view.mouseDragged(with: NSEvent.mouseEvent(with: .leftMouseDragged, location: CGPoint(x: c.x + dx, y: c.y), modifierFlags: modifiers,
+                timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+            overlay.view.mouseUp(with: event(.leftMouseUp, c))
+        }
+        moveBody(by: -(snapStart.minX - overlay.imageRect.minX) + 3)
+        try check(abs(rectangle.rect.minX - overlay.imageRect.minX) < 1e-9, "move did not snap to the frame edge")
+        model.edit("Reset") { $0.masks = project.masks }; overlay.layout(in: CGSize(width: 1000, height: 1000))
+        moveBody(by: -(snapStart.minX - overlay.imageRect.minX) + 3, modifiers: .command)
+        try check(abs(rectangle.rect.minX - overlay.imageRect.minX - 3) < 1e-9, "⌘ did not bypass snapping")
+        model.edit("Reset") { $0.masks = project.masks }; overlay.layout(in: CGSize(width: 1000, height: 1000))
+        moveBody(by: -(snapStart.minX - overlay.imageRect.minX) + 20)
+        try check(abs(rectangle.rect.minX - overlay.imageRect.minX - 20) < 1e-9, "snapped from 20 px away")
+        model.edit("Reset") { $0.masks = project.masks }; overlay.layout(in: CGSize(width: 1000, height: 1000))
+        rectangle.snapTargets = [CGRect(x: snapStart.minX + 0.1 * snapW, y: 0, width: 50, height: 50)]
+        moveBody(by: 0.1 * snapW - 4)
+        try check(abs(rectangle.rect.minX - (snapStart.minX + 0.1 * snapW)) < 1e-9, "move did not snap to another rect's edge")
+
         // Actual preview dispatch must leave keyboard focus on the rectangle, not steal it back.
         model.edit("Small highlight") { $0.masks[0].rect = NormRect(x: 0.5, y: 0.5, w: 0.001, h: 0.001) }
         let preview = PreviewView(model: model)

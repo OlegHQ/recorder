@@ -176,6 +176,8 @@ final class TimelineView: NSView {
     private var waveformLoadedForPackage: URL?
     /// For selftests: whether the async load (`loadWaveformIfNeeded`) has landed.
     var hasWaveform: Bool { waveformPeaks != nil }
+    /// Silent mic spans (source time), hatched in the clip lane; same function Split at Pauses uses.
+    private var silentSpans: [TimeRange] = []
 
     // MARK: - Trim (T-408)
 
@@ -375,7 +377,7 @@ final class TimelineView: NSView {
 
     private func baseLaneHeight(_ lane: Lane) -> CGFloat {
         switch lane {
-        case .clip: return Self.clipHeight
+        case .clip: return model?.project.source.hasMic == true ? Self.clipHeight + 16 : Self.clipHeight
         case .camera: return model?.project.source.hasCamera == true ? 24 : 0
         case .zoom: return Self.zoomHeight
         case .keys: return Self.layoutHeight
@@ -652,7 +654,7 @@ final class TimelineView: NSView {
             guard rect.width > 0.5, !clip.isEmpty else { continue }
             let label = "Clip \(i + 1)  ·  \(formatSpeed(clip.speed))×"
             drawBlock(rect, fill: Theme.clip, tornLeft: false, tornRight: false, label: label, selected: model?.selectedClips.contains(i) == true)
-            drawWaveform(in: CGRect(x: rect.minX, y: rect.midY + 4, width: rect.width, height: 12), outStart: outStart, outEnd: outEnd, timeMap: timeMap, clip: clip)
+            drawWaveform(in: rect.height > 40 ? CGRect(x: rect.minX, y: rect.minY + 14, width: rect.width, height: 29) : CGRect(x: rect.minX, y: rect.midY + 4, width: rect.width, height: 12), outStart: outStart, outEnd: outEnd, timeMap: timeMap, clip: clip)
         }
     }
 
@@ -664,18 +666,36 @@ final class TimelineView: NSView {
         let inset = rect.insetBy(dx: 5, dy: 1)
         guard inset.width > 1 else { return }
         let midY = inset.midY
-        Theme.bgWindow.withAlphaComponent(0.5).setFill()
+        let outSpan = outEnd - outStart
+        // Silent spans: 1 px diagonal hatch over the strip (source time -> fraction of the clip block).
+        let srcSpan = clip.sourceEnd - clip.sourceStart
+        Theme.bgWindow.withAlphaComponent(0.3).setStroke()
+        for span in silentSpans where span.end > clip.sourceStart && span.start < clip.sourceEnd && srcSpan > 0 {
+            let a = inset.minX + inset.width * CGFloat((max(span.start, clip.sourceStart) - clip.sourceStart) / srcSpan)
+            let b = inset.minX + inset.width * CGFloat((min(span.end, clip.sourceEnd) - clip.sourceStart) / srcSpan)
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: CGRect(x: a, y: inset.minY, width: b - a, height: inset.height)).addClip()
+            let hatch = NSBezierPath()
+            var hx = a - inset.height
+            while hx < b { hatch.move(to: CGPoint(x: hx, y: inset.maxY)); hatch.line(to: CGPoint(x: hx + inset.height, y: inset.minY)); hx += 5 }
+            hatch.lineWidth = 1
+            hatch.stroke()
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        // 2 px bars, 1 px gap, sqrt-scaled so quiet speech stays visible.
+        // ponytail: samples one 5 ms bucket per bar (no max over the bar's span), fine until zoomed far out.
+        Theme.bgWindow.withAlphaComponent(0.45).setFill()
         var px = max(inset.minX, Self.gutter)
         while px < min(inset.maxX, bounds.width) {
             let fraction = (px - inset.minX) / inset.width
-            let outputT = outStart + fraction * (outEnd - outStart)
+            let outputT = outStart + fraction * outSpan
             let sourceT = clip.mediaTime(atSource: timeMap.sourceTime(atOutput: outputT))
             let index = Int(sourceT * Double(Waveform.peaksPerSecond))
             if waveformPeaks.indices.contains(index) {
-                let amplitude = max(1, CGFloat(min(1, waveformPeaks[index])) * inset.height / 2)
-                NSRect(x: px, y: midY - amplitude, width: 1, height: amplitude * 2).fill()
+                let amplitude = max(1, CGFloat(min(1, waveformPeaks[index]).squareRoot()) * inset.height / 2)
+                NSRect(x: px, y: midY - amplitude, width: 2, height: amplitude * 2).fill()
             }
-            px += 1
+            px += 3
         }
     }
 
@@ -686,13 +706,16 @@ final class TimelineView: NSView {
     private func loadWaveformIfNeeded() {
         guard let model, waveformLoadedForPackage != model.packageURL else { return }
         let packageURL = model.packageURL
+        let hasMic = model.project.source.hasMic
         waveformLoadedForPackage = packageURL
         guard let audioURL = Waveform.audioURL(in: packageURL) else { return }
         Task.detached { [weak self] in
             let peaks = try? await Waveform.peaks(for: audioURL)
+            let silent = hasMic ? await Waveform.silent(in: audioURL) : []
             await MainActor.run { [weak self] in
                 guard let self, self.waveformLoadedForPackage == packageURL else { return } // superseded by a later `model`
                 self.waveformPeaks = peaks
+                self.silentSpans = silent
                 self.needsDisplay = true
             }
         }
@@ -1328,6 +1351,15 @@ final class TimelineView: NSView {
             if lane(ofBlock: id) == .zoom { return zoomContextMenu(id: id) }
             selectBlock(id, addToSelection: false)
             let menu = NSMenu()
+            if let mask = model?.project.masks.first(where: { $0.id == id.uuidString }) {
+                for (kind, title) in [(Mask.Kind.mask, "Cover"), (.blur, "Blur"), (.highlight, "Highlight")] {
+                    let item = actionItem(title, action: #selector(menuSetMaskKind(_:)), represented: MaskKindTarget(id: id, kind: kind))
+                    item.state = mask.kind == kind ? .on : .off
+                    menu.addItem(item)
+                }
+                menu.addItem(actionItem("Duplicate (\u{2318}D)", action: #selector(menuDuplicateBlock(_:)), represented: id))
+                menu.addItem(.separator())
+            }
             menu.addItem(actionItem("Split at Playhead (C)", action: #selector(menuSplitAtPlayhead)))
             menu.addItem(actionItem("Remove", action: #selector(menuRemoveBlock(_:)), represented: id))
             return menu
@@ -2169,6 +2201,20 @@ final class TimelineView: NSView {
         model?.edit("Toggle Instant") { project in
             if let i = project.zooms.firstIndex(where: { $0.id == id.uuidString }) { project.zooms[i].instant.toggle() }
         }
+    }
+
+    private struct MaskKindTarget { let id: UUID; let kind: Mask.Kind }
+
+    @objc private func menuSetMaskKind(_ sender: NSMenuItem) {
+        guard let t = sender.representedObject as? MaskKindTarget else { return }
+        model?.edit("Mask kind") { project in
+            if let i = project.masks.firstIndex(where: { $0.id == t.id.uuidString }) { project.masks[i].kind = t.kind }
+        }
+    }
+
+    @objc private func menuDuplicateBlock(_ sender: NSMenuItem) {
+        guard sender.representedObject is UUID else { return }
+        duplicateSelection() // the menu selected the block first
     }
 
     @objc private func menuRemoveBlock(_ sender: NSMenuItem) {

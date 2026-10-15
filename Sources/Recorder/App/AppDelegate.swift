@@ -359,6 +359,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(item("Remove All Zooms", action: #selector(EditorWindowController.removeAllZooms(_:))))
         edit.addItem(item("Restore All Cuts", action: #selector(EditorWindowController.restoreAllCuts(_:))))
         edit.addItem(item("Speed Up Typing", action: #selector(EditorWindowController.speedUpTyping(_:))))
+        edit.addItem(item("Split at Pauses", action: #selector(EditorWindowController.splitAtPauses(_:))))
         edit.addItem(item("Hide Cursor in Selected Clip", action: #selector(EditorWindowController.hideCursorInSelectedClip(_:))))
         main.addItem(item("Edit", submenu: edit))
 

@@ -627,6 +627,13 @@ public extension Project {
         assert(checkInvariants() == nil)
     }
 
+    /// Edit ▸ Split at Pauses (T-625): splits clips at both edges of each silent SOURCE-time range
+    /// (`silentRanges`, `Events.swift`). Never removes or retimes anything.
+    mutating func splitAtPauses(_ ranges: [TimeRange]) {
+        for range in ranges { splitClip(atSource: range.start); splitClip(atSource: range.end) }
+        assert(checkInvariants() == nil)
+    }
+
     /// Splits the clip containing SOURCE time `s` into two clips of the same speed. No-op if `s`
     /// isn't strictly inside a clip (in a gap, or within `minClipLength` of an edge/existing boundary).
     private mutating func splitClip(atSource s: Double) {
@@ -951,6 +958,21 @@ public extension Project {
         } else {
             return nil
         }
+        assert(checkInvariants() == nil)
+        return newID
+    }
+
+    /// T-632 "Highlight this zoom": a highlight mask over the zoom's target rect (`1/scale` of the frame
+    /// around `center`, kept inside it) with the zoom's timing. `nil` if `id` isn't a zoom or a mask already sits there.
+    @discardableResult
+    mutating func highlightZoom(_ id: UUID) -> UUID? {
+        guard let zoom = zooms.first(where: { $0.id == id.uuidString }) else { return nil }
+        let size = 1 / max(zoom.scale, 1)
+        let rect = NormRect(x: min(max(zoom.center.x - size / 2, 0), 1 - size), y: min(max(zoom.center.y - size / 2, 0), 1 - size), w: size, h: size)
+        let newID = UUID()
+        guard masks.addBlock(atSource: zoom.start, length: zoom.end - zoom.start, duration: timelineSourceDuration, minLength: Self.minBlockLength, make: { start, end in
+            Mask(id: newID.uuidString, start: start, end: end, kind: .highlight, rect: rect, opacity: 0.6)
+        }) != nil else { return nil }
         assert(checkInvariants() == nil)
         return newID
     }

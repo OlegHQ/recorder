@@ -53,3 +53,18 @@ public func typingRanges(events: [InputEvent]) -> [TimeRange] {
     if let start = runStart, let end = runEnd, end - start > 3.0 { ranges.append(TimeRange(start: start, end: end)) }
     return ranges
 }
+
+/// SPEC "Voice": runs of `levels` (peaks, `perSecond` per second) below `threshold` lasting at least
+/// `minDuration`, each shrunk by `pad` on both edges so cuts never clip a word. Mic time == source time.
+public func silentRanges(levels: [Float], perSecond: Double, threshold: Float = 0.02, minDuration: Double = 0.6, pad: Double = 0.15) -> [TimeRange] {
+    var ranges: [TimeRange] = []
+    var runStart: Int?
+    for i in 0...levels.count {
+        if i < levels.count, levels[i] < threshold { runStart = runStart ?? i; continue }
+        guard let s = runStart else { continue }
+        runStart = nil
+        let (a, b) = (Double(s) / perSecond, Double(i) / perSecond)
+        if b - a >= minDuration, b - a > 2 * pad { ranges.append(TimeRange(start: a + pad, end: b - pad)) }
+    }
+    return ranges
+}

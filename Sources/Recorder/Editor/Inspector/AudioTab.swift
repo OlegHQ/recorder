@@ -22,6 +22,7 @@ struct AudioTab: View {
                     volumeRow(title: "Volume", volume: \.audio.micVolume, muted: micMutedBinding,
                               gestureName: "Microphone volume", source: "microphone")
                     Toggle("Reduce rumble & normalize", isOn: denoiseBinding)
+                    Button("Split at Pauses") { NSApp.sendAction(#selector(EditorWindowController.splitAtPauses(_:)), to: nil, from: nil) }
                     Text("Cleanup is applied on export. Preview plays the original microphone audio.")
                         .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
                         .fixedSize(horizontal: false, vertical: true)
