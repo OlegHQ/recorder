@@ -24,10 +24,10 @@ struct KeysTab: View {
                 LabeledSlider(title: "Vertical", value: slider(\.position.y), range: 0...1, defaultValue: 1, onEditingChanged: gesture)
             }
             DisclosureGroup("Recorded keys") {
-                Toggle("Include all recorded keys", isOn: field(\.allKeys))
-                Text("This control only displays keys captured during recording. Enable Record all keystrokes in Settings for future recordings to include typed keys.")
-                    .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
-                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Shortcuts", isOn: field(\.shortcuts))
+                Toggle("Typing", isOn: field(\.typing))
+                Toggle("Navigation & editing", isOn: field(\.navigation))
+                Toggle("Modifiers", isOn: field(\.modifiers))
             }
             if layoutID == nil && showsTimelineActions { KeysTimelineActions(model: model) }
         }

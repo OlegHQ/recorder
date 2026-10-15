@@ -611,7 +611,7 @@ private struct GalleryInspectorStudies: View {
                         GeometryReader { geometry in
                             let keys = model.project.keys
                             let label = activeKeyChip(events: model.events.events, atSource: 2,
-                                                      hold: keys.hold, allKeys: keys.allKeys)?.label ?? ""
+                                                      hold: keys.hold, categories: keys.categories)?.label ?? ""
                             ZStack {
                                 Theme.textPrimaryColor
                                 if keys.show {

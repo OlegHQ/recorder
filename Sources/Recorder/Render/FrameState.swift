@@ -67,8 +67,8 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
     var keyChip: FrameState.KeyChipState?
     let keys = overlayKeys(project: model.project, atSource: sourceTime)
     let keysBlock = model.project.keystrokeClips.first { sourceTime >= $0.start && sourceTime < $0.end }
-    let keyTime = keysBlock.map { ($0.mediaStart ?? $0.start) + (sourceTime - $0.start) * ($0.mediaRate ?? 1) } ?? sourceTime
-    if keys.opacity > 0, let chip = activeKeyChip(events: model.events.events, atSource: keyTime, hold: keys.settings.hold, allKeys: keys.settings.allKeys) {
+    let keyTime = keysBlock.map { ($0.mediaStart ?? $0.start) + (sourceTime - $0.start) * ($0.mediaRate ?? 1) } ?? mediaTime // media clock, like the cursor
+    if keys.opacity > 0, let chip = activeKeyChip(events: model.events.events, atSource: keyTime, hold: keys.settings.hold, categories: keys.settings.categories) {
         keyChip = FrameState.KeyChipState(label: chip.label, age: chip.age)
     }
     let videoVisible = model.project.clipIndex(atOutput: outputTime).map { !model.project.clips[$0].isEmpty } ?? false

@@ -171,7 +171,7 @@ struct LayoutTests {
     var project = Project(source: Source(duration: 10))
     project.keys = Keys(show: true)
     var block = Layout(start: 2, end: 6, kind: .settings,
-                       keys: Keys(show: false, allKeys: true, size: 2, position: NormPoint(x: 0, y: 0), hold: 3))
+                       keys: Keys(show: false, size: 2, position: NormPoint(x: 0, y: 0), hold: 3))
     project.keystrokeClips = [block]
     #expect(overlayKeys(project: project, atSource: 1).settings == project.keys)
     #expect(overlayKeys(project: project, atSource: 2).opacity == 1)
@@ -196,8 +196,8 @@ struct LayoutTests {
     let legacy = try JSONDecoder().decode(Keys.self, from: Data("{\"show\":true}".utf8))
     #expect(legacy == Keys(show: true))
     let events = [InputEvent(t: 1, k: .key, keyCode: 0, mods: 0), InputEvent(t: 0.9, k: .key, keyCode: 8, mods: 0x100000)]
-    #expect(activeKeyChip(events: events, atSource: 1.1, allKeys: true)?.label == "A")
-    #expect(activeKeyChip(events: events, atSource: 1.1, allKeys: false)?.label == "⌘ C")
+    #expect(activeKeyChip(events: events, atSource: 1.1)?.label == "⌘ C A")
+    #expect(activeKeyChip(events: events, atSource: 1.1, categories: [.shortcut])?.label == "⌘ C")
     let output = CGSize(width: 1920, height: 1080)
     let centered = cameraOverlayRect(camera: Camera(position: NormPoint()), output: output)
     #expect(abs(centered.midX - 960) < 1e-9 && abs(centered.midY - 540) < 1e-9)

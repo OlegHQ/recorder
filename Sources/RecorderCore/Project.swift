@@ -351,22 +351,40 @@ public struct Audio: Codable, Equatable, Sendable {
 
 public struct Keys: Codable, Equatable, Sendable {
     public var show: Bool
-    public var allKeys: Bool
+    public var shortcuts: Bool, typing: Bool, navigation: Bool, modifiers: Bool
     public var size: Double
     public var position: NormPoint
     public var hold: Double
-    public init(show: Bool = false, allKeys: Bool = false, size: Double = 1,
-                position: NormPoint = NormPoint(x: 0.5, y: 1), hold: Double = 1.2) {
-        self.show = show; self.allKeys = allKeys; self.size = size; self.position = position; self.hold = hold
+    public init(show: Bool = false, shortcuts: Bool = true, typing: Bool = true, navigation: Bool = true, modifiers: Bool = true,
+                size: Double = 1, position: NormPoint = NormPoint(x: 0.5, y: 1), hold: Double = 1.2) {
+        self.show = show; self.shortcuts = shortcuts; self.typing = typing; self.navigation = navigation
+        self.modifiers = modifiers; self.size = size; self.position = position; self.hold = hold
     }
-    enum CodingKeys: String, CodingKey { case show, allKeys, size, position, hold }
+    public var categories: Set<KeyCategory> {
+        var set = Set<KeyCategory>()
+        if shortcuts { set.insert(.shortcut) }
+        if typing { set.insert(.typing) }
+        if navigation { set.insert(.navigation) }
+        if modifiers { set.insert(.modifier) }
+        return set
+    }
+    enum CodingKeys: String, CodingKey { case show, allKeys, shortcuts, typing, navigation, modifiers, size, position, hold }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         show = try c.value(.show, default: false)
-        allKeys = try c.value(.allKeys, default: false)
+        shortcuts = try c.value(.shortcuts, default: true)
+        typing = try c.decodeIfPresent(Bool.self, forKey: .typing) ?? c.decodeIfPresent(Bool.self, forKey: .allKeys) ?? true // legacy allKeys=false -> typing off
+        navigation = try c.value(.navigation, default: true)
+        modifiers = try c.value(.modifiers, default: true)
         size = try c.value(.size, default: 1)
         position = try c.value(.position, default: NormPoint(x: 0.5, y: 1))
         hold = try c.value(.hold, default: 1.2)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(show, forKey: .show); try c.encode(shortcuts, forKey: .shortcuts); try c.encode(typing, forKey: .typing)
+        try c.encode(navigation, forKey: .navigation); try c.encode(modifiers, forKey: .modifiers)
+        try c.encode(size, forKey: .size); try c.encode(position, forKey: .position); try c.encode(hold, forKey: .hold)
     }
 }
 
