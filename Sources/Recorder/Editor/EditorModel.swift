@@ -179,7 +179,7 @@ import RecorderCore
         redoNames.append(name)
         let before = project
         project = previous
-        selectedClips = []; selection = []
+        keepExistingSelection()
         rebuildPathsIfNeeded(from: before)
         scheduleAutosave()
     }
@@ -190,9 +190,19 @@ import RecorderCore
         undoNames.append(name)
         let before = project
         project = next
-        selectedClips = []; selection = []
+        keepExistingSelection()
         rebuildPathsIfNeeded(from: before)
         scheduleAutosave()
+    }
+
+    /// SPEC §7.2: selection survives undo/redo when the ids still exist. An open gesture can't outlive a
+    /// snapshot swap. // ponytail: clips have no ids, so selected clip *indices* are kept if still in range.
+    private func keepExistingSelection() {
+        gestureSnapshot = nil
+        let ids = Set(project.zooms.map(\.id) + project.layouts.map(\.id) + project.masks.map(\.id)
+                      + project.keystrokeClips.map(\.id) + project.cameraClips.map(\.id))
+        selection = selection.filter { ids.contains($0.uuidString) }
+        selectedClips = selectedClips.filter { project.clips.indices.contains($0) }
     }
 
     func saveNow() {

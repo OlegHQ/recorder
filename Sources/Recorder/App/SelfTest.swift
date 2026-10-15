@@ -1957,6 +1957,24 @@ enum SelfTest {
                 guard model.project == beforeHide else { throw Fail(description: "Hide Cursor wasn't exactly one undo step") }
                 model.selectedClip = nil
 
+                // T-621: selection survives undo/redo while its ids exist; no dangling id after the block is gone.
+                model.playhead = 5
+                controller.addZoomAtPlayhead(nil)
+                guard let zoomID = model.project.zooms.first.flatMap({ UUID(uuidString: $0.id) }), model.selection == [zoomID] else {
+                    throw Fail(description: "T-621: Add Zoom didn't select the new zoom")
+                }
+                model.edit("Retarget zoom") { $0.zooms[0].center = NormPoint(x: 0.3, y: 0.3) }
+                controller.performUndo(nil)
+                guard model.selection == [zoomID] else { throw Fail(description: "T-621: undo dropped the selected zoom") }
+                controller.performRedo(nil)
+                guard model.selection == [zoomID] else { throw Fail(description: "T-621: redo dropped the selected zoom") }
+                controller.performUndo(nil)
+                controller.performUndo(nil) // the zoom's creation: it no longer exists
+                guard model.project.zooms.isEmpty, model.selection.isEmpty else { throw Fail(description: "T-621: dangling selection after undoing the zoom") }
+                controller.performRedo(nil)
+                controller.performRedo(nil)
+                model.selection = []
+
                 // (3) `validateMenuItem`: Undo/Redo track the stack (and pick up the edit's name),
                 // Remove/Hide Cursor need a selection, everything else just needs an editor.
                 model.edit("Probe Edit") { $0.title = "Probed" }
