@@ -3169,6 +3169,16 @@ enum SelfTest {
             try JSONEncoder().encode(events).write(to: url.appendingPathComponent("events.json"))
             print("wrote \(url.path)")
         },
+        // T-630: on-device transcription of an audio file -> caption phrases. Needs the Speech permission (run via LaunchServices).
+        "captions": { args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            guard let path = args.first else { throw Fail(description: "usage: captions <audio.m4a>") }
+            let words = try await Transcriber.words(in: URL(fileURLWithPath: path))
+            let phrases = captionPhrases(words: words)
+            print("words:", words.map(\.text).joined(separator: " "))
+            print("phrases:", phrases.map(\.text))
+            guard !words.isEmpty, !phrases.isEmpty, phrases.allSatisfy({ ($0.words?.count ?? 0) <= 4 }) else { throw Fail(description: "no words/phrases") }
+        },
         // T-629: /tmp/TextFixture.recorder — a caption (with word timings), a title and a label, back to back.
         "make-text-fixture": { _ in
             let url = URL(fileURLWithPath: "/tmp/TextFixture.recorder")

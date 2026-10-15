@@ -228,6 +228,25 @@ public struct TextBlock: Codable, Equatable, Sendable {
     }
 }
 
+/// Groups spoken `words` (absolute source seconds) into caption blocks of <= `maxWords`, breaking on a gap > `gap`
+/// seconds or after sentence punctuation. Word times in each block are relative to its start.
+public func captionPhrases(words: [Word], maxWords: Int = 4, gap: Double = 0.5) -> [TextBlock] {
+    var groups: [[Word]] = []
+    for w in words where !w.text.isEmpty {
+        if let last = groups.last?.last, groups[groups.count - 1].count < maxWords, w.start - last.end <= gap,
+           !(last.text.last.map { ".!?".contains($0) } ?? false) {
+            groups[groups.count - 1].append(w)
+        } else { groups.append([w]) }
+    }
+    return groups.enumerated().map { i, g in
+        let start = g[0].start
+        let nextStart = i + 1 < groups.count ? groups[i + 1][0].start : .infinity
+        let end = max(start + 0.1, min(g[g.count - 1].end, nextStart))
+        return TextBlock(start: start, end: end, text: g.map(\.text).joined(separator: " "),
+                         words: g.map { Word(text: $0.text, start: $0.start - start, end: $0.end - start) }, style: .caption, size: 48)
+    }
+}
+
 /// Camera footage occupies its own interval; moving it preserves the media in-point.
 public struct CameraClip: Codable, Equatable, Sendable {
     public var id: String

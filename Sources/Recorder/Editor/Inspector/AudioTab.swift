@@ -7,6 +7,8 @@ import RecorderCore
 /// field (`cursor.clickSound`) even though the mockup puts the row on this tab.
 struct AudioTab: View {
     let model: EditorModel
+    @State private var captioning = false
+    @State private var captionStatus: String?
 
     private var project: Project { model.project }
     private var hasMic: Bool { project.source.hasMic }
@@ -23,6 +25,13 @@ struct AudioTab: View {
                     Text("Cleanup is applied on export. Preview plays the original microphone audio.")
                         .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
                         .fixedSize(horizontal: false, vertical: true)
+                    Button(captioning ? "Generating captions…" : "Generate Captions") { generateCaptions() }
+                        .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
+                        .disabled(captioning)
+                    if let captionStatus {
+                        Text(captionStatus).font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .modifier(InspectorReveal(identity: "microphone", order: 0))
@@ -38,6 +47,20 @@ struct AudioTab: View {
             Divider()
             Toggle("Mouse click sound", isOn: clickSoundBinding)
                 .foregroundStyle(Theme.textPrimaryColor)
+        }
+    }
+
+    /// Replaces Caption-style blocks with on-device speech recognition of `mic.m4a`; one undo step.
+    private func generateCaptions() {
+        captioning = true; captionStatus = nil
+        let mic = model.packageURL.appendingPathComponent("mic.m4a")
+        Task { @MainActor in
+            defer { captioning = false }
+            do {
+                let captions = captionPhrases(words: try await Transcriber.words(in: mic))
+                model.edit("Generate Captions") { $0.replaceCaptions(captions) }
+                captionStatus = captions.isEmpty ? "No speech found." : "Added \(captions.count) captions."
+            } catch { captionStatus = error.localizedDescription }
         }
     }
 

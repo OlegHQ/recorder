@@ -901,6 +901,17 @@ public extension Project {
 
     // MARK: - Text
 
+    /// Replaces every Caption-style block with `captions`; a new caption that would overlap a surviving block or leave
+    /// `[0, duration]` is dropped (ponytail: drop rather than trim).
+    mutating func replaceCaptions(_ captions: [TextBlock]) {
+        texts.removeAll { $0.style == .caption }
+        for c in captions where c.end <= timelineSourceDuration + 1e-9 && !texts.contains(where: { c.start < $0.end && c.end > $0.start }) {
+            texts.append(c)
+        }
+        texts.sort { $0.start < $1.start }
+        assert(checkInvariants() == nil)
+    }
+
     @discardableResult
     mutating func addText(atSource s: Double, length: Double = 3, style: TextBlock.Style = .title, text: String = "Text") -> UUID? {
         addBlock(atSource: s, length: length, in: \.texts) { id, start, end in TextBlock(id: id, start: start, end: end, text: text, style: style) }

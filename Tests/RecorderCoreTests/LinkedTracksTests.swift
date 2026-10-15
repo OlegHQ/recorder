@@ -202,3 +202,17 @@ private func linkedFixture() -> Project {
     #expect(p.texts.count == 1 && p.checkInvariants() == nil)
     #expect(try! JSONDecoder().decode(Project.self, from: JSONEncoder().encode(p)) == p)
 }
+
+@Test func captionPhrasesGroupByCountGapAndPunctuation() {
+    func w(_ t: String, _ s: Double) -> Word { Word(text: t, start: s, end: s + 0.3) }
+    let words = [w("a", 0), w("b", 0.4), w("c", 0.8), w("d", 1.2), w("e", 1.6), w("Hi.", 2.0), w("there", 2.4), w("late", 5)]
+    let phrases = captionPhrases(words: words)
+    #expect(phrases.map(\.text) == ["a b c d", "e Hi.", "there", "late"])
+    #expect(phrases[0].start == 0 && phrases[0].words?.last?.start == 1.2)
+    #expect(phrases.allSatisfy { $0.style == .caption } && zip(phrases, phrases.dropFirst()).allSatisfy { $0.end <= $1.start })
+    var p = linkedFixture()
+    p.texts[0].style = .title
+    p.replaceCaptions(phrases)
+    #expect(p.texts.contains { $0.style == .title } && p.checkInvariants() == nil)
+    #expect(captionPhrases(words: []).isEmpty)
+}
