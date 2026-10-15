@@ -11,6 +11,16 @@ public extension Project {
         min(windowShots.first { t >= $0.start && t < $0.end }?.window ?? 0, windowCount - 1)
     }
 
+    /// The project as drawn while the window visible at source time `t` is on screen (its pixel size, no crop):
+    /// what editor overlays map zoom/mask rects against. Identity for single-window projects.
+    func visibleWindow(atSource t: Double) -> Project {
+        guard windowCount > 1 else { return self }
+        var p = self
+        let size = source.windowSizes[windowIndex(atSource: t)]
+        p.source.pixelWidth = size.w; p.source.pixelHeight = size.h; p.crop = NormRect()
+        return p
+    }
+
     mutating func setWindowShot(_ id: UUID, window: Int) {
         guard let i = windowShots.firstIndex(where: { $0.id == id.uuidString }) else { return }
         windowShots[i].window = min(max(window, 0), windowCount - 1)

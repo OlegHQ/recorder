@@ -3215,6 +3215,27 @@ enum SelfTest {
             try JSONEncoder().encode(events).write(to: url.appendingPathComponent("events.json"))
             print("wrote \(url.path)")
         },
+        // T-635: a 2-window package (640x360 `screen.mov`, 400x400 `window-1.mov`) with the second window visible
+        // for the back half; pointer events are global points. Feed it to `parity`, `export`, `preview-frame`.
+        "make-windows-fixture": { _ in
+            let url = URL(fileURLWithPath: "/tmp/WindowsFixture.recorder")
+            try? FileManager.default.removeItem(at: url)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try await Self.synthesizeGradientMovie(at: url.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 3, frameCount: 12)
+            try await Self.synthesizeGradientMovie(at: url.appendingPathComponent("window-1.mov"), width: 400, height: 400, fps: 3, frameCount: 12)
+            var project = Project(title: "Windows Fixture",
+                                  source: Source(kind: .window, pixelWidth: 640, pixelHeight: 360, scale: 1, duration: 4.0,
+                                                 windowSizes: [PixelSize(w: 640, h: 360), PixelSize(w: 400, h: 400)]))
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 4.0)]
+            project.windowShots = [WindowShot(start: 0, end: 2, window: 0), WindowShot(start: 2, end: 4, window: 1)]
+            try project.save(to: url.appendingPathComponent("project.json"))
+            let events = EventLog(events: [
+                InputEvent(t: 0.2, k: .move, x: 200, y: 150), InputEvent(t: 1.5, k: .move, x: 400, y: 200),
+                InputEvent(t: 2.5, k: .move, x: 1100, y: 250), InputEvent(t: 3.5, k: .move, x: 1600, y: 250),
+            ], windowFrames: [WindowFrame(t: 0, i: 0, x: 0, y: 0, w: 640, h: 360), WindowFrame(t: 0, i: 1, x: 1000, y: 100, w: 400, h: 400)])
+            try JSONEncoder().encode(events).write(to: url.appendingPathComponent("events.json"))
+            print("wrote \(url.path)")
+        },
         // T-610: `StateSnapshot.dump(to:pasteboard:)` over a real offscreen editor (one edit + a
         // selected zoom) — everything is injected (a tmp "Snapshots" directory, a private named
         // pasteboard) so this never touches the user's real Logs folder or clipboard.

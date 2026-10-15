@@ -608,6 +608,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
             return !isTextEditing && (model.selectedClip != nil || !model.selection.isEmpty)
         case #selector(hideCursorInSelectedClip):
             return model.selectedClip != nil
+        case #selector(cropTapped):
+            return model.project.windowCount == 1 // crop is disabled for multi-window projects
         default:
             return true
         }
