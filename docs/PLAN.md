@@ -66,13 +66,13 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 
 | Scope | Tasks | Done |
 |---|---|---|
-| P0 bugs | T-619…T-624 | 0/6 |
-| P1 voice | T-625…T-626 | 0/2 |
-| P2 text | T-628…T-630 | 0/3 |
-| P3 visuals | T-631…T-632 | 0/2 |
+| P0 bugs | T-619…T-624 | 2/6 |
+| P1 voice | T-625…T-626 | 2/2 |
+| P2 text | T-628…T-630 | 3/3 |
+| P3 visuals | T-631…T-632 | 2/2 |
 | P4 windows | T-633…T-635 | 0/3 |
 
-- [ ] **T-619 Zoom spring steps in output time**
+- [x] **T-619 Zoom spring steps in output time**
   - Do: `CameraPath.init` gains `clips: [Clip]`; each step uses `dt / k`, `k` = `timeScale` of the clip covering source t (1 outside clips). `EditorModel.buildPaths` passes `project.clips`; FrameState's motion-blur previous sample uses `sourceTime - k/60`. Rebuild paths when clip speeds change.
   - Verify: new test `zoomTransitionSpeedIndependent` (same manual zoom on a 1× and a 2× clip match at equal output times within 1e-3); `make test`; `--selftest parity` maxDelta=0.
 - [ ] **T-620 Escape chain; no stale drag selection**
@@ -81,34 +81,34 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 - [ ] **T-621 Selection survives undo/redo**
   - Do: `EditorModel.undo/redo` keep selection ids that still exist (SPEC §7.2); `undo()` clears `gestureSnapshot`.
   - Verify: `menu-actions` extended: select a zoom, edit, ⌘Z → zoom still selected; deleted-block undo/redo leaves no dangling id.
-- [ ] **T-622 Capture every key**
+- [~] **T-622 Capture every key**
   - Do: delete `recordAllKeys` setting + Settings row; `EventRecorder` records every keyDown and modifier-only flagsChanged (no `.typing` from flagsChanged), drops events while paused (lock-protected `pausedSoFar`), skips auto-repeat, stores the typed character (`UCKeyTranslate`) in the key event (optional field, Codable default nil).
   - Verify: `make test FILTER=events` (decode old events w/o char); `make app`; `open -n … --selftest events 3` via LaunchServices.
-- [ ] **T-623 Key display categories and merged chips**
+- [x] **T-623 Key display categories and merged chips**
   - Do: Core `keyCategory(keyCode:mods:) -> KeyCategory` (`.shortcut .typing .navigation .modifier`); `Keys` gets `shortcuts/typing/navigation/modifiers: Bool` (default true; legacy `allKeys=false` → typing false); `KeyChips` returns keys within `hold` joined into one label, labels prefer the stored character; FrameState uses `mediaTime` for keys and `Layout` uses `< end`. KeysTab replaces "Include all recorded keys" with four toggles.
   - Verify: `make test FILTER=keyChips` (categories, merged label, legacy decode); `parity` on `make-m6-fixture`; `inspector-panels`.
 - [ ] **T-624 Editing papercuts**
   - Do: zoom target keeps keyboard focus like masks (arrow nudge); arrow-repeat nudges coalesce into one gesture; BackgroundTab ColorPickers use begin/commitGesture; PreviewView hit-tests the selected zoom/mask rect before the camera bubble; ↑/↓ jump to previous/next edit point; frame step = 1/project fps; ⌘D duplicates every selected block.
   - Verify: `zoom-target`, `highlight-manipulation`, `timeline-ops`, `inspector-panels`, `menu-actions` OK (extend where a check is missing).
-- [ ] **T-625 Silent ranges and Split at Pauses (Core)**
+- [x] **T-625 Silent ranges and Split at Pauses (Core)**
   - Do: `silentRanges(levels:perSecond:threshold:minDuration:pad:) -> [TimeRange]` beside `typingRanges`; `Project.splitAtPauses(_:)` beside `speedUpTyping` (splits only, invariants checked).
   - Verify: `make test FILTER=silentRanges`, `FILTER=splitAtPauses`.
-- [ ] **T-626 Voice waveform lane + Split at Pauses command**
+- [x] **T-626 Voice waveform lane + Split at Pauses command**
   - Do: Video lane 48 pt when `source.hasMic`; sqrt-scaled 2/1 px bars; hatch silent spans (same `silentRanges` over `Waveform.peaks`); *Edit ▸ Split at Pauses* + Sound tab button, one undo step.
   - Verify: `timeline-png` inspected; `menu-actions` extended (one undo restores); `waveform` OK.
-- [ ] **T-628 TextBlock model + Text lane**
+- [x] **T-628 TextBlock model + Text lane**
   - Do: `TextBlock` (id, start, end, text, words: [Word]?, style caption/title/label, position NormPoint, size) and `Project.texts` (decodeIfPresent ?? []), conformed to the private `TimedBlock` engine + linked edits; Text lane (clay `#EFDCCF` in Theme), drag-to-create, `T` adds at playhead, inspector TextPanel scaffold (text field, style segment, size, 3×3 position, Remove), pinned "Add text at playhead".
   - Verify: `make test FILTER=linkedTracks` (texts follow split/delete/move); `timeline-ops`; `inspector-panels`.
-- [ ] **T-629 Text render pass**
+- [x] **T-629 Text render pass**
   - Do: FrameState `texts` (active blocks, current word index); Compositor pass 6 reusing the chip texture path; three styles per SPEC; 9:16 safe area.
   - Verify: `parity` maxDelta=0 on a fixture with all three styles (`make-text-fixture` selftest); `editor-png` inspected.
-- [ ] **T-630 Generate Captions**
+- [x] **T-630 Generate Captions**
   - Do: Core `captionPhrases(words:maxWords:gap:) -> [TextBlock]`; app `Editor/Transcriber.swift` (SFSpeechRecognizer on-device only, authorization check; SpeechTranscriber on macOS 26 if available); Sound tab button; replaces caption-style blocks only, one undo step; editing text re-spreads word timings.
   - Verify: `make test FILTER=captionPhrases`; `make app`; `--selftest captions <say-generated m4a>` via LaunchServices (HUMAN if Speech permission not granted).
-- [ ] **T-631 Backgrounds**
+- [x] **T-631 Backgrounds**
   - Do: image backdrop texture (aspect fill + blur) in Compositor; gradient angle slider; 8 gradient + 8 color presets (static arrays in BackgroundTab); 4–6 new generated wallpapers (`scripts/render-brand-assets.swift`, appended to Resources/Wallpapers).
   - Verify: `parity` with an image background; `export-colors`; `inspector-panels`; PNG inspected.
-- [ ] **T-632 Highlight helpers**
+- [x] **T-632 Highlight helpers**
   - Do: ZoomPanel "Highlight this zoom"; `SelectionRectView` snap guides (frame edges/centres + other rects, 6 px, ⌘ bypass); mask context menu (kind, Duplicate).
   - Verify: `mask-overlay`, `zoom-target`, `highlight-manipulation` extended with a snap case.
 - [ ] **T-633 Multi-window capture**
@@ -847,3 +847,15 @@ T-617 · 2026-09-22 · Added gallery-advanced launch target, Black/White appeara
 T-617 refinement · 2026-09-22 · Advanced gallery now opens White with the timeline first, followed by production Canvas/Camera/Cursor/Motion/Keystrokes panels in staggered columns, a bound key specimen, capture typography and compact widget studies. Removed the full editor shell and cursor hero. Shared camera/cursor popups refresh on appearance changes. Verified debug build, default-White render/panel-mount/full-editor-absence guards, six-stage demo in both themes, minimum-width panels, ui-motion, placement, inspector-panels and standard gallery PNG. Inspected rendered opening, panels, key specimen and native picker contrast.
 
 T-618 · 2026-09-30 · Release CI now requires Developer ID signing and notarization with a secret Apple ID; removed ad-hoc publication fallback. YAML and every run block passed syntax checks; missing-secret gate rejected release; `make test` passed 71/71. Waiting on HUMAN Apple Developer certificate/private key, app-specific password, GitHub secrets, and clean install of a tagged release DMG.
+
+T-619 · 2026-10-15 · lane K, re-verified on dev after merge: `make test` 81/81 (zoomTransitionSpeedIndependent), parity M6 maxDelta=0 · deviations: test tolerance 0.03 (discrete 240 Hz steps differ at zoom edges; continuous-time spring would reach 1e-3)
+T-622 · 2026-10-15 · lane K: `make test FILTER=events` (legacy decode, ch round-trip), `make app` OK · NOT RUN: `--selftest events 3` — Recorder's Screen Recording/Accessibility grants are currently off (`permissions` → false); HUMAN: re-grant, then run it and check events.json (letters/arrows/modifiers/ch, nothing while paused) · deviations: char via CGEvent.keyboardGetUnicodeString (layout-aware, built in) instead of UCKeyTranslate; field `ch`
+T-623 · 2026-10-15 · lane K, re-verified on dev: keyCategories/keyChipMergesAndFilters/keysLegacyAllKeysDecode pass; parity M6 maxDelta=0; inspector-panels OK · deviations: merged label keeps last 8 keys; plain characters run together (`hi`), others space-separated
+T-625 · 2026-10-15 · lane V: silentRanges/splitAtPauses tests pass on dev · deviations: none
+T-626 · 2026-10-15 · lane V, re-verified on dev: menu-actions OK (Split at Pauses one undo step), timeline-png inspected (48 pt lane, sqrt bars, hatched pause) · deviations: one 5 ms bucket per bar (ponytail)
+T-628 · 2026-10-15 · lane T, re-verified on dev: linked*/textBlocks tests, timeline-ops, timeline-clipboard, inspector-panels OK · deviations: FILTER is `linked` (test names)
+T-629 · 2026-10-15 · lane T, re-verified on dev: make-text-fixture + parity maxDelta=0 over 10 times; preview-frame PNGs inspected in lane · deviations: only Barlow Light bundled → Caption uses Light ×1.15 with drawn outline (ponytail)
+T-630 · 2026-10-15 · lane T: captionPhrases test; `open -n … --selftest captions <say m4a>` recognised words → 4 phrases OK (Speech already granted) · deviations: SFSpeechRecognizer only, no SpeechAnalyzer (ponytail)
+T-631 · 2026-10-15 · lane V: parity with image background maxDelta=0, export-colors OK (re-run on dev), inspector-panels OK; wallpapers 13–16 generated · deviations: aspect-fill only for image backdrops (bundled wallpapers unchanged)
+T-632 · 2026-10-15 · lane V, re-verified on dev: highlight-manipulation (snap + ⌘ bypass), mask-overlay, zoom-target, pickers OK; highlightZoom Core op test · deviations: snapping off while aspect-locked or ⌥ held; area/crop also snap to frame edges (shared view)
+
