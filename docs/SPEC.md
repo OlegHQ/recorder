@@ -406,7 +406,7 @@ is recorded to `camera.mov` and composited in the editor. Its corner becomes the
 - `t0` = PTS of the first complete screen frame. Every sample/event is stored as `pts − t0 − pausedSoFar`.
 - `EventRecorder`: listen-only `CGEventTap` for `mouseMoved`, `left/right/otherMouseDown/Up`, `*MouseDragged`, `scrollWheel`, `keyDown`, `flagsChanged`.
   Position is converted to **normalised source coordinates** (0…1, origin top-left of the captured rect/window) at record time; for window capture re-read the window frame (`SCWindow.frame` via a 10 Hz poll) so moves are tolerated.
-  Key events store `keyCode` + modifier flags. By default only shortcuts and non-printing keys are recorded; Settings → Record all keystrokes explicitly enables printable key codes for future recordings. Typing timestamps remain available for "speed up typing" in both modes. The editor can filter all recorded keys back to shortcuts; older timestamp-only events cannot be reconstructed.
+  Key events store `keyCode` + modifier flags + the typed character (`UCKeyTranslate`, current layout). Every key is recorded (decision 2026-10-15; the Record all keystrokes setting is removed); the editor turns key categories off (§Editor roadmap). Secure-input fields are already invisible to the event tap. Keys pressed while paused are dropped. Modifier-only presses never produce `.typing` events. Older timestamp-only events cannot be reconstructed.
 - Cursor image: 60 Hz timer reads `NSCursor.currentSystem` (deprecated but functional; ponytail: replace if Apple removes it); hash the image, write new ones to `cursors/<hash>.png` at the largest representation with hot-spot, and log `cursorChange` events.
 
 ---
@@ -879,3 +879,37 @@ Finder desktop-icon exceptions remain independent. Preview and export share the 
 Video clips have explicit Fade in and Fade out controls in the selected clip inspector. Both default to Off, including existing projects without stored fade values. There is no automatic arrival fade after a gap. Optional `Clip.fadeIn` / `fadeOut` store output seconds, clamped to the clip duration when edited and rendered; zero or absent means Off. Each edge uses smoothstep opacity, and overlapping fades use the lower opacity. Preview and export use the same opacity function. Splitting retains fades only on the original outer edges; the new cut is immediate. Slider edits support undo/redo and autosave.
 
 With snapping enabled, dragging the leading edge of a clip selection within six pixels of timeline zero snaps it exactly to zero, regardless of where its body was grabbed. Command bypasses snapping. Stored gaps are preserved until edited; a tiny gap may display as `00:00.00` because timeline labels round to hundredths.
+
+### Editor roadmap (October 2026)
+
+Source: proposal https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA (decisions 2026-10-15). PLAN T-619…T-635.
+
+- **Zoom timing.** Zoom/camera springs advance in *output* time: each 240 Hz step in source time is divided by the
+  `timeScale` of the clip covering it, so a transition lasts the same wall time at 1×, 2× or 16×. Motion blur's previous
+  sample is `k/60` source seconds back. Preview and export share this.
+- **Escape.** One chain everywhere: cancel open gesture → exit region editing (selection kept) → exit tool → deselect.
+  Escape never selects anything. Undo/redo keep the selection ids that still exist (§7.2).
+- **Keys.** Every key is captured (§4.8). `Keys` gains four category toggles, all on by default:
+  Shortcuts (⌘/⌃/⌥ held), Typing (printable, incl. Space and ⇧+letter), Navigation & editing (arrows, ⌫ ⌦ ⏎ ⇥ ⎋,
+  Home/End/PgUp/PgDn, F-keys), Modifiers (modifier-only presses). A legacy `allKeys = false` decodes as Typing off.
+  Chips for keys still inside `hold` are joined into one label (`⌘C ⌘V`). Chips use the same media clock as the cursor.
+- **Voice.** When the source has a mic, the Video lane is 48 pt with a 30 pt sqrt-scaled waveform (2 px bars, 1 px gap,
+  block label colour at 45 %), silent spans hatched. *Edit ▸ Split at Pauses* (also in Sound ▸ Microphone) splits video
+  clips at both edges of each silent range (peak < 0.02 for ≥ 0.6 s, padded 0.15 s); it never removes anything. One undo step.
+- **Text.** `Project.texts: [TextBlock]` (source time) on a Text lane (clay tint `#EFDCCF`), generic block ops. Styles:
+  Caption (Barlow Semi Condensed 500, white with dark outline, current word inverted in a white box), Title (Barlow 300 on a
+  black bar), Label (mono 12 on a square chip). Selection shows TextPanel (text field, style segment, size, 3×3 position,
+  Remove). Pinned footer "Add text at playhead"; `T` on the timeline does the same. 9:16 keeps captions above the bottom 18 %.
+- **Captions.** Sound ▸ Microphone ▸ *Generate Captions* runs on-device speech recognition on `mic.m4a` (never server),
+  groups words into phrases of ≤ 4 words breaking on gaps > 0.5 s and sentence punctuation, and replaces only Caption-style
+  blocks (one undo step). Editing a caption's text re-spreads word timings evenly.
+- **Backgrounds.** Image backdrops render the image (aspect fill + blur). Gradient gets an angle slider. Gradient and Color
+  get 8 preset tiles each (cool slate/blue/frost). 4–6 bundled wallpapers are generated by `scripts/render-brand-assets.swift`.
+- **Highlights.** ZoomPanel "Highlight this zoom" adds a highlight mask with the zoom's rect and timing. `SelectionRectView`
+  snaps edges/centres to the frame and to other blocks' rects within 6 px (⌘ bypasses). Mask context menu: kind + Duplicate.
+- **Windows as layers.** The window picker supports ⌘-click multi-select (max 4). Each window records its own stream
+  (`screen.mov` = window 0, `window-1.mov`…), on one clock; `events.json` stores per-window frame samples (10 Hz) and the
+  cursor is normalised against the visible window at render time (hidden outside it). `Project.windowShots` (source-time
+  blocks holding a window index) drive a Window lane; they are auto-generated at the end of recording (switch to the
+  clicked window, min shot 1.5 s). The visible window is aspect-fit like a single-window recording; hard cut. Crop is
+  disabled for multi-window projects.

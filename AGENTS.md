@@ -41,7 +41,7 @@ Deliberate corner-cuts get a `// ponytail: <known ceiling>, <upgrade path>` comm
 every edit; ImageIO's default GIF palette; whole-`Project` undo snapshots). Grep `ponytail:` to list the debt.
 
 **Never lazy about:** understanding the task and the code it touches before editing · TCC permission checks · atomic
-`project.json` writes · the privacy default that printable keys are not logged unless Record all keystrokes is explicitly enabled
+`project.json` writes · keystrokes stay local to the project package (every key is recorded since 2026-10-15; never upload or log them elsewhere)
 · `TimelineOps` invariants · preview/export pixel parity · the Verify step. Non-trivial Core logic leaves exactly the tests
 the plan lists; the app target has no unit tests and is checked through `--selftest` cases and HUMAN steps.
 

@@ -58,6 +58,71 @@ Update the "Done" column whenever you tick a task.
 
 ---
 
+## Editor roadmap — 2026-10-15
+
+Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor roadmap (October 2026)". Run in lanes
+(worktree per lane, coordinator merges into `dev` and ticks here). Lanes: **K** T-619→T-622→T-623 · **E** T-620→T-621→T-624 ·
+**V** T-625→T-626→T-631→T-632 · **T** T-628→T-629→T-630 · **W** T-633→T-634→T-635.
+
+| Scope | Tasks | Done |
+|---|---|---|
+| P0 bugs | T-619…T-624 | 0/6 |
+| P1 voice | T-625…T-626 | 0/2 |
+| P2 text | T-628…T-630 | 0/3 |
+| P3 visuals | T-631…T-632 | 0/2 |
+| P4 windows | T-633…T-635 | 0/3 |
+
+- [ ] **T-619 Zoom spring steps in output time**
+  - Do: `CameraPath.init` gains `clips: [Clip]`; each step uses `dt / k`, `k` = `timeScale` of the clip covering source t (1 outside clips). `EditorModel.buildPaths` passes `project.clips`; FrameState's motion-blur previous sample uses `sourceTime - k/60`. Rebuild paths when clip speeds change.
+  - Verify: new test `zoomTransitionSpeedIndependent` (same manual zoom on a 1× and a 2× clip match at equal output times within 1e-3); `make test`; `--selftest parity` maxDelta=0.
+- [ ] **T-620 Escape chain; no stale drag selection**
+  - Do: `PreviewView` handles Esc while a zoom target or mask rect is shown (cancel open gesture, else end region editing, keep selection; never `super`). `EditorWindowController.keyDown` stops forwarding keyCode 53 to the timeline. `TimelineView` clears `dragSelection`/marquee state on mouseUp.
+  - Verify: `zoom-target` selftest extended: select zoom, edit target, Esc → selection still that zoom, project unchanged; Esc mid-drag reverts; `highlight-manipulation`, `crop` still OK.
+- [ ] **T-621 Selection survives undo/redo**
+  - Do: `EditorModel.undo/redo` keep selection ids that still exist (SPEC §7.2); `undo()` clears `gestureSnapshot`.
+  - Verify: `menu-actions` extended: select a zoom, edit, ⌘Z → zoom still selected; deleted-block undo/redo leaves no dangling id.
+- [ ] **T-622 Capture every key**
+  - Do: delete `recordAllKeys` setting + Settings row; `EventRecorder` records every keyDown and modifier-only flagsChanged (no `.typing` from flagsChanged), drops events while paused (lock-protected `pausedSoFar`), skips auto-repeat, stores the typed character (`UCKeyTranslate`) in the key event (optional field, Codable default nil).
+  - Verify: `make test FILTER=events` (decode old events w/o char); `make app`; `open -n … --selftest events 3` via LaunchServices.
+- [ ] **T-623 Key display categories and merged chips**
+  - Do: Core `keyCategory(keyCode:mods:) -> KeyCategory` (`.shortcut .typing .navigation .modifier`); `Keys` gets `shortcuts/typing/navigation/modifiers: Bool` (default true; legacy `allKeys=false` → typing false); `KeyChips` returns keys within `hold` joined into one label, labels prefer the stored character; FrameState uses `mediaTime` for keys and `Layout` uses `< end`. KeysTab replaces "Include all recorded keys" with four toggles.
+  - Verify: `make test FILTER=keyChips` (categories, merged label, legacy decode); `parity` on `make-m6-fixture`; `inspector-panels`.
+- [ ] **T-624 Editing papercuts**
+  - Do: zoom target keeps keyboard focus like masks (arrow nudge); arrow-repeat nudges coalesce into one gesture; BackgroundTab ColorPickers use begin/commitGesture; PreviewView hit-tests the selected zoom/mask rect before the camera bubble; ↑/↓ jump to previous/next edit point; frame step = 1/project fps; ⌘D duplicates every selected block.
+  - Verify: `zoom-target`, `highlight-manipulation`, `timeline-ops`, `inspector-panels`, `menu-actions` OK (extend where a check is missing).
+- [ ] **T-625 Silent ranges and Split at Pauses (Core)**
+  - Do: `silentRanges(levels:perSecond:threshold:minDuration:pad:) -> [TimeRange]` beside `typingRanges`; `Project.splitAtPauses(_:)` beside `speedUpTyping` (splits only, invariants checked).
+  - Verify: `make test FILTER=silentRanges`, `FILTER=splitAtPauses`.
+- [ ] **T-626 Voice waveform lane + Split at Pauses command**
+  - Do: Video lane 48 pt when `source.hasMic`; sqrt-scaled 2/1 px bars; hatch silent spans (same `silentRanges` over `Waveform.peaks`); *Edit ▸ Split at Pauses* + Sound tab button, one undo step.
+  - Verify: `timeline-png` inspected; `menu-actions` extended (one undo restores); `waveform` OK.
+- [ ] **T-628 TextBlock model + Text lane**
+  - Do: `TextBlock` (id, start, end, text, words: [Word]?, style caption/title/label, position NormPoint, size) and `Project.texts` (decodeIfPresent ?? []), conformed to the private `TimedBlock` engine + linked edits; Text lane (clay `#EFDCCF` in Theme), drag-to-create, `T` adds at playhead, inspector TextPanel scaffold (text field, style segment, size, 3×3 position, Remove), pinned "Add text at playhead".
+  - Verify: `make test FILTER=linkedTracks` (texts follow split/delete/move); `timeline-ops`; `inspector-panels`.
+- [ ] **T-629 Text render pass**
+  - Do: FrameState `texts` (active blocks, current word index); Compositor pass 6 reusing the chip texture path; three styles per SPEC; 9:16 safe area.
+  - Verify: `parity` maxDelta=0 on a fixture with all three styles (`make-text-fixture` selftest); `editor-png` inspected.
+- [ ] **T-630 Generate Captions**
+  - Do: Core `captionPhrases(words:maxWords:gap:) -> [TextBlock]`; app `Editor/Transcriber.swift` (SFSpeechRecognizer on-device only, authorization check; SpeechTranscriber on macOS 26 if available); Sound tab button; replaces caption-style blocks only, one undo step; editing text re-spreads word timings.
+  - Verify: `make test FILTER=captionPhrases`; `make app`; `--selftest captions <say-generated m4a>` via LaunchServices (HUMAN if Speech permission not granted).
+- [ ] **T-631 Backgrounds**
+  - Do: image backdrop texture (aspect fill + blur) in Compositor; gradient angle slider; 8 gradient + 8 color presets (static arrays in BackgroundTab); 4–6 new generated wallpapers (`scripts/render-brand-assets.swift`, appended to Resources/Wallpapers).
+  - Verify: `parity` with an image background; `export-colors`; `inspector-panels`; PNG inspected.
+- [ ] **T-632 Highlight helpers**
+  - Do: ZoomPanel "Highlight this zoom"; `SelectionRectView` snap guides (frame edges/centres + other rects, 6 px, ⌘ bypass); mask context menu (kind, Duplicate).
+  - Verify: `mask-overlay`, `zoom-target`, `highlight-manipulation` extended with a snap case.
+- [ ] **T-633 Multi-window capture**
+  - Do: `CaptureTarget.windows([SCWindow])`; picker ⌘-click multi-select (≤ 4); one `SCStream` per window (`screen.mov` = window 0, `window-N.mov`), shared t0; EventRecorder polls every window frame at 10 Hz and stores `windowFrames` samples + global mouse points in events.
+  - Verify: `pickers`; `record-perf` with 3 windows via LaunchServices; `--selftest record-windows 3` produces N decodable files on one clock.
+- [ ] **T-634 Window shots model + lane**
+  - Do: `Project.windowShots` (source-time blocks, window index), generic block engine; Core `autoWindowShots(events:windowCount:minShot:)` (clicked window, ≥1.5 s); Window lane.
+  - Verify: `make test FILTER=windowShots`; `timeline-ops`.
+- [ ] **T-635 Window composition + cursor remap**
+  - Do: FrameSource one video track per window; FrameState picks the visible window and aspect-fits it; cursor normalised against that window's frame at t (hidden outside); crop disabled when multi-window.
+  - Verify: `parity` maxDelta=0 on a 2-window fixture (`make-windows-fixture`); `export` OK.
+
+---
+
 ## Requested Nudge fixes — 2026-09-22
 
 User-requested fixes are handled individually in this order, separately from the outstanding HUMAN milestone gates.
