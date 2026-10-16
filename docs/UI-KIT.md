@@ -310,8 +310,17 @@ Headers are 132 points with name/volume, mute and a 3-point playback meter; View
 Overflow scrolls vertically, keeping every track reachable in a small editor. Command–L toggles audio links;
 Option-drag/trim/delete preserves partners. Chain badges and half-opacity partner outlines explain linked edits;
 red offsets and Move into Sync repair slip. The selection inspector edits gain in dB, fades, mute and link target.
-Record/re-record controls stay disabled until T-645. Clipboard copies linked partners with audio so Cut cannot lose video.
+Clipboard copies linked partners with audio so Cut cannot lose video.
 `timeline-png` supports `--selected-audio`, `--compact`, `--minimum --bottom`, and `--playing` for these states.
+
+Voiceover: the transport record button, Shift–R, a voiceover header or the audio context menu opens a preview HUD.
+A silent 3–2–1 countdown precedes host-clock-synchronised playback; re-recording adds 1.5 seconds of pre-roll.
+The HUD shows the selected microphone, input meter, Hear project, Stop and Discard. Its background stays transparent
+outside the controls, and short previews move the countdown into the HUD header. Recording locks project edits;
+Space/Shift–R stops, Escape discards without undo, and window close/quit waits for capture cleanup.
+Live waveforms stay outside project.json until the take commits in one undo step. Replaced audio is hatched;
+older take files remain for undo. `--selftest voiceover [m4a] --keep-fixture` exercises the synthetic-file path and
+writes `/tmp/recorder-voiceover-*.png`. Real-microphone capture and latency remain a HUMAN gate.
 
 Project opening preserves the editor’s layout from the first frame: top bar, preview status, inspector and timeline. Preparation happens off the UI thread, with no artificial minimum wait. Ready controls reveal over 160 ms; Reduce Motion switches immediately. Preview loading remains labelled until the first video frame arrives.
 

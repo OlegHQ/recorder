@@ -1894,7 +1894,7 @@ enum SelfTest {
                     ("Edit", "Restore All Cuts"), ("Edit", "Speed Up Typing"), ("Edit", "Split at Pauses"), ("Edit", "Hide Cursor in Selected Clip"),
                     ("View", "Canvas"), ("View", "Cursor"), ("View", "Camera"), ("View", "Sound"),
                     ("View", "Motion"), ("View", "Keystrokes"), ("View", "Zoom In"), ("View", "Zoom Out"),
-                    ("View", "Fit"), ("View", "Crop…"), ("View", "Compact Track Headers"), ("Edit", "Link / Unlink Audio"),
+                    ("View", "Fit"), ("View", "Crop…"), ("View", "Compact Track Headers"), ("Edit", "Link / Unlink Audio"), ("Edit", "Record / Re-record Voiceover"),
                     ("Export", "Export…"), ("Export", "Copy Frame as Image"),
                 ]
                 var items: [String: NSMenuItem] = [:]
@@ -2877,6 +2877,28 @@ enum SelfTest {
             print("peaks=\(peaks.count) max=\(max)")
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
+        },
+        "voiceover": { @MainActor args in
+            let keep = args.contains("--keep-fixture")
+            let package = FileManager.default.temporaryDirectory.appendingPathComponent("voiceover-test-" + UUID().uuidString + ".recorder")
+            try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+            defer { if !keep { try? FileManager.default.removeItem(at: package) } }
+            try JSONEncoder().encode(EventLog()).write(to: package.appendingPathComponent("events.json"))
+            let input: URL
+            if let path = args.first(where: { !$0.hasPrefix("--") }) { input = URL(fileURLWithPath: path) }
+            else {
+                input = package.appendingPathComponent("synthetic.m4a")
+                try synthesizeSineM4A(at: input, duration: 4.5)
+            }
+            try await synthesizeGradientMovie(at: package.appendingPathComponent("screen.mov"), width: 320, height: 180, fps: 5, frameCount: 40)
+            try FileManager.default.copyItem(at: package.appendingPathComponent("screen.mov"), to: package.appendingPathComponent("camera.mov"))
+            var baseline = try await VoiceoverRecorder.runSelfTest(package: package, input: input)
+            if keep {
+                let duration = try await AVURLAsset(url: input).load(.duration).seconds
+                baseline.audioClips[0].end = baseline.audioClips[0].start + min(2, duration - baseline.audioClips[0].start)
+                try baseline.save(to: package.appendingPathComponent("project.json"))
+                print("HUMAN voiceover fixture: \(package.path)")
+            }
         },
         // T-607: `AppDelegate.buildMainMenu` is `private`, so this builds its own small fixture menu
         // (nested submenu, a separator, a disabled item, an item with no action) to exercise

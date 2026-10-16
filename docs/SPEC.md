@@ -735,7 +735,7 @@ Video clip movement uses output-time distances across mixed playback speeds, inc
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `Space` | play/pause | `C` | split at playhead |
+| `Space` | play/pause; stop voiceover | `C` | split at playhead |
 | `←` `→` | ±1 frame | `⌥` hold / `S` | split mode |
 | | | `V` | pointer tool (exit split mode) |
 | `⇧←` `⇧→` | ±1 s | `⌫` | remove selection |
@@ -744,6 +744,9 @@ Video clip movement uses output-time distances across mixed playback speeds, inc
 | `↑` `↓` | prev/next edit point | `⌘=` `⌘-` `⇧Z` | timeline zoom in/out/fit |
 | `Esc` | cancel drag → exit split mode → deselect | `⌘E` `⌘S` `⌘K` `⌘/` | export · save · command menu · cheat sheet |
 | `1`–`6` | inspector tabs | `⌘D` | duplicate selected zoom/mask after itself |
+| `⇧R` | record/re-record voiceover; stop take | `⌘L` | link/unlink selected audio |
+
+During voiceover, `Esc` discards the pending take without an undo entry; ordinary editing shortcuts are locked.
 
 ### 7.4 `TimelineOps` (Core, pure functions `Project -> Project`)
 

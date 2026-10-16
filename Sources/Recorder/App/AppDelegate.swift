@@ -58,6 +58,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         EditorWindowController.saveAllNow()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        func recorders(in view: NSView) -> [VoiceoverRecorder] {
+            let own = (view as? PreviewView).map { [$0.model.voiceover] } ?? []
+            return own + view.subviews.flatMap { recorders(in: $0) }
+        }
+        let windows = sender.windows.compactMap(\.contentView).flatMap { recorders(in: $0) }
+        let recorders = (EditorWindowController.allOpen.map { $0.model.voiceover } + windows).filter(\.isActive)
+        guard !recorders.isEmpty else { return .terminateNow }
+        Task {
+            for recorder in recorders { await recorder.discardAndWait() }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     private func showOnboarding() {
         if let window, window.isVisible {
             window.makeKeyAndOrderFront(nil)
@@ -354,6 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(item("Paste", "v", action: #selector(NSText.paste(_:))))
         edit.addItem(item("Split", "c", [], action: #selector(EditorWindowController.splitAtPlayhead(_:))))
         edit.addItem(item("Link / Unlink Audio", "l", action: #selector(EditorWindowController.toggleAudioLink(_:))))
+        edit.addItem(item("Record / Re-record Voiceover", "r", [.shift], action: #selector(EditorWindowController.recordVoiceover(_:))))
         edit.addItem(item("Remove", "\u{8}", [], action: #selector(EditorWindowController.removeSelected(_:))))
         edit.addItem(item("Add Zoom", "z", [], action: #selector(EditorWindowController.addZoomAtPlayhead(_:))))
         edit.addItem(item("Regenerate Auto Zooms", action: #selector(EditorWindowController.regenerateAutoZooms(_:))))

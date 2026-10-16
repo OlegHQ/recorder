@@ -42,6 +42,7 @@ enum CheatSheetContent {
         Row(key: "C", action: "split at playhead"),
         Row(key: "⌥ hold / S", action: "split mode (non-audio)"),
         Row(key: "⌘L", action: "link/unlink selected audio"),
+        Row(key: "⇧R", action: "record/re-record voiceover; stop take"),
         Row(key: "⌥ drag / ⌥⌫", action: "edit audio without its linked video"),
         Row(key: "⌫", action: "remove selection"),
         Row(key: "Z", action: "add zoom at playhead"),

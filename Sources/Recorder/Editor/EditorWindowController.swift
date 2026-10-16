@@ -31,6 +31,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     private let rootView: EditorRootView
     private var titleField: NSTextField!
     private var saveStatusButton: NSButton!
+    private var editableHeaderControls: [NSControl] = []
     // Typed handles onto the two swappable views above, kept alongside them so the menu actions
     // (T-311) below can reach real API (`InspectorView.init(initialTab:)`, `TimelineView.setZoom`)
     // instead of only the type-erased `NSView` the rest of the window plumbing needs.
@@ -208,6 +209,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     func windowWillClose(_ notification: Notification) {
+        model.voiceover.discard()
         model.saveNow()
         Self.openWindows.removeValue(forKey: model.packageURL)
     }
@@ -287,6 +289,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
                                        target: self, action: #selector(saveDocument(_:)))
         status.font = Theme.captionFont
         saveStatusButton = status
+        editableHeaderControls = [back, title, export]
         observeDocumentHeader()
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
@@ -302,6 +305,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     private func observeDocumentHeader() {
         withObservationTracking {
+            editableHeaderControls.forEach { $0.isEnabled = !model.voiceover.isActive }
             let title = model.project.title
             if !titleField.isEditable { titleField.stringValue = title }
             window?.title = title
@@ -315,6 +319,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     @objc private func titleCommitted(_ sender: NSTextField) {
         defer { sender.isEditable = false }
+        guard !model.voiceover.isActive else { sender.stringValue = model.project.title; return }
         let newTitle = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !newTitle.isEmpty else { sender.stringValue = model.project.title; return }
         guard newTitle != model.project.title else { return }
@@ -323,6 +328,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     @objc func backTapped() {
+        guard !model.voiceover.isActive else { return }
         if model.isPlaying { previewView.togglePlayPause() }
         model.saveNow()
         window?.orderOut(nil)
@@ -331,6 +337,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     // Not `private`: also the View ▸ Crop… menu item's action (`buildMainMenu`, `AppDelegate.swift`).
     @objc func cropTapped() {
+        guard !model.voiceover.isActive else { return }
         guard let window else { return }
         CropSheet.present(for: model, on: window)
     }
@@ -339,6 +346,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     // Export… ⌘E menu item's action, reached through the responder chain (`target = nil`, so it
     // disables itself with no editor window key — same mechanism as the Edit/View items above).
     @objc func exportTapped(_ sender: Any?) {
+        guard !model.voiceover.isActive else { return }
         guard let window else { return }
         ExportSheet.present(for: model, on: window)
     }
@@ -505,6 +513,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     @objc func toggleAudioLink(_ sender: Any?) { coreTimelineView.toggleAudioLink() }
+    @objc func recordVoiceover(_ sender: Any?) { model.voiceover.toggle() }
     @objc func toggleCompactTrackHeaders(_ sender: Any?) { coreTimelineView.toggleCompactTrackHeaders() }
 
     /// `Z`: adds and selects a zoom at the playhead’s source time.
@@ -593,6 +602,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     /// normally since it carries a `⌘` modifier. Also: Undo/Redo's title/availability track the
     /// undo stack, and Remove/Hide Cursor need a selection; everything else just needs an editor.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if model.voiceover.isActive { return item.action == #selector(recordVoiceover(_:)) && model.voiceover.phase != .finishing }
         switch item.action {
         case #selector(performUndo):
             item.title = model.undoName.map { "Undo \($0)" } ?? "Undo"
@@ -629,6 +639,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     // (transport) then the timeline (tools). Their own unhandled keys bubble back here, hence the flag.
     private var isRoutingKey = false
     override func keyDown(with event: NSEvent) {
+        if model.voiceover.isActive { previewView.keyDown(with: event); return }
+        if VoiceoverRecorder.isShortcut(event), !isTextEditing { model.voiceover.toggle(); return }
         guard !isRoutingKey else { return super.keyDown(with: event) }
         isRoutingKey = true
         defer { isRoutingKey = false }
@@ -640,6 +652,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         } else {
             super.keyDown(with: event)
         }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if model.voiceover.isActive { model.voiceover.discard() }
+        else { super.cancelOperation(sender) }
     }
 }
 
@@ -669,6 +686,7 @@ private final class EditorTitleBar: NSView {
 private final class TitleField: NSTextField {
     private var pendingRename: DispatchWorkItem?
     override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
         pendingRename?.cancel()
         if event.clickCount == 2 {
             window?.performZoom(nil)
@@ -676,7 +694,7 @@ private final class TitleField: NSTextField {
         }
         guard !isEditable else { super.mouseDown(with: event); return }
         let rename = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, self.isEnabled else { return }
             self.isEditable = true
             self.window?.makeFirstResponder(self)
             self.currentEditor()?.selectAll(nil)

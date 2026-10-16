@@ -98,6 +98,8 @@ final class PreviewView: MTKView {
     private lazy var statusAction = TechAppKit.button("Retry preview", compact: true,
         target: self, action: #selector(recoverPreview))
     private var compositionRevision = 0
+    private var attachedCompositionRevision = 0
+    private lazy var voiceoverHUD = NSHostingView(rootView: VoiceoverHUD(recorder: model.voiceover))
 
 
     init(model: EditorModel, preparedCompositor: Compositor? = nil) {
@@ -172,6 +174,11 @@ final class PreviewView: MTKView {
         observeSelection()
         observePlayhead()
         observePlayback()
+        model.voiceover.preview = self
+        voiceoverHUD.frame = bounds
+        voiceoverHUD.autoresizingMask = [.width, .height]
+        addSubview(voiceoverHUD)
+        observeVoiceover()
     }
 
     @available(*, unavailable)
@@ -180,6 +187,11 @@ final class PreviewView: MTKView {
     deinit { displayLink?.invalidate() }
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil, model.voiceover.preview === self { model.voiceover.discard() }
+        super.viewWillMove(toWindow: newWindow)
+    }
 
     // MARK: - T-610 state snapshot accessors (read-only; several fields the dump needs are private)
 
@@ -222,19 +234,75 @@ final class PreviewView: MTKView {
     }
 
     func togglePlayPause() {
+        if model.voiceover.isActive { model.voiceover.stop(); return }
         model.isPlaying ? pause() : setRate(1)
     }
 
     /// One frame at the project's output rate (the export fps setting).
     var frameStep: Double { 1 / Double(max(ExportSettings.loadDefault().fps, 1)) }
 
+    func prepareVoiceover(atOutput time: Double) async throws {
+        pause()
+        let deadline = Date().addingTimeInterval(8)
+        await Task.yield()
+        while attachedCompositionRevision != compositionRevision || player?.currentItem?.status != .readyToPlay {
+            try Task.checkCancellation()
+            guard Date() < deadline else { throw CocoaError(.fileReadUnknown) }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard let player else { throw CocoaError(.fileReadUnknown) }
+        hoverTime = nil
+        pendingSeekTime = nil
+        player.currentItem?.cancelPendingSeeks()
+        let target = CMTime(seconds: time, preferredTimescale: 600)
+        let finished = await player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        guard finished else { throw CancellationError() }
+        _ = await cameraPlayer?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        model.playhead = time
+        needsDisplay = true
+    }
+
+    func startVoiceoverPlayback(atOutput time: Double, atHostTime host: CMTime) {
+        guard let player else { return }
+        player.isMuted = !model.voiceover.hearProject
+        player.automaticallyWaitsToMinimizeStalling = false
+        cameraPlayer?.automaticallyWaitsToMinimizeStalling = false
+        player.setRate(1, time: CMTime(seconds: time, preferredTimescale: 600), atHostTime: host)
+        cameraPlayer?.setRate(1, time: CMTime(seconds: time, preferredTimescale: 600), atHostTime: host)
+        lastClickCheckSourceTime = model.timeMap.sourceTime(atOutput: time)
+        model.isPlaying = true
+        startDisplayLink()
+    }
+
+    func setVoiceoverMonitoring(_ enabled: Bool) {
+        if model.voiceover.isActive { player?.isMuted = !enabled }
+    }
+
+    func endVoiceoverPlayback() {
+        pause()
+        player?.isMuted = false
+        player?.automaticallyWaitsToMinimizeStalling = true
+        cameraPlayer?.automaticallyWaitsToMinimizeStalling = true
+    }
+    var voiceoverMonitoringMuted: Bool { player?.isMuted == true }
+
+    private func observeVoiceover() {
+        voiceoverHUD.isHidden = !model.voiceover.isActive
+        if model.voiceover.isActive { addSubview(voiceoverHUD, positioned: .above, relativeTo: nil) }
+        withObservationTracking { _ = model.voiceover.phase } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.observeVoiceover() }
+        }
+    }
+
     func stepFrame(_ deltaSeconds: Double) {
+        guard !model.voiceover.isActive else { return }
         pause()
         seek(toOutput: model.playhead + deltaSeconds)
     }
 
     /// Coalesced: never queues more than one pending seek (SPEC §6.2 "Scrub").
     func seek(toOutput t: Double) {
+        guard !model.voiceover.isActive else { return }
         let clamped = min(max(t, 0), playbackDuration)
         model.playhead = clamped
         performSeek(to: clamped)
@@ -298,6 +366,11 @@ final class PreviewView: MTKView {
     }
 
     @objc private func tick(_ link: CADisplayLink) {
+        if model.voiceover.isActive {
+            if model.voiceover.hearProject, let time = player?.currentTime().seconds { playClickSoundIfCrossed(outputTime: time) }
+            needsDisplay = true
+            return
+        }
         guard !isSeeking, let player, let item = player.currentItem else { return }  // mid-seek time is stale
         let t = player.currentTime().seconds
         playClickSoundIfCrossed(outputTime: t)
@@ -329,6 +402,11 @@ final class PreviewView: MTKView {
     // MARK: - Keys (SPEC §7.3): Space, ←/→, ⇧←/⇧→, Home/End, J/K/L
 
     override func keyDown(with event: NSEvent) {
+        if model.voiceover.isActive {
+            model.voiceover.handleRecordingKey(event)
+            return
+        }
+        if VoiceoverRecorder.isShortcut(event) { model.voiceover.toggle(); return }
         let shift = event.modifierFlags.contains(.shift)
         switch event.keyCode {
         case 53: // Esc (SPEC "Escape"): cancel the open gesture, else keep the selection; never reach the timeline
@@ -413,7 +491,7 @@ final class PreviewView: MTKView {
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.window != nil {
+                if self.window != nil, !self.model.voiceover.isActive {
                     if self.model.isPlaying {
                         // Keep an existing J/K/L playback rate; start only when currently paused.
                         if self.model.previewPlaybackEnd != nil || self.player?.rate == 0 { self.setRate(1) }
@@ -430,7 +508,7 @@ final class PreviewView: MTKView {
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if !self.model.isPlaying, self.hoverTime == nil { self.performSeek(to: self.model.playhead) }
+                if !self.model.isPlaying, !self.model.voiceover.isActive, self.hoverTime == nil { self.performSeek(to: self.model.playhead) }
                 self.observePlayhead()
             }
         }
@@ -479,7 +557,7 @@ final class PreviewView: MTKView {
         }
         showPreviewStatus("Loading preview…", detail: "Preparing the current edit.")
         let packageURL = model.packageURL
-        let resumeSeconds = player?.currentTime().seconds ?? model.playhead
+        let resumeSeconds = model.isPlaying ? player?.currentTime().seconds ?? model.playhead : model.playhead
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -541,10 +619,12 @@ final class PreviewView: MTKView {
             newPlayer.actionAtItemEnd = .pause
             player = newPlayer
         }
+        attachedCompositionRevision = compositionRevision
         needsDisplay = true
     }
 
     private func seekToShowCurrentFrame(resumeSeconds: Double) {
+        guard !model.voiceover.isActive else { return }
         guard let player else { return }
         let time = CMTime(seconds: resumeSeconds, preferredTimescale: 600)
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
@@ -795,11 +875,13 @@ final class PreviewView: MTKView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard bounds.contains(local) else { return nil }
+        if model.voiceover.isActive { return voiceoverHUD.hitTest(local) ?? self }
         if !statusStack.isHidden, let hit = statusStack.hitTest(local) { return hit }
         return self
     }
 
     override func cancelOperation(_ sender: Any?) {
+        if model.voiceover.isActive { model.voiceover.discard(); return }
         guard cameraDragActive else { super.cancelOperation(sender); return }
         if cameraDidDrag { model.cancelGesture() }
         cameraDragActive = false
@@ -807,6 +889,7 @@ final class PreviewView: MTKView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !model.voiceover.isActive else { return }
         if let maskOverlayView, !maskOverlayView.isHidden {
             cameraDragActive = false
             maskOverlayView.mouseDown(with: event)
@@ -952,12 +1035,15 @@ struct TransportBar: View {
                 transportButton(model.isPlaying ? "pause.fill" : "play.fill", label: model.isPlaying ? "Pause" : "Play", primary: true) { preview.togglePlayPause() }
                 transportButton("forward.frame.fill", label: "Next frame") { preview.stepFrame(preview.frameStep) }
                 transportButton("forward.end.fill", label: "Go to end") { preview.seek(toOutput: max(model.timeMap.outputDuration, model.project.exportDuration)) }
-            }
+            }.disabled(model.voiceover.isActive)
+            transportButton(model.voiceover.isActive ? "stop.circle.fill" : "record.circle", label: model.voiceover.isActive ? "Stop voiceover (Shift-R)" : "Record voiceover (Shift-R)") {
+                model.voiceover.toggle()
+            }.foregroundStyle(Theme.dangerColor).disabled(model.voiceover.phase == .finishing)
             Spacer(minLength: 16)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(Self.timecode(model.playhead)).font(Font(Theme.timecodeFont(16)))
                     .foregroundStyle(Theme.textPrimaryColor)
-                Text("/  " + Self.timecode(max(model.timeMap.outputDuration, model.project.exportDuration)))
+                Text("/  " + Self.timecode(max(model.timeMap.outputDuration, model.project.exportDuration, model.voiceover.isActive ? model.playhead : 0)))
                     .font(Font(Theme.timecodeFont(11))).foregroundStyle(Theme.textSecondaryColor)
             }.fixedSize()
         }

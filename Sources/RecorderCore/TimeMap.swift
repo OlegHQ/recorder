@@ -1,5 +1,9 @@
 import Foundation
 
+public func takePlacement(playheadOutput: Double, firstSampleHost: Double, playbackHost: Double) -> Double {
+    playheadOutput + (firstSampleHost - playbackHost)
+}
+
 /// A kept piece of the source recording, played at `speed`. See docs/SPEC.md §5.
 public struct Clip: Codable, Equatable, Sendable {
     public var sourceStart: Double

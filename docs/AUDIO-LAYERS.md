@@ -309,11 +309,12 @@ T-640 merges; T-648 needs T-643). T-650 last.
   - Verify: `timeline-png` inspected (Mic/System/Voiceover/Audio lanes, badges, sync chip, fade ramp); `timeline-ops`
     and `menu-actions` extended (detach+move = 1 undo; ⌥-drag leaves the camera; Move into Sync zeroes the chip);
     `inspector-panels`; `waveform`; `timeline-clipboard` loops over the new lanes.
-- [ ] **T-645 Voiceover recording**
+- [~] **T-645 Voiceover recording**
   - Do: §4.4 in new `Editor/VoiceoverRecorder.swift` and the HUD in `PreviewView`; Core `takePlacement`; re-record flow;
     take replacement; `Esc` discard.
   - Verify: `make test FILTER=takePlacement` (AC-VO-1); `--selftest voiceover <m4a>` feeds a synthetic file through the
     commit path (placement, original gain 0, one undo step, take replaced on re-record); HUMAN: AC-VO-2 via LaunchServices.
+  - Machine checks pass; real-microphone latency/AC-VO-2 confirmation is still required. `voiceover <m4a> --keep-fixture` prints a disposable package path; open it with `open -n -a build/Recorder.app <package>`, select Mic, then ⇧R. The test's labelled synthetic input is not evidence of real-device capture.
 - [ ] **T-646 Media import + layer lanes (Core + UI)**
   - Do: Core `idleRanges`, layer add/move/resize ops on the generic block engine; §4.5 import for all three kinds
     (drop, ⌘V, Add Media…, idle slot), copy into `media/`, video sound as a `layer`-linked clip, audio files on extra

@@ -10,6 +10,64 @@ public enum Edge: Sendable {
 /// `assert`. The x-axis callers work in is *output* time; conversion to *source* time (where
 /// clips live) goes only through `TimeMap`. See docs/SPEC.md §7.4.
 public extension Project {
+    func voiceoverDestination(atOutput time: Double, replacing range: TimeRange? = nil) -> (track: Int, name: String, stop: Double?) {
+        func retained(_ audio: AudioClip) -> Bool {
+            guard let range, audio.file.hasPrefix("voice/"), let interval = outputRange(audio, connected: audio.isConnected) else { return true }
+            return interval.end <= range.start || interval.start >= range.end
+        }
+        for track in audioTracks.indices where audioTracks[track].name.hasPrefix("Voiceover ") {
+            let intervals = audioClips.filter { $0.track == track && retained($0) }.compactMap { outputRange($0, connected: $0.isConnected) }
+            if !intervals.contains(where: { $0.start <= time && $0.end > time }) {
+                return (track, audioTracks[track].name, intervals.filter { $0.start > time }.map(\.start).min())
+            }
+        }
+        var number = 1
+        while audioTracks.contains(where: { $0.name == "Voiceover \(number)" }) { number += 1 }
+        return (audioTracks.count, "Voiceover \(number)", nil)
+    }
+
+    @discardableResult
+    mutating func addVoiceover(file: String, placement: Double, duration: Double, replacing id: UUID? = nil) -> UUID? {
+        guard file.hasPrefix("voice/"), !file.split(separator: "/").contains(".."),
+              placement.isFinite, duration.isFinite, duration > 0 else { return nil }
+        let original = id.flatMap { id in audioClips.first { $0.id == id.uuidString } }
+        guard id == nil || original != nil else { return nil }
+        let replacement = original.flatMap { outputRange($0, connected: $0.isConnected) }
+        let start = max(0, placement, replacement?.start ?? 0)
+        let end = min(placement + duration, replacement?.end ?? .infinity)
+        guard start.isFinite, end.isFinite, end - start >= 0.1 - 1e-9 else { return nil }
+        let before = self
+        let destination = voiceoverDestination(atOutput: start, replacing: replacement)
+        let stop = min(end, destination.stop ?? end)
+        guard stop - start >= 0.1 - 1e-9 else { return nil }
+        extendAudioClock(toOutput: start)
+        if let original, let audioID = UUID(uuidString: original.id) {
+            let otherIDs = Set(audioClips.filter { $0.id != original.id }.map(\.id))
+            _ = splitAudio(audioID, atOutput: start, propagate: false)
+            if let middle = audioClips.first(where: { audio in
+                guard !otherIDs.contains(audio.id), let range = outputRange(audio, connected: audio.isConnected) else { return false }
+                return range.start <= start + 1e-9 && range.end > start
+            }), let middleID = UUID(uuidString: middle.id) { _ = splitAudio(middleID, atOutput: stop, propagate: false) }
+            for index in audioClips.indices where !otherIDs.contains(audioClips[index].id) {
+                if let range = outputRange(audioClips[index], connected: audioClips[index].isConnected), range.start >= start - 1e-9 && range.end <= stop + 1e-9 {
+                    audioClips[index].gain = 0
+                }
+            }
+            let previousTakes = audioClips.filter { $0.file.hasPrefix("voice/") }
+            audioClips.removeAll { $0.file.hasPrefix("voice/") }
+            var retained = previousTakes.compactMap { connectedOnOutput($0) }
+            applyLinkedEdit(&retained, in: start...stop, moveBy: nil)
+            audioClips += retained.map { connectedFromOutput($0) }
+        }
+        if destination.track == audioTracks.count { audioTracks.append(AudioTrack(name: destination.name)) }
+        let sourceStart = TimeMap(clips).sourceTime(atOutput: start)
+        let take = AudioClip(start: sourceStart, end: sourceStart + stop - start, mediaStart: start - placement, file: file, track: destination.track)
+        audioClips.append(take)
+        audioClips.sort { $0.start < $1.start }
+        guard checkInvariants(mediaDurations: [file: duration]) == nil else { self = before; return nil }
+        return UUID(uuidString: take.id)
+    }
+
     /// Minimum kept length of a clip, in source seconds.
     private static let minClipLength = 0.1
 
@@ -946,6 +1004,7 @@ public extension Project {
     }
 
     func syncOffset(_ audio: AudioClip) -> Double? {
+        guard !audio.file.hasPrefix("voice/") else { return nil }
         guard let range = outputRange(audio, connected: audio.isConnected) else {
             guard audio.link == .camera, let camera = cameraClips.first(where: { $0.start < audio.end && $0.end > audio.start }) else { return nil }
             let sample = max(audio.start, camera.start)

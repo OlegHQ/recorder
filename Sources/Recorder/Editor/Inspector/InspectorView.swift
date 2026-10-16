@@ -164,6 +164,7 @@ struct InspectorView: View {
         .background(Theme.bgPanelColor)
         .overlay(alignment: .leading) { Rectangle().fill(Theme.strokeColor).frame(width: 1) }
         .signalWindow()
+        .disabled(model.voiceover.isActive)
     }
 
     private var hasSectionReveals: Bool {

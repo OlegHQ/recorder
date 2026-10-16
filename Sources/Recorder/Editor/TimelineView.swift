@@ -139,14 +139,22 @@ final class TimelineView: NSView {
     private(set) var compactTrackHeaders = false
     var gutterWidth: CGFloat { compactTrackHeaders ? 16 : Self.gutter }
     var lanes: [Lane] {
-        Lane.allCases + (model.map { model in
-            model.project.audioTracks.indices.filter { track in
+        guard let model else { return Lane.allCases }
+        var tracks = model.project.audioTracks.indices.filter { track in
                 model.project.audioClips.contains { $0.track == track } ||
                     (dragKind != nil && dragProject?.audioClips.contains { $0.track == track } == true)
-            }.map(Lane.audio)
-        } ?? [])
+        }
+        if model.voiceover.isActive, !tracks.contains(model.voiceover.track) { tracks.append(model.voiceover.track) }
+        func order(_ track: Int) -> Int {
+            let name = model.project.audioTracks.indices.contains(track) ? model.project.audioTracks[track].name : model.voiceover.trackName
+            return name == "Mic" ? 0 : name == "System" ? 1 : name.hasPrefix("Voiceover ") ? 2 : 3
+        }
+        return Lane.allCases + tracks.sorted { order($0) == order($1) ? $0 < $1 : order($0) < order($1) }.map(Lane.audio)
     }
-    private var timelineDuration: Double { model.map { max($0.timeMap.outputDuration, $0.project.exportDuration) } ?? 0 }
+    private var timelineDuration: Double {
+        model.map { max($0.timeMap.outputDuration, $0.project.exportDuration,
+                         $0.voiceover.isActive ? max($0.playhead + 1, $0.voiceover.liveRange?.end ?? 0) : 0) } ?? 0
+    }
 
     func toggleCompactTrackHeaders() {
         compactTrackHeaders.toggle()
@@ -383,6 +391,9 @@ final class TimelineView: NSView {
             _ = model.isPlaying
             _ = model.selection
             _ = model.selectedClip
+            _ = model.voiceover.phase
+            _ = model.voiceover.liveRange
+            _ = model.voiceover.level
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self, let model = self.model else { return }
@@ -491,6 +502,7 @@ final class TimelineView: NSView {
         drawTextLane(project, timeMap)
         drawWindowLane(project, timeMap)
         drawAudioLanes(project)
+        drawVoiceoverTake()
         drawLinkedPartners(project)
         drawPlayhead(model.playhead)
         // Drawn after the playhead/its timecode chip so a cut near the playhead is never hidden
@@ -1406,6 +1418,7 @@ final class TimelineView: NSView {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
+        guard model?.voiceover.isActive != true else { return nil }
         let p = convert(event.locationInWindow, from: nil)
         switch hitTest(at: p) {
         case .clipBody(let i), .clipEdge(let i, _):
@@ -1640,6 +1653,11 @@ final class TimelineView: NSView {
     // MARK: - Keyboard (⌘=/⌘- anchored at the playhead, ⇧Z = fit, C/S = split — SPEC §7.3)
 
     override func keyDown(with event: NSEvent) {
+        if let voiceover = model?.voiceover, voiceover.isActive {
+            voiceover.handleRecordingKey(event)
+            return
+        }
+        if VoiceoverRecorder.isShortcut(event) { model?.voiceover.toggle(); return }
         let cmd = event.modifierFlags.contains(.command)
         let shift = event.modifierFlags.contains(.shift)
         let chars = event.charactersIgnoringModifiers
@@ -1726,6 +1744,7 @@ final class TimelineView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard model?.voiceover.isActive != true else { return }
         window?.makeFirstResponder(self)
         let p = convert(event.locationInWindow, from: nil)
         dragIgnoresLinks = event.modifierFlags.contains(.option)
@@ -1961,6 +1980,7 @@ final class TimelineView: NSView {
     /// SPEC §7.3: "Esc: cancel drag → exit split mode → deselect", checked in that order.
     /// AC-TL-6: `Esc` mid-drag restores the pre-drag project.
     override func cancelOperation(_ sender: Any?) {
+        if model?.voiceover.isActive == true { model?.voiceover.discard(); return }
         if marqueeStart != nil {
             model?.selectedClips = marqueeOriginalSelection.clips
             model?.selection = marqueeOriginalSelection.blocks
@@ -2070,7 +2090,9 @@ final class TimelineView: NSView {
         case .mask: return "Mask"
         case .text: return "Text"
         case .window: return "Window"
-        case .audio(let track): return model?.project.audioTracks[track].name ?? "Audio"
+        case .audio(let track):
+            guard let model else { return "Audio" }
+            return model.project.audioTracks.indices.contains(track) ? model.project.audioTracks[track].name : model.voiceover.trackName
         }
     }
 
@@ -2475,6 +2497,14 @@ final class TimelineView: NSView {
                 model.edit("Move Audio") { $0.moveAudio(id, toStart: source) }
             })
         }
+        if model.voiceover.isActive, let range = model.voiceover.liveRange {
+            let row = laneRow(.audio(model.voiceover.track))
+            let frame = CGRect(x: x(forOutput: range.start), y: row.minY, width: CGFloat((range.end - range.start) * geometry.pxPerSecond), height: row.height)
+            let live = axElement(frame: frame, label: "\(model.voiceover.trackName) recording, \(axTime(range.start)) to \(axTime(range.end)) seconds", nudge: nil)
+            live.setAccessibilityRole(.staticText)
+            live.setAccessibilityEnabled(true)
+            elements.append(live)
+        }
         if bounds.height >= contentHeight + 26 {
             let overview = axElement(frame: overviewRect, label: "Timeline overview", nudge: { [weak self] direction in
                 guard let self else { return }
@@ -2483,6 +2513,7 @@ final class TimelineView: NSView {
                 self.needsDisplay = true
             })
             overview.setAccessibilityRole(.slider)
+            overview.setAccessibilityEnabled(true)
             overview.setAccessibilityValue("Visible \(playheadLabel(geometry.output(forX: 0))) to \(playheadLabel(min(timelineDuration, geometry.output(forX: geometry.width))))")
             elements.append(overview)
         }
@@ -2536,6 +2567,7 @@ final class TimelineView: NSView {
         let element = TimelineBlockAXElement()
         element.setAccessibilityParent(self)
         element.setAccessibilityRole(.button)
+        element.setAccessibilityEnabled(model?.voiceover.isActive != true)
         element.setAccessibilityLabel(label)
         element.setAccessibilityFrame(screenFrame(forViewRect: viewRect))
         element.nudge = nudge
@@ -2788,8 +2820,7 @@ extension TimelineView {
         menu.addItem(.separator())
         let mute = actionItem("Mute Clip", action: #selector(menuAudioMute))
         mute.state = clip.gain == 0 ? .on : .off; menu.addItem(mute)
-        let record = actionItem("Re-record… (⇧R)", action: nil)
-        record.isEnabled = false; menu.addItem(record)
+        menu.addItem(actionItem("Re-record… (⇧R)", action: #selector(menuReRecordVoiceover), represented: id))
         menu.addItem(actionItem("Remove (⌫)", action: #selector(menuRemoveBlock(_:)), represented: id))
         return menu
     }
@@ -2809,6 +2840,32 @@ extension TimelineView {
         model.edit("Mute Audio") { project in
             if let index = project.audioClips.firstIndex(where: { $0.id == id.uuidString }) { project.audioClips[index].gain = project.audioClips[index].gain == 0 ? 1 : 0 }
         }
+    }
+
+    @objc private func menuReRecordVoiceover() {
+        guard let model, let id = model.selection.first else { return }
+        model.voiceover.start(replacing: id)
+    }
+
+    @objc private func recordVoiceover(_ sender: NSButton) {
+        guard let model else { return }
+        model.voiceover.isActive ? model.voiceover.stop() : model.voiceover.start()
+    }
+
+    private func drawVoiceoverTake() {
+        guard let voiceover = model?.voiceover, let range = voiceover.liveRange, voiceover.isActive else { return }
+        let row = laneRow(.audio(voiceover.track))
+        let rect = CGRect(x: x(forOutput: range.start), y: row.minY + 3,
+                          width: CGFloat((range.end - range.start) * geometry.pxPerSecond), height: 30)
+        drawBlock(rect, fill: Theme.voiceover, tornLeft: false, tornRight: false, label: "Recording…")
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: rect).addClip()
+        Theme.mediaMatte.withAlphaComponent(0.6).setFill()
+        for sample in voiceover.levels where sample.output >= range.start && sample.output <= range.end {
+            let height = max(1, CGFloat(sample.peak.squareRoot()) * 12)
+            CGRect(x: x(forOutput: sample.output), y: rect.maxY - 8 - height / 2, width: 2, height: height).fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private func audioRect(_ audio: AudioClip, output: TimeRange) -> CGRect {
@@ -2840,12 +2897,19 @@ extension TimelineView {
                 NSGraphicsContext.saveGraphicsState()
                 NSBezierPath(rect: rect).addClip()
                 Theme.mediaMatte.withAlphaComponent(0.65).setStroke(); ramp.stroke()
-                let badge: String
+                var badge: String
                 switch audio.link {
                 case .screen: badge = "⛓ Scr"
                 case .camera: badge = "⛓ Cam"
                 case .layer: badge = "⛓ Clip"
                 case nil: badge = URL(fileURLWithPath: audio.file).lastPathComponent
+                }
+                if audio.gain == 0, !audio.file.hasPrefix("voice/") {
+                    let takes = project.audioClips.filter { $0.file.hasPrefix("voice/") }
+                    if let index = takes.firstIndex(where: { take in
+                        let intervals = project.audioSegments(take)
+                        return (intervals.first?.output.start ?? .infinity) < last.output.end && (intervals.last?.output.end ?? 0) > first.output.start
+                    }) { badge += " · Replaced by Take \(index + 1)" }
                 }
                 let left = max(rect.minX + 12, gutterWidth + 4)
                 (badge as NSString).draw(at: CGPoint(x: left, y: rect.minY + 1),
@@ -2920,11 +2984,11 @@ extension TimelineView {
             if let buttons = audioHeaderButtons.removeValue(forKey: track) { [buttons.volume, buttons.mute, buttons.record].forEach { $0.removeFromSuperview() } }
         }
         for track in visible {
-            let settings = model.project.audioTracks[track]
+            let settings = model.project.audioTracks.indices.contains(track) ? model.project.audioTracks[track] : AudioTrack(id: "live", name: model.voiceover.trackName)
             if audioHeaderButtons[track] == nil {
                 let volume = NSButton(title: settings.name, target: self, action: #selector(showAudioVolume(_:)))
                 let mute = NSButton(title: "M", target: self, action: #selector(toggleAudioTrackMute(_:)))
-                let record = NSButton(title: "●", target: nil, action: nil)
+                let record = NSButton(title: "●", target: self, action: #selector(recordVoiceover(_:)))
                 for button in [volume, mute, record] {
                     button.tag = track; button.isBordered = false; button.font = Theme.captionFont
                     button.contentTintColor = Theme.textPrimary; addSubview(button)
@@ -2944,18 +3008,21 @@ extension TimelineView {
             buttons.mute.setAccessibilityValue(settings.muted ? "On" : "Off")
             buttons.record.frame = CGRect(x: 2, y: row.minY + 2, width: 28, height: 28)
             buttons.record.isHidden = compactTrackHeaders || !settings.name.hasPrefix("Voiceover")
-            buttons.record.isEnabled = false
+            buttons.record.title = model.voiceover.isActive && model.voiceover.track == track ? "■" : "●"
+            buttons.record.isEnabled = model.voiceover.phase != .finishing && (!model.voiceover.isActive || model.voiceover.track == track)
             buttons.record.toolTip = "Voiceover recording"
             buttons.record.setAccessibilityLabel("Record \(settings.name)")
             if settings.name.hasPrefix("Voiceover") { buttons.volume.frame = CGRect(x: 30, y: row.minY + 2, width: 66, height: 28) }
             buttons.volume.isHidden = compactTrackHeaders
             buttons.mute.isHidden = compactTrackHeaders
+            buttons.volume.isEnabled = !model.voiceover.isActive
+            buttons.mute.isEnabled = !model.voiceover.isActive
         }
     }
 
     private func drawAudioHeader(_ track: Int, row: CGRect) {
         guard let model else { return }
-        let settings = model.project.audioTracks[track]
+        let settings = model.project.audioTracks.indices.contains(track) ? model.project.audioTracks[track] : AudioTrack(id: "live", name: model.voiceover.trackName)
         if compactTrackHeaders || !settings.name.hasPrefix("Voiceover") {
             (settings.name.hasPrefix("Voiceover") ? Theme.voiceover : Theme.audio).setFill()
             CGRect(x: compactTrackHeaders ? 5 : 9, y: row.midY - 5, width: 3, height: 10).fill()
@@ -2964,6 +3031,11 @@ extension TimelineView {
         Theme.bgHover.setFill()
         let meter = CGRect(x: 20, y: row.maxY - 5, width: 104, height: 3)
         meter.fill()
+        if model.voiceover.isActive, model.voiceover.track == track {
+            Theme.voiceover.setFill()
+            CGRect(x: meter.minX, y: meter.minY, width: meter.width * sqrt(model.voiceover.level), height: 3).fill()
+            return
+        }
         guard model.isPlaying, !settings.muted else { return }
         var level = 0.0
         for audio in model.project.audioClips where audio.track == track {
