@@ -29,6 +29,13 @@ struct AudioTab: View {
                     Button(captioning ? "Generating captions…" : "Generate Captions") { generateCaptions() }
                         .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
                         .disabled(captioning)
+                    if let status = model.transcriptStatus {
+                        Text(status).font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Transcribe Again") { Task { await model.transcribe() } }
+                            .buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
+                            .disabled(status == "Transcribing…")
+                    }
                     if let captionStatus {
                         Text(captionStatus).font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
                             .fixedSize(horizontal: false, vertical: true)
@@ -51,17 +58,16 @@ struct AudioTab: View {
         }
     }
 
-    /// Replaces Caption-style blocks with on-device speech recognition of `mic.m4a`; one undo step.
+    /// Replaces Caption-style blocks from the on-device mic transcript (transcribing first if needed); one undo step.
     private func generateCaptions() {
         captioning = true; captionStatus = nil
-        let mic = model.packageURL.appendingPathComponent("mic.m4a")
         Task { @MainActor in
             defer { captioning = false }
-            do {
-                let captions = captionPhrases(words: try await Transcriber.words(in: mic))
-                model.edit("Generate Captions") { $0.replaceCaptions(captions) }
-                captionStatus = captions.isEmpty ? "No speech found." : "Added \(captions.count) captions."
-            } catch { captionStatus = error.localizedDescription }
+            if model.transcript?.isEmpty != false { await model.transcribe() }
+            let captions = captionPhrases(words: model.transcript ?? [])
+            guard !captions.isEmpty else { captionStatus = model.transcriptStatus ?? "No speech found."; return }
+            model.edit("Generate Captions") { $0.replaceCaptions(captions) }
+            captionStatus = "Added \(captions.count) captions."
         }
     }
 

@@ -163,6 +163,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
                                                         orderFront: false, loadingWindow: window, paths: paths, compositor: compositor)
                 openWindows[key] = controller
                 openingWindows.removeValue(forKey: key)
+                if !CommandLine.arguments.contains("--selftest") { Task { await controller.model.prepareMic() } }
                 // Keep the same native window and its position; don't steal focus after loading.
                 if window.isKeyWindow { window.makeFirstResponder(controller.previewView) }
                 if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {

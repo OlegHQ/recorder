@@ -1459,6 +1459,52 @@ public extension Project {
         assert(checkInvariants() == nil)
     }
 
+    /// Mic slicing (2026-10-16): splits every `file` audio clip, audio only, at both edges of each silent MEDIA-time
+    /// range (`silentRanges` over that file) and fades the speech side of each cut by `fade` output seconds.
+    mutating func splitAudioAtPauses(file: String, silent: [TimeRange], fade: Double = 0.06) {
+        for edge in silent.flatMap({ [$0.start, $0.end] }) {
+            guard let audio = audioClips.first(where: { $0.file == file && outputTime(of: $0, media: edge) != nil }),
+                  let id = UUID(uuidString: audio.id), let output = outputTime(of: audio, media: edge) else { continue }
+            _ = splitAudio(id, atOutput: output, propagate: false)
+        }
+        for i in audioClips.indices where audioClips[i].file == file {
+            let segments = audioSegments(audioClips[i])
+            guard let media = segments.first.map({ TimeRange(start: $0.media.start, end: segments.last!.media.end) }),
+                  !silent.contains(where: { media.start >= $0.start - 1e-3 && media.end <= $0.end + 1e-3 }) else { continue }
+            let length = min(fade, (segments.last!.output.end - segments.first!.output.start) / 2)
+            if silent.contains(where: { abs($0.end - media.start) < 1e-3 }) { audioClips[i].fadeIn = max(audioClips[i].fadeIn ?? 0, length) }
+            if silent.contains(where: { abs($0.start - media.end) < 1e-3 }) { audioClips[i].fadeOut = max(audioClips[i].fadeOut ?? 0, length) }
+        }
+        assert(checkInvariants() == nil)
+    }
+
+    /// Pause eraser: removes every pause of `file` that overlaps OUTPUT `range`, audio only, leaving silent gaps.
+    mutating func erasePauses(file: String, silent: [TimeRange], inOutput range: TimeRange) {
+        let touched = silent.filter { pause in
+            audioClips.contains { audio in audio.file == file && audioSegments(audio).contains { segment in
+                let lower = max(pause.start, segment.media.start), upper = min(pause.end, segment.media.end)
+                guard upper > lower, let a = outputTime(of: audio, media: lower), let b = outputTime(of: audio, media: upper) else { return false }
+                return a < range.end && b > range.start
+            } }
+        }
+        guard !touched.isEmpty else { return }
+        let before = self
+        splitAudioAtPauses(file: file, silent: touched)
+        let pauses = Set(audioClips.filter { audio in
+            let segments = audioSegments(audio)
+            guard audio.file == file, let first = segments.first, let last = segments.last else { return false }
+            return touched.contains { first.media.start >= $0.start - 1e-3 && last.media.end <= $0.end + 1e-3 }
+        }.map(\.id))
+        audioClips.removeAll { pauses.contains($0.id) }
+        if checkInvariants() != nil { self = before }
+    }
+
+    /// Output time at which `audio` plays MEDIA second `media`, or nil when that moment isn't on the timeline.
+    func outputTime(of audio: AudioClip, media: Double) -> Double? {
+        guard let s = audioSegments(audio).first(where: { $0.media.start <= media && media <= $0.media.end }) else { return nil }
+        return s.output.start + (media - s.media.start) * (s.output.end - s.output.start) / max(s.media.end - s.media.start, 1e-12)
+    }
+
     /// Splits the clip containing SOURCE time `s` into two clips of the same speed. No-op if `s`
     /// isn't strictly inside a clip (in a gap, or within `minClipLength` of an edge/existing boundary).
     private mutating func splitClip(atSource s: Double) {

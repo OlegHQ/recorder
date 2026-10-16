@@ -136,7 +136,43 @@ final class TimelineView: NSView {
         needsDisplay = true
     }
 
-    func selectTool() { exitSplitMode() }
+    func selectTool() { exitSplitMode(); exitEraser() }
+
+    // MARK: - Pause eraser (2026-10-16): `E` / toolbar eraser; drag across the timeline to remove the mic pauses it touches.
+    private(set) var eraserMode = false
+    private var eraserDrag: (start: CGFloat, end: CGFloat)?
+
+    func toggleEraser() {
+        if eraserMode { exitEraser(); return }
+        exitSplitMode()
+        eraserMode = true
+        needsDisplay = true
+        onNavigationChange?()
+    }
+
+    private func exitEraser() {
+        guard eraserMode else { return }
+        eraserMode = false; eraserDrag = nil
+        needsDisplay = true
+        onNavigationChange?()
+    }
+
+    private func finishEraser() {
+        guard let drag = eraserDrag, let model else { return }
+        eraserDrag = nil
+        needsDisplay = true
+        let a = geometry.output(forX: geometryX(NSPoint(x: min(drag.start, drag.end), y: 0)))
+        let b = geometry.output(forX: geometryX(NSPoint(x: max(drag.start, drag.end) + 1, y: 0)))
+        var erased = model.project
+        erased.erasePauses(file: "mic.m4a", silent: silentSpans["mic.m4a"] ?? [], inOutput: TimeRange(start: a, end: b))
+        if erased != model.project { model.edit("Erase Pauses") { $0 = erased } }
+    }
+
+    private func drawEraser() {
+        guard eraserMode, let drag = eraserDrag else { return }
+        let rect = CGRect(x: max(gutterWidth, min(drag.start, drag.end)), y: Self.rulerHeight, width: abs(drag.end - drag.start) + 1, height: contentHeight - Self.rulerHeight)
+        Theme.danger.withAlphaComponent(0.18).setFill(); rect.fill()
+    }
 
     static let gutter: CGFloat = 132
     private(set) var compactTrackHeaders = false
@@ -419,6 +455,7 @@ final class TimelineView: NSView {
             _ = model.voiceover.phase
             _ = model.voiceover.liveRange
             _ = model.voiceover.level
+            _ = model.transcript
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self, let model = self.model else { return }
@@ -471,7 +508,11 @@ final class TimelineView: NSView {
         case .layout: return hasLayoutLane ? Self.layoutHeight : 0
         case .mask, .text: return Self.maskHeight
         case .window: return model?.project.windowCount ?? 1 > 1 ? Self.maskHeight : 0
-        case .audio, .layer: return 36
+        case .audio(let track):
+            // Transcript line under the waveform (2026-10-16) on the track holding mic.m4a.
+            let transcribed = model?.transcript?.isEmpty == false && model?.project.audioClips.contains { $0.track == track && $0.file == "mic.m4a" } == true
+            return transcribed ? 50 : 36
+        case .layer: return 36
         }
     }
 
@@ -536,6 +577,7 @@ final class TimelineView: NSView {
         drawCutBubbles(project)
         drawHover()
         if isSplitMode { drawSplitBlade() }
+        drawEraser()
         drawCutFlash()
         // SPEC §7.2 "Snapping": "a 1 px accent guide line spans all tracks while snapped" — applies
         // to every drag that sets `snapGuideX` (the split blade draws its own, mid-blade, above).
@@ -1125,7 +1167,7 @@ final class TimelineView: NSView {
 
     /// `Esc` exits split mode; the ✂ toolbar button and `S` toggle the sticky half of it.
     func toggleSplitModeSticky() {
-        if splitModeSticky { exitSplitMode() } else { splitModeSticky = true; needsDisplay = true; updateHoverCallback() }
+        if splitModeSticky { exitSplitMode() } else { exitEraser(); splitModeSticky = true; needsDisplay = true; updateHoverCallback() }
         onNavigationChange?()
     }
 
@@ -1849,9 +1891,11 @@ final class TimelineView: NSView {
     private func drawMediaLayers(_ project: Project) {
         guard let model else { return }
         let row = laneRow(.layer(0))
+        // Only the idle slot under the pointer is drawn: drawing all of them tiled the lane with dashed boxes.
         for slot in model.idleSlots where row.height > 0 {
             let rect = CGRect(x: x(forOutput: slot.start), y: row.minY + 3, width: CGFloat((slot.end - slot.start) * geometry.pxPerSecond), height: row.height - 6)
-            guard rect.maxX >= gutterWidth, rect.minX <= bounds.width else { continue }
+            guard rect.maxX >= gutterWidth, rect.minX <= bounds.width, dragKind == nil,
+                  let hoverX, let hoverY, rect.insetBy(dx: 0, dy: -3).contains(CGPoint(x: hoverX, y: hoverY)) else { continue }
             Theme.textTertiary.setStroke()
             let path = NSBezierPath(rect: rect.insetBy(dx: 1, dy: 1)); path.setLineDash([4, 3], count: 2, phase: 0); path.stroke()
             if rect.width > 90 {
@@ -1983,7 +2027,9 @@ final class TimelineView: NSView {
         } else if !cmd, chars?.lowercased() == "s" { // `S` = sticky split mode
             toggleSplitModeSticky()
         } else if !cmd, chars?.lowercased() == "v" { // `V` = back to the pointer (selection) tool
-            exitSplitMode()
+            selectTool()
+        } else if !cmd, chars?.lowercased() == "e" { // `E` = pause eraser
+            toggleEraser()
         } else if !cmd, !shift, chars?.lowercased() == "z" { // `Z` = add a zoom at the playhead
             addZoom(atOutput: model?.playhead ?? 0)
         } else if !cmd, !shift, chars?.lowercased() == "t", let model { // `T` = add text at the playhead
@@ -2057,7 +2103,16 @@ final class TimelineView: NSView {
             overviewDrag = (p.x, geometry.scrollX, original)
             return
         }
-        guard p.x >= gutterWidth, p.y <= bounds.height - 26 else { return }
+        guard p.x >= gutterWidth, p.y <= bounds.height - 26 else {
+            // Double-click the Zoom track header: select every auto zoom (then ⌫ removes them).
+            if event.clickCount >= 2, laneRow(.zoom).contains(p), let model {
+                model.selectedClips = []
+                model.selection = Set(model.project.zooms.filter { $0.mode == .auto }.compactMap { UUID(uuidString: $0.id) })
+                needsDisplay = true
+            }
+            return
+        }
+        if eraserMode { eraserDrag = (p.x, p.x); needsDisplay = true; return }
         if beginAudioDrag(at: p, event: event) { return }
         if beginLayerDrag(at: p, event: event) { return }
         if laneRow(.layer(0)).contains(p), let slot = model?.idleSlots.first(where: { x(forOutput: $0.start) <= p.x && x(forOutput: $0.end) >= p.x }) {
@@ -2147,6 +2202,7 @@ final class TimelineView: NSView {
     override func mouseDragged(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if overviewDrag != nil { panOverview(to: p.x, centered: false); return }
+        if eraserDrag != nil { eraserDrag?.end = max(gutterWidth, p.x); needsDisplay = true; return }
         if let start = marqueeStart, let model {
             guard marqueeRect != nil || hypot(p.x - start.x, p.y - start.y) >= 3 else { return }
             let rect = CGRect(x: min(start.x, p.x), y: min(start.y, p.y), width: max(1, abs(p.x - start.x)), height: max(1, abs(p.y - start.y)))
@@ -2245,6 +2301,7 @@ final class TimelineView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if eraserDrag != nil { finishEraser(); return }
         if marqueeStart != nil {
             if marqueeRect == nil {
                 model?.selectedClips = marqueeSelection
@@ -2308,6 +2365,8 @@ final class TimelineView: NSView {
         }
         if dragKind != nil { cancelActiveDrag(); return }
         if isSplitMode { exitSplitMode(); return }
+        if eraserDrag != nil { eraserDrag = nil; needsDisplay = true; return }
+        if eraserMode { exitEraser(); return }
         deselect()
     }
 
@@ -2722,7 +2781,7 @@ final class TimelineView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         hoverX = p.x
         hoverY = p.y
-        (isSplitMode ? NSCursor.crosshair : cursor(for: hitTest(at: p))).set()
+        (isSplitMode || eraserMode ? NSCursor.crosshair : cursor(for: hitTest(at: p))).set()
         updateHoverCallback()
         needsDisplay = true
     }
@@ -3342,6 +3401,7 @@ extension TimelineView {
                           tornLeft: false, tornRight: false, label: nil, selected: selected)
                 let strip = CGRect(x: rect.minX + 3, y: rect.minY + 14, width: max(0, rect.width - 6), height: 14)
                 drawAudioWaveform(audio, segment: segment, in: strip)
+                drawTranscript(audio, segment: segment, in: CGRect(x: rect.minX + 3, y: strip.maxY + 2, width: strip.width, height: rect.maxY - strip.maxY - 2))
                 if audio.gain == 0 { drawAudioHatch(rect) }
                 let duration = last.output.end - first.output.start
                 let ramp = NSBezierPath()
@@ -3383,6 +3443,25 @@ extension TimelineView {
                 NSGraphicsContext.restoreGraphicsState()
             }
         }
+    }
+
+    /// Each spoken word at the x where it starts; words that would overlap the previous one are skipped.
+    private func drawTranscript(_ audio: AudioClip, segment: (media: TimeRange, output: TimeRange), in rect: CGRect) {
+        guard rect.height >= 12, audio.file == "mic.m4a", let model else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: rect).addClip()
+        let attributes: [NSAttributedString.Key: Any] = [.font: Theme.captionFont, .foregroundColor: Theme.mediaMatte]
+        let scale = (segment.output.end - segment.output.start) / max(segment.media.end - segment.media.start, 1e-9)
+        var nextX = max(rect.minX, gutterWidth + 2)
+        for word in model.transcriptWords(media: segment.media) where word.start >= segment.media.start - 0.05 && word.start < segment.media.end {
+            let x = max(self.x(forOutput: segment.output.start + max(0, word.start - segment.media.start) * scale), rect.minX)
+            guard x >= nextX else { continue }
+            guard x < min(bounds.width, rect.maxX) else { break }
+            let text = word.text as NSString
+            text.draw(at: CGPoint(x: x, y: rect.minY), withAttributes: attributes)
+            nextX = x + text.size(withAttributes: attributes).width + 4
+        }
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private func drawAudioWaveform(_ audio: AudioClip, segment: (media: TimeRange, output: TimeRange), in rect: CGRect) {
@@ -3629,6 +3708,7 @@ final class TimelineToolbar: NSView {
 
     private let pointerButton = NSButton(title: "", target: nil, action: nil)
     private let splitButton = ScissorsButton(title: "", target: nil, action: nil)
+    private let eraserButton = NSButton(title: "", target: nil, action: nil)
     private let rippleButton = NSButton(title: "", target: nil, action: nil)
     private let linkButton = NSButton(title: "", target: nil, action: nil)
     private let snapButton = NSButton(title: "", target: nil, action: nil)
@@ -3643,6 +3723,7 @@ final class TimelineToolbar: NSView {
         let buttons: [(NSButton, Selector, String)] = [
             (pointerButton, #selector(pointerTapped), "Select tool (V). Drag empty video space or below tracks to box-select video; Shift-click to add or remove clips."),
             (splitButton, #selector(splitTapped), "Blade tool (S). Command-click splits the clip at the playhead without changing tools. C splits the selection."),
+            (eraserButton, #selector(eraserTapped), "Pause eraser (E). Drag across the timeline to remove the microphone pauses it touches, leaving silent gaps."),
             (snapButton, #selector(snapTapped), "Toggle snapping (N). Hold Command while dragging to bypass."),
             (linkButton, #selector(linkTapped), "Link layers to video. Video cuts, deletion, trims, moves and speed changes carry layers; layer edits stay independent."),
             (rippleButton, #selector(rippleTapped), "Ripple Delete. Close the space when deleting video clips; turn off to leave a gap."),
@@ -3661,7 +3742,7 @@ final class TimelineToolbar: NSView {
             button.widthAnchor.constraint(equalToConstant: 28).isActive = true
             button.setAccessibilityLabel(help)
         }
-        for (button, symbol) in [(pointerButton, "cursorarrow"), (splitButton, "scissors"),
+        for (button, symbol) in [(pointerButton, "cursorarrow"), (splitButton, "scissors"), (eraserButton, "eraser"),
                                   (snapButton, "align.horizontal.center"), (linkButton, "link"), (rippleButton, "arrow.left.to.line"), (focusButton, "viewfinder"), (fitButton, "arrow.left.and.right"),
                                   (zoomOutButton, "minus"), (zoomInButton, "plus")] {
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: button.toolTip)?
@@ -3669,7 +3750,7 @@ final class TimelineToolbar: NSView {
             button.imagePosition = .imageOnly
             button.title = ""
         }
-        let left = NSStackView(views: [pointerButton, splitButton, snapButton, linkButton, rippleButton])
+        let left = NSStackView(views: [pointerButton, splitButton, eraserButton, snapButton, linkButton, rippleButton])
         let right = NSStackView(views: [focusButton, fitButton, zoomOutButton, zoomInButton])
         for stack in [left, right] {
             stack.orientation = .horizontal
@@ -3690,8 +3771,9 @@ final class TimelineToolbar: NSView {
 
     func syncSlider() {
         guard let timelineView else { return }
-        for (button, selected) in [(pointerButton, !timelineView.debugSplitMode),
+        for (button, selected) in [(pointerButton, !timelineView.debugSplitMode && !timelineView.eraserMode),
                                    (splitButton, timelineView.debugSplitMode),
+                                   (eraserButton, timelineView.eraserMode),
                                    (snapButton, timelineView.snappingEnabled),
                                    (linkButton, timelineView.linkedVideoEdits),
                                    (rippleButton, timelineView.rippleDeleteEnabled)] {
@@ -3706,13 +3788,17 @@ final class TimelineToolbar: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         Theme.textPrimary.setFill()
-        for button in [pointerButton, splitButton, snapButton, linkButton, rippleButton] where button.state == .on {
+        for button in [pointerButton, splitButton, eraserButton, snapButton, linkButton, rippleButton] where button.state == .on {
             let rect = convert(button.bounds, from: button)
             CGRect(x: rect.midX - 5, y: 1, width: 10, height: 1).fill()
         }
     }
 
     @objc private func pointerTapped() { timelineView?.selectTool(); syncSlider() }
+    @objc private func eraserTapped() {
+        timelineView?.toggleEraser(); syncSlider()
+        timelineView?.window?.makeFirstResponder(timelineView)
+    }
     @objc private func rippleTapped() { timelineView?.toggleRippleDelete() }
     @objc private func linkTapped() { timelineView?.toggleLinkedVideoEdits() }
     @objc private func snapTapped() { timelineView?.toggleSnapping() }

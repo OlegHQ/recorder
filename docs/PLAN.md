@@ -170,6 +170,22 @@ Lanes: **A** T-640→T-645 · **L** T-646→T-649 (after T-640 merges; T-648 nee
 
 ---
 
+## Requested voice editing — 2026-10-16
+
+User request: transcript-aware mic editing, pause eraser, select-all auto zooms, calmer idle slots.
+
+- [x] **T-651 Mic sliced at pauses + pause eraser (Core)**
+  - `Project.splitAudioAtPauses(file:silent:fade:)` (audio only, 60 ms fades on the speech side), `erasePauses(file:silent:inOutput:)` (removes touched pauses, leaves gaps, video untouched).
+  - Verify: `make test FILTER=pausesSliceAndEraseMicOnly`.
+- [x] **T-652 Auto transcript + slicing on first open**
+  - `EditorModel.prepareMic` (skipped under `--selftest`): slices mic.m4a at `Waveform.silent` (one undo step), transcribes on-device into `transcript.json`; Mic lane 50 pt with words drawn at their spoken x; AudioPanel shows the selected clip's transcript; Generate Captions reuses the transcript; Sound tab "Transcribe Again".
+  - Verify: `make app`; `timeline-ops`, `menu-actions`, `inspector-panels`, `waveform` OK. HUMAN: open a fresh mic recording, grant Speech Recognition, confirm words and pause slices.
+- [x] **T-653 Pause eraser tool, Zoom header double-click, idle slots on hover**
+  - Toolbar eraser / `E`: drag across the timeline → `erasePauses` over the mic silent spans, one undo step; Esc/V exit. Double-click the Zoom track header selects every auto zoom (⌫ removes). Idle "Add image" slots draw only under the pointer.
+  - Verify: `command-scissors`, `timeline-ops` OK. HUMAN: drag the eraser over a mic pause; double-click Zoom header → ⌫.
+
+---
+
 ## Requested Nudge fixes — 2026-09-22
 
 User-requested fixes are handled individually in this order, separately from the outstanding HUMAN milestone gates.
@@ -1015,3 +1031,5 @@ T-416 · 2026-10-16 · Found a functional timing defect while auditing the wavef
 T-509 · 2026-10-16 · Preparing v0.3.3 for T-416's waveform-rate fix; added the exact native waveform regression to assembled universal release checks, so publication fails if one second of 44.1 kHz audio does not produce 200 buckets. Shell syntax and local native waveform regression pass. Existing full 129-test/native audio/voiceover evidence is recorded under T-416; clean tagged release build and signed/notarized publication/download checks follow. No change to signing or manual-acceptance policy; existing config conflicts preserved.
 
 T-509 · 2026-10-16 · Published v0.3.3 from 2fb0859 with T-416's waveform timing fix. CI 38954235540 and Release 38954235289 succeed; assembled universal app passes the new waveform gate before notarization/publication. Clean detached-tag release build/version/strict codesign, waveform, audio-lanes, synthetic voiceover, background-persistence, export-colors and export-sheet pass. Independently downloaded the public 8,884,323-byte DMG; checksum, both app/DMG stapled tickets and Gatekeeper Notarized Developer ID assessments pass, as do architecture checks (x86_64 + arm64), version 0.3.3 and the shipped native waveform case (exactly 200 buckets). SHA-256 45c029e64a667a12cac395907763800425376ba3bfa99df080c952159c5a8870 automatically matches GitHub's asset digest. Passive signed-bundle preflight through LaunchServices still reports screen=true/accessibility=true; no TCC reset/request, mic/camera capture or installed-app replacement. Public notes retain physical-device, latency and long-duration verification limits; full v1.0/HUMAN acceptance remains open. Existing config conflicts preserved.
+
+T-651…T-653 · 2026-10-16 · Voice editing request: 130/130 tests incl. pausesSliceAndEraseMicOnly; debug app timeline-ops, menu-actions, inspector-panels, command-scissors, waveform OK. Makefile `test` pins DEVELOPER_DIR to CLT (xcode-select now points at Xcode, whose Testing macros mismatch CLT's framework). Live Speech/eraser/visual checks are HUMAN. Not committed: agentpack.toml/pack.lock merge conflict pending.

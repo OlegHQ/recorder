@@ -417,7 +417,9 @@ is recorded to `camera.mov` and composited in the editor. Its corner becomes the
 
 ```
 My Recording.recorder/
-  project.json      edit state (below) — the ONLY file the editor ever rewrites
+  project.json      edit state (below) — the ONLY edit-state file the editor rewrites
+  transcript.json   on-device transcript of mic.m4a, [{"text","start","end"}] in mic seconds; written once on first open
+                    (its existence marks the mic as sliced at pauses) and by "Transcribe Again"; never uploaded
   screen.mov        HEVC, cursor-less
   camera.mov        optional
   mic.m4a           optional

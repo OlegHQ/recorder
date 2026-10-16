@@ -210,6 +210,23 @@ private struct LCG: RandomNumberGenerator {
     #expect(p.clips.allSatisfy { $0.speed == 1 })
 }
 
+@Test func pausesSliceAndEraseMicOnly() {
+    var p = Project(source: Source(duration: 20, hasMic: true), clips: [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)])
+    let silent = [TimeRange(start: 5, end: 8), TimeRange(start: 12, end: 15)]
+    p.splitAudioAtPauses(file: "mic.m4a", silent: silent)
+    #expect(p.checkInvariants() == nil)
+    #expect(p.clips.count == 1) // video untouched
+    #expect(p.audioClips.map(\.start) == [0, 5, 8, 12, 15])
+    #expect(p.audioClips[0].fadeOut == 0.06 && p.audioClips[2].fadeIn == 0.06 && p.audioClips[1].fadeIn == nil)
+    p.erasePauses(file: "mic.m4a", silent: silent, inOutput: TimeRange(start: 13, end: 13.5))
+    #expect(p.checkInvariants() == nil)
+    #expect(p.audioClips.map(\.start) == [0, 5, 8, 15]) // only the touched pause, gap left behind
+    #expect(TimeMap(p.clips).outputDuration == 20)
+    var fresh = Project(source: Source(duration: 20, hasMic: true), clips: [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)])
+    fresh.erasePauses(file: "mic.m4a", silent: silent, inOutput: TimeRange(start: 0, end: 20))
+    #expect(fresh.audioClips.map(\.start) == [0, 8, 15])
+}
+
 @Test func highlightZoomCopiesTimingAndTarget() {
     var p = Project(source: Source(duration: 20), clips: [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)])
     let id = p.addZoom(atSource: 4, length: 3, mode: .manual)!

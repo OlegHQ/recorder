@@ -19,6 +19,12 @@ struct AudioPanel: View {
                 Text(model.project.audioTracks[clip.track].name).font(Font(Theme.headingFont(22)))
                 Text(URL(fileURLWithPath: clip.file).lastPathComponent)
                     .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
+                let words = model.transcriptWords(in: clip)
+                if !words.isEmpty {
+                    Text("Transcript").font(Font(Theme.headingFont(22)))
+                    Text(words.map(\.text).joined(separator: " ")).font(Font(Theme.captionFont))
+                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                }
                 Text("Linked to").font(Font(Theme.headingFont(22)))
                 TechSegmentedControl(selection: Binding(get: { clip.link?.rawValue ?? "none" }, set: { value in
                     changeLink(AudioClip.Link(rawValue: value))

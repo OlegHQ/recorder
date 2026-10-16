@@ -158,6 +158,50 @@ import RecorderCore
         self.project = project
         self.events = events
         (cursorPath, cameraPath) = paths ?? Self.buildPaths(project: project, events: events)
+        transcript = try? JSONDecoder().decode([Word].self, from: Data(contentsOf: transcriptURL))
+    }
+
+    /// On-device transcript of `mic.m4a` in mic MEDIA seconds (`transcript.json`, derived and never uploaded).
+    /// Not part of `Project`, so undo never drops it. nil = not transcribed yet.
+    private(set) var transcript: [Word]?
+    var transcriptStatus: String?
+    var transcriptURL: URL { packageURL.appendingPathComponent("transcript.json") }
+
+    /// First open of a mic recording: slice the mic at its pauses (one undo step, audio only) and transcribe it.
+    /// `transcript.json` existing marks the package as prepared.
+    func prepareMic() async {
+        guard project.source.hasMic, transcript == nil, let url = Waveform.audioURL(in: packageURL, file: "mic.m4a") else { return }
+        let silent = await Waveform.silent(in: url)
+        var sliced = project
+        sliced.splitAudioAtPauses(file: "mic.m4a", silent: silent)
+        if sliced != project { edit("Split Mic at Pauses") { $0 = sliced } }
+        await transcribe()
+    }
+
+    /// Transcribes `mic.m4a` on-device into `transcript.json`; failures leave an empty transcript and a status line.
+    func transcribe() async {
+        guard let url = Waveform.audioURL(in: packageURL, file: "mic.m4a") else { return }
+        transcriptStatus = "Transcribing…"
+        var words: [Word] = []
+        do {
+            words = try await Transcriber.words(in: url)
+            transcriptStatus = words.isEmpty ? "No speech found." : nil
+        } catch { transcriptStatus = error.localizedDescription }
+        transcript = words
+        try? JSONEncoder().encode(words).write(to: transcriptURL, options: .atomic)
+    }
+
+    /// Transcript words heard during `audio` (a `mic.m4a` clip), in order.
+    func transcriptWords(in audio: AudioClip) -> [Word] {
+        audio.file == "mic.m4a" ? project.audioSegments(audio).flatMap { transcriptWords(media: $0.media) } : []
+    }
+
+    /// Words overlapping mic MEDIA range `range`; binary search, since the timeline draws this per clip.
+    func transcriptWords(media range: TimeRange) -> [Word] {
+        guard let transcript else { return [] }
+        var low = 0, high = transcript.count
+        while low < high { let mid = (low + high) / 2; if transcript[mid].end <= range.start { low = mid + 1 } else { high = mid } }
+        return Array(transcript[low...].prefix { $0.start < range.end })
     }
 
     /// The ONLY way to mutate `project` outside a gesture. One call = one undo step.
