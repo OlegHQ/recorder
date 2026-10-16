@@ -44,9 +44,10 @@ gallery-png: app
 	$(APP)/Contents/MacOS/Recorder --selftest ui-kit-png $(GALLERY_PNG)
 	open $(GALLERY_PNG)
 
+# Signing identity: Developer ID (imported from .apple on first run), else the self-signed Recorder Dev.
 install:
-	$(if $(DEV_ID),,$(MAKE) cert)
-	$(MAKE) app APP=build/Recorder.app SIGN_ID="$(or $(DEV_ID),Recorder Dev)"
+	$(if $(DEV_ID),,$(if $(wildcard .apple),sh scripts/import-signing.sh,$(MAKE) cert))
+	$(MAKE) app APP=build/Recorder.app
 	sh scripts/install-app.sh
 
 uninstall:
