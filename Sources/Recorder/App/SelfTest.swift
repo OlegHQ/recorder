@@ -3680,16 +3680,45 @@ enum SelfTest {
             try fm.createDirectory(at: packageURL, withIntermediateDirectories: true)
             defer { try? fm.removeItem(at: tmp) }
 
+            try fm.createDirectory(at: packageURL.appendingPathComponent("voice"), withIntermediateDirectories: true)
+            try fm.createDirectory(at: packageURL.appendingPathComponent("media"), withIntermediateDirectories: true)
+            try synthesizeSineM4A(at: packageURL.appendingPathComponent("voice/take.m4a"), duration: 6)
+            try await synthesizeLayerMovie(at: packageURL.appendingPathComponent("media/video.mov"))
+            guard let context = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
+                                          space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  let destination = CGImageDestinationCreateWithURL(packageURL.appendingPathComponent("media/image.png") as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+                throw Fail(description: "snapshot image fixture")
+            }
+            CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+            guard CGImageDestinationFinalize(destination) else { throw Fail(description: "snapshot image fixture write") }
+            let external = tmp.appendingPathComponent("outside.m4a")
+            let privateSentinel = "snapshot-private-content-sentinel"
+            try Data(privateSentinel.utf8).write(to: external)
+            try fm.createSymbolicLink(at: packageURL.appendingPathComponent("media/escaped.m4a"), withDestinationURL: external)
+
             var project = Project(title: "Snapshot Fixture",
                                    source: Source(kind: .display, pixelWidth: 1920, pixelHeight: 1080, scale: 1, duration: 20))
             project.clips = [Clip(sourceStart: 0, sourceEnd: 20, speed: 1)]
             let zoom = Zoom(start: 2, end: 6, scale: 2, mode: .manual)
             project.zooms = [zoom]
+            project.audioTracks = [AudioTrack(name: "Mic", volume: 0.8), AudioTrack(name: "Voiceover 1", muted: true),
+                                   AudioTrack(name: "Audio 1", volume: 0.6), AudioTrack(name: "Audio 2")]
+            let image = LayerBlock(kind: .image, start: 2, end: 5, file: "media/image.png", rect: NormRect(x: 0.18, y: 0.18, w: 0.64, h: 0.64))
+            let video = LayerBlock(kind: .video, start: 5, end: 9, file: "media/video.mov", mediaStart: 1,
+                                   rect: NormRect(x: 0.02, y: 0.02, w: 0.28, h: 0.3), backdrop: .blur, motion: .slide, aboveCamera: true)
+            project.layers = [image, video, LayerBlock(kind: .image, start: 10, end: 12, file: "media/missing.png", rect: NormRect())]
+            project.audioClips = [AudioClip(start: 0, end: 20, file: "mic.m4a", link: .screen, gain: 0.9, fadeIn: 0.2),
+                                  AudioClip(start: 5, end: 9, mediaStart: 1, file: video.file, track: 2, link: .layer, layer: video.id, gain: 0.7, fadeIn: 0.1, fadeOut: 0.2),
+                                  AudioClip(start: 8, end: 10, file: "media/missing.m4a", track: 3),
+                                  AudioClip(start: 12, end: 14, file: "media/escaped.m4a", track: 3),
+                                  AudioClip(start: 18, end: 24, file: "voice/take.m4a", track: 1)]
+            guard project.checkInvariants() == nil else { throw Fail(description: "snapshot media fixture invariants") }
             try project.save(to: packageURL.appendingPathComponent("project.json"))
 
             var events = EventLog()
             events.events.append(InputEvent(t: 1.0, k: .down, x: 0.5, y: 0.5, b: 0))
             events.events.append(InputEvent(t: 1.2, k: .move, x: 0.4, y: 0.4))
+            events.events.append(InputEvent(t: 1.4, k: .key, keyCode: 0, ch: privateSentinel))
             try JSONEncoder().encode(events).write(to: packageURL.appendingPathComponent("events.json"), options: .atomic)
 
             try await MainActor.run {
@@ -3698,6 +3727,7 @@ enum SelfTest {
                     throw Fail(description: "couldn't build the offscreen editor")
                 }
                 let model = controller.model
+                defer { model.saveNow(); window.close() }
                 model.playhead = 4.5
                 model.edit("Snapshot rename") { $0.title = "Snapshot Fixture Renamed" }
                 let zoomID = UUID(uuidString: zoom.id)!
@@ -3729,20 +3759,39 @@ enum SelfTest {
                 guard let undoNames = editor0["undoStepNames"] as? [String], undoNames == ["Snapshot rename"] else {
                     throw Fail(description: "editor0 undoStepNames wrong: \(String(describing: editor0["undoStepNames"]))")
                 }
+                guard editor0["invariants"] as? String == "ok", editor0["timeMapOutputDuration"] as? Double == 20,
+                      editor0["exportDuration"] as? Double == 24, editor0["inspectorPanel"] as? String == "Zoom panel" else {
+                    throw Fail(description: "snapshot media duration / invariants / zoom inspector")
+                }
 
                 // editor-0-project.json loads with `Project.load` and equals the in-memory project.
                 let loaded = try Project.load(from: folder.appendingPathComponent("editor-0-project.json"))
                 guard loaded == model.project else { throw Fail(description: "editor-0-project.json doesn't match the in-memory project") }
+                let projectData = try Data(contentsOf: folder.appendingPathComponent("editor-0-project.json"))
+                let encoded = try JSONSerialization.jsonObject(with: projectData) as! [String: Any]
+                let missingFiles = ["mic.m4a": true, "voice/take.m4a": false, "media/video.mov": false,
+                                    "media/image.png": false, "media/missing.m4a": true, "media/missing.png": true, "media/escaped.m4a": true]
+                for key in ["audioTracks", "audioClips", "layers"] {
+                    guard let entries = editor0[key] as? [[String: Any]], let expected = encoded[key] as? [[String: Any]],
+                          entries.count == expected.count, !entries.isEmpty else { throw Fail(description: "snapshot missing \(key)") }
+                    for entry in entries {
+                        if let file = entry["file"] as? String {
+                            guard let missing = entry["missingFile"] as? Bool, missing == missingFiles[file] else { throw Fail(description: "snapshot missingFile flag for \(file)") }
+                        } else if entry["missingFile"] != nil { throw Fail(description: "snapshot track must not have a file flag") }
+                    }
+                    let values = entries.map { $0.filter { $0.key != "missingFile" } }
+                    guard NSArray(array: values).isEqual(to: expected) else { throw Fail(description: "snapshot \(key) metadata differs from project encoder") }
+                }
 
                 // events summary has no raw events, only counts + timestamps.
                 let summaryData = try Data(contentsOf: folder.appendingPathComponent("editor-0-events-summary.json"))
                 guard let summary = try JSONSerialization.jsonObject(with: summaryData) as? [String: Any] else {
                     throw Fail(description: "events-summary.json didn't parse")
                 }
-                guard summary["events"] == nil, let totalCount = summary["totalCount"] as? Int, totalCount == 2 else {
+                guard summary["events"] == nil, let totalCount = summary["totalCount"] as? Int, totalCount == 3 else {
                     throw Fail(description: "events summary wrong: \(summary)")
                 }
-                guard let counts = summary["countsByKind"] as? [String: Int], counts["down"] == 1, counts["move"] == 1 else {
+                guard let counts = summary["countsByKind"] as? [String: Int], counts["down"] == 1, counts["move"] == 1, counts["key"] == 1 else {
                     throw Fail(description: "events summary counts wrong: \(String(describing: summary["countsByKind"]))")
                 }
 
@@ -3753,14 +3802,34 @@ enum SelfTest {
                 guard fm.fileExists(atPath: folder.appendingPathComponent("README.txt").path) else {
                     throw Fail(description: "README.txt missing")
                 }
+                for file in try fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
+                    guard ["json", "txt", "png"].contains(file.pathExtension) else { throw Fail(description: "snapshot copied a media file") }
+                    if file.pathExtension != "png", let contents = String(data: try Data(contentsOf: file), encoding: .utf8), contents.contains(privateSentinel) {
+                        throw Fail(description: "snapshot leaked recorded key or external file content")
+                    }
+                }
+                for (key, title) in [(model.project.audioClips[0].id, "Audio clip panel"), (image.id, "Image layer panel"), (video.id, "Video layer panel")] {
+                    model.selection = [UUID(uuidString: key)!]
+                    guard let selectedFolder = StateSnapshot.dump(to: snapshotsDir, pasteboard: testPasteboard, playSound: false),
+                          let selectedRoot = try JSONSerialization.jsonObject(with: Data(contentsOf: selectedFolder.appendingPathComponent("snapshot.json"))) as? [String: Any],
+                          let selected = (selectedRoot["editors"] as? [[String: Any]])?.first,
+                          selected["inspectorPanel"] as? String == title else { throw Fail(description: "snapshot selection panel: \(title)") }
+                }
+                model.edit("Empty media fixture") { $0.audioClips = []; $0.audioTracks = []; $0.layers = [] }
+                model.selection = []
+                guard let emptyFolder = StateSnapshot.dump(to: snapshotsDir, pasteboard: testPasteboard, playSound: false),
+                      let emptyRoot = try JSONSerialization.jsonObject(with: Data(contentsOf: emptyFolder.appendingPathComponent("snapshot.json"))) as? [String: Any],
+                      let empty = (emptyRoot["editors"] as? [[String: Any]])?.first,
+                      ["audioTracks", "audioClips", "layers"].allSatisfy({ (empty[$0] as? [Any])?.isEmpty == true }) else { throw Fail(description: "snapshot empty media arrays") }
 
-                // Retention: 25 dumps total into the same directory keep only the newest 20.
+                // Retention: repeated dumps into the same directory keep only the newest 20.
                 for _ in 0..<24 {
                     _ = StateSnapshot.dump(to: snapshotsDir, pasteboard: testPasteboard, playSound: false)
                 }
                 let remaining = try fm.contentsOfDirectory(at: snapshotsDir, includingPropertiesForKeys: [.isDirectoryKey])
                     .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
                 guard remaining.count <= 20 else { throw Fail(description: "retention kept \(remaining.count) folders, want <= 20") }
+                print("snapshot: complete audio/layer metadata, missing/escaped paths, tails, inspector selections, empty arrays, privacy, project parity, clipboard and retention verified")
             }
         },
     ]

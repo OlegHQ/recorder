@@ -422,16 +422,19 @@ My Recording.recorder/
   camera.mov        optional
   mic.m4a           optional
   system.m4a        optional
+  voice/<id>.m4a    optional voiceover takes recorded in the editor; previous takes retained for undo
+  media/<id>.<ext>  optional owned copies of imported images, movies and audio files
   events.json       { "events":[ {"t":1.234,"k":"move","x":0.41,"y":0.62}, {"t":…,"k":"down","b":0,…}, {"k":"key",…}, {"k":"cursor","id":"ab12"} ] }
   cursors/ab12.png  + cursors/ab12.json {"hotX":..,"hotY":..,"scale":2}
   thumbnail.jpg     640 px wide, frame at 1 s, written on first save
 ```
 
-`project.json` (all times in **source seconds**; all positions/sizes normalised 0…1 of the source frame unless noted):
+`project.json` (times use the **timeline/source clock** unless noted; positions/sizes are normalised 0…1 of the
+source frame unless noted; media in-points use their own file's seconds):
 
 ```jsonc
 {
-  "version": 1,
+  "version": 3,
   "id": "UUID", "title": "My Recording", "createdAt": "ISO8601",
   "source": { "kind": "display|window|area", "pixelWidth": 2880, "pixelHeight": 1800, "scale": 2, "duration": 93.4, "hasCamera": true, "hasMic": true, "hasSystemAudio": false },
   "clips":   [ { "sourceStart": 0, "sourceEnd": 41.2, "speed": 1 }, { "sourceStart": 47.0, "sourceEnd": 93.4, "speed": 2 } ],
@@ -447,6 +450,20 @@ My Recording.recorder/
   "animation": { "screen": "focused|smooth", "motionBlur": 0.5, "blurCursor": true, "blurZoom": true, "blurPan": true },
   "camera": { "size": 0.2, "corner": "bottomRight", "roundness": 0.5, "mirror": true, "shadow": 0.5, "shrinkWhenZoomed": true },
   "audio": { "micVolume": 1, "systemVolume": 1, "micMuted": false, "systemMuted": false, "denoise": false },
+  "audioTracks": [
+    { "id": "mic-track-UUID", "name": "Mic", "volume": 1, "muted": false },
+    { "id": "voice-track-UUID", "name": "Voiceover 1", "volume": 1, "muted": false },
+    { "id": "layer-track-UUID", "name": "Audio 1", "volume": 0.8, "muted": false }
+  ],
+  "audioClips": [
+    { "id": "mic-clip-UUID", "start": 0, "end": 41.2, "mediaStart": 0, "mediaRate": 1, "file": "mic.m4a", "track": 0, "link": "camera", "gain": 1, "fadeIn": null, "fadeOut": null },
+    { "id": "take-UUID", "start": 6, "end": 10, "mediaStart": 0, "mediaRate": null, "file": "voice/take-UUID.m4a", "track": 1, "link": null, "layer": null, "gain": 1, "fadeIn": 0.1, "fadeOut": 0.1 },
+    { "id": "layer-sound-UUID", "start": 16, "end": 20, "mediaStart": 1, "file": "media/video-UUID.mov", "track": 2, "link": "layer", "layer": "video-layer-UUID", "gain": 1 }
+  ],
+  "layers": [
+    { "id": "image-layer-UUID", "kind": "image", "start": 6, "end": 10, "file": "media/image-UUID.png", "mediaStart": 0, "track": 0, "rect": { "x": 0.18, "y": 0.18, "w": 0.64, "h": 0.64 }, "backdrop": "dim", "motion": "fade", "fadeIn": 0.3, "fadeOut": 0.3, "aboveCamera": false },
+    { "id": "video-layer-UUID", "kind": "video", "start": 16, "end": 20, "file": "media/video-UUID.mov", "mediaStart": 1, "track": 0, "rect": { "x": 0.18, "y": 0.18, "w": 0.64, "h": 0.64 }, "backdrop": "none", "motion": "scale", "fadeIn": 0.3, "fadeOut": 0.3, "aboveCamera": true }
+  ],
   "keys": { "show": false }
 }
 ```
@@ -454,7 +471,22 @@ My Recording.recorder/
 Rules:
 - Every field has a default; decoding tolerates missing keys (`decodeIfPresent ?? default`). Unknown `version` > supported ⇒ refuse to open with an alert; never silently rewrite.
 - **Autosave**: `EditorModel` writes `project.json` atomically (`Data.write(options: .atomic)`) 0.5 s after the last change and on window close/app quit. There is no "unsaved" state; `⌘S` forces a write, `⇧⌘S` copies the package elsewhere.
-- Media files are never modified after recording. "Extract raw files" = reveal the package contents in Finder.
+- Recorded media, committed takes and imported copies are immutable. The editor may create new files in `voice/`
+  and `media/`, but only ever rewrites `project.json`. Replaced/removed media stays in the package for undo; deleting
+  the project removes it. "Extract raw files" = reveal the package contents in Finder.
+- `audioTracks`/`audioClips`/`layers` are additive version-3 keys; no version bump. When `audioClips` is absent, derive
+  Mic/System tracks and one linked audio clip per non-gap video clip from the legacy source/audio fields. Mic links
+  to camera if present, otherwise screen; System links to screen. An explicit `audioClips: []` stays silent. Layers
+  default to `[]`. Track volume/mute and clip gain/fades are authoritative; legacy `audio` volume/mute fields remain
+  decodable for compatibility, while `audio.denoise` still controls microphone export denoise. Older builds ignore
+  the new keys and cannot preserve detached/imported audio edits.
+- Screen/camera-linked audio uses timeline-clock start/end, with file playback rate `mediaRate ?? 1`, mapped through
+  the overlapping video clips. Unlinked/layer-linked audio and all layers are **connected**: output start =
+  `TimeMap.outputTime(atSource: start)`, output duration = `end - start`, independent of video speed. Their own media
+  plays at `mediaRate ?? 1` (video layers always 1×). Audio `track` indexes `audioTracks`; `layer` is set only for
+  `link: "layer"` and names its video layer. Layer `track` is its lane (higher is in front); its `rect` is normalised
+  to the **output canvas**, not the source frame. Audio/layer tails extend preview/export beyond screen footage.
+  Full signatures, defaults, link/settling rules and media-range invariants: `docs/AUDIO-LAYERS.md` §3–§4.
 - Why source time for effects: removing/speeding a clip never requires rewriting zooms; an effect inside a removed range simply isn't visible. `TimeMap` (§2.1) converts for display.
 
 **AC-PRJ-1** Round-trip: encode→decode of a fully populated `Project` is equal (unit test).
@@ -806,7 +838,7 @@ effect while no editor/library window is open (`// ponytail`: simplest rule that
 `Recorder ▸ Copy State Snapshot` (⌃⌥⌘S, global, works mid-recording) writes
 `~/Library/Logs/Recorder/Snapshots/<yyyy-MM-dd HH.mm.ss>/` — `snapshot.json` (app/OS/permission/recording/
 settings/hotkey/memory state, every window, and one entry per open editor: playhead, selection, undo/redo
-names, `TimeMap` output duration, `checkInvariants()`, preview/timeline internals, which inspector
+names, `TimeMap` output duration, export duration, `audioTracks`/`audioClips`/`layers`, `checkInvariants()`, preview/timeline internals, which inspector
 tab/panel is showing, export sheet phase), `editor-<n>-project.json` (each open editor's CURRENT
 in-memory `Project`, unsaved edits included), `editor-<n>-events-summary.json` (event-kind counts +
 first/last timestamps only), one `window-<n>-<class>.png` per Recorder's own visible window, and a
@@ -816,6 +848,11 @@ are kept. Privacy: no raw input events, no typed text, no screen contents other 
 windows, ever (CLAUDE.md's rule). `scripts/freeze-dump.sh [pid]` is the out-of-process fallback for a
 hung main thread: `sample`/`ps` on the running `Recorder` process into a new folder under the same
 Snapshots directory, path copied to the clipboard the same way.
+
+Audio track/clip/layer entries use the same keys as `project.json`. Each clip/layer also has `missingFile: true`
+when its package-relative `file` is absent or resolves outside the package (including escaping symlinks). Track
+entries have no file flag. Media contents are never copied into the snapshot; only edit metadata and Recorder's
+own window images are included. Audio and image/video layer selections identify their actual inspector panel.
 
 **AC-APP-5** `Recorder ▸ Copy State Snapshot` writes the snapshot folder and puts its path on the
 clipboard in < 1 s with an editor open; it also works while a recording is in progress.

@@ -202,6 +202,10 @@ enum StateSnapshot {
                 "undoStepNames": model.undoStepNames,
                 "redoStepNames": model.redoStepNames,
                 "timeMapOutputDuration": model.timeMap.outputDuration,
+                "exportDuration": model.project.exportDuration,
+                "audioTracks": mediaEntries(model.project.audioTracks, package: model.packageURL),
+                "audioClips": mediaEntries(model.project.audioClips, package: model.packageURL),
+                "layers": mediaEntries(model.project.layers, package: model.packageURL),
                 "invariants": model.project.checkInvariants() ?? "ok",
                 "preview": previewInfo(controller.previewView),
                 "timeline": timelineInfo(controller.coreTimelineView),
@@ -209,6 +213,16 @@ enum StateSnapshot {
                 "previewShowsResult": model.previewShowsResult,
                 "exportSheet": controller.window?.attachedSheet != nil ? "open" : "closed",
             ]
+        }
+    }
+
+    private static func mediaEntries<Value: Encodable>(_ values: [Value], package: URL) -> [[String: Any]] {
+        guard let data = try? JSONEncoder().encode(values),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return entries.map { entry in
+            var result = entry
+            if let file = entry["file"] as? String { result["missingFile"] = Waveform.audioURL(in: package, file: file) == nil }
+            return result
         }
     }
 
@@ -246,6 +260,8 @@ enum StateSnapshot {
             let key = id.uuidString
             if model.project.cameraClips.contains(where: { $0.id == key }) { return "Camera footage panel" }
             if model.project.keystrokeClips.contains(where: { $0.id == key }) { return "Keystroke clip panel" }
+            if model.project.audioClips.contains(where: { $0.id == key }) { return "Audio clip panel" }
+            if let layer = model.project.layers.first(where: { $0.id == key }) { return layer.kind == .image ? "Image layer panel" : "Video layer panel" }
             if model.project.zooms.contains(where: { $0.id == key }) { return "Zoom panel" }
             if model.project.layouts.contains(where: { $0.id == key }) { return "Layout panel" }
             if model.project.masks.contains(where: { $0.id == key }) { return "Mask panel" }
@@ -298,7 +314,9 @@ enum StateSnapshot {
         snapshot.json                    App/OS/permission/recording/settings/hotkey/memory state,
                                           every window, and one entry per open editor (playhead,
                                           selection, undo/redo names, preview/timeline internals,
-                                          invariants). Start here.
+                                          invariants, output/export durations, audio tracks/clips,
+                                          layers and their package-relative file names/missingFile
+                                          flags). Start here.
         editor-<n>-project.json          The CURRENT in-memory Project of open editor <n> (same
                                           encoder Project.save uses) — includes unsaved edits, unlike
                                           the package's own on-disk project.json.
@@ -309,6 +327,8 @@ enum StateSnapshot {
         Privacy: no raw mouse/keyboard events, no typed text, and no screen contents other than
         Recorder's own windows are ever captured here. Only Recorder's own on-screen pixels, its own
         settings, and counts/timestamps of event KINDS (never content) are written.
+        Media entries contain edit metadata only, never audio/video/image file contents. A missingFile
+        flag also covers a file path that resolves outside its project package.
 
         Retention: only the newest 20 snapshot folders under this directory are kept.
         """

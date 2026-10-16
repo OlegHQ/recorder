@@ -358,10 +358,14 @@ T-640 merges; T-648 needs T-643). T-650 last.
     and a playing video layer against the prototype.
   - Machine checks pass; HUMAN visual/interaction comparison remains pending. Native inspector/editor PNGs are at
     `/tmp/recorder-t649-panel-*.png` and `/tmp/recorder-t649-editor-*.png`; `/tmp/LayersFixture.recorder` is disposable.
-- [ ] **T-650 Docs + snapshot**
+- [x] **T-650 Docs + snapshot**
   - Do: SPEC §5 package listing gains `voice/`, `media/` and the new keys; state snapshot lists audio and layers;
     tick the roadmap block in PLAN.md.
   - Verify: `--selftest snapshot`; `make test`; `make app`.
+  - Verified in debug and release: full encoder-equivalent audio/layer metadata, present/missing/escaping-symlink
+    flags, connected tails, audio/image/video selection panels, empty arrays, recorded-key/content privacy,
+    project parity, private clipboard and retention; all 129 Core tests and the release app build pass.
+    T-645/T-649 and the other HUMAN/performance/release gates remain open; their checkboxes are not implied by this task.
 
 ## 7. Risks
 
