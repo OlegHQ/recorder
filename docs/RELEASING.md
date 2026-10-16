@@ -5,7 +5,7 @@ macOS 15, builds arm64 and x86_64 slices, verifies the universal executable, run
 background persistence/crash recovery, GPU/color and export-sheet checks in the assembled app, then packages and publishes
 `Recorder-<version>-universal.dmg`. A failed export check blocks publication.
 
-The October 2026 audio/media update ships as v0.3.0, not a claim that every v1.0
+The October 2026 audio/media update targets v0.3.1, not a claim that every v1.0
 acceptance gate passed. Visual deviations are accepted by the user. Real-device
 permission migration, microphone latency, Intel playback and extended-duration
 capture/timeline performance remain manual checks tracked in `docs/PLAN.md`.

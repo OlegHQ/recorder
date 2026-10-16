@@ -148,7 +148,7 @@ final class Compositor {
                 drawScreenContent(s, encoder: baseEncoder)
                 baseEncoder.endEncoding()
                 screenBase = base
-                blurredScreen = blurred(base, amount: 0.5 * max(s.outputSize.width, s.outputSize.height) / 1920, commandBuffer: commandBuffer)
+                blurredScreen = blurred(base, amount: 0.5 * Double(max(s.outputSize.width, s.outputSize.height)) / 1920, commandBuffer: commandBuffer)
             }
         }
         let bg = Theme.mediaMatte
