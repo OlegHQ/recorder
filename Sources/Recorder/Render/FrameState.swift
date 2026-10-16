@@ -26,6 +26,14 @@ struct FrameState {
         var age: Double
     }
 
+    struct Layer {
+        var block: LayerBlock
+        var opacity: Double
+        var progress: Double
+        var rect: NormRect
+        var texture: Texture? = nil
+    }
+
     var outputSize: CGSize
     var screen: Texture?
     var camera: Texture?
@@ -42,6 +50,7 @@ struct FrameState {
     var keyChip: KeyChipState?
     /// Text-lane blocks active at `sourceTime` + the caption word being spoken (nil = none yet / no word timings).
     var texts: [(block: TextBlock, word: Int?)] = []
+    var layers: [Layer] = []
     var project: Project
 }
 
@@ -80,6 +89,7 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
     return FrameState(outputSize: size, screen: videoVisible ? screen : nil, camera: cameraVisible ? camera : nil, view: view, prevView: prevView, cursor: cursor,
                        layoutKind: layoutKind, layoutAmount: layoutAmount, videoOpacity: model.project.videoOpacity(atOutput: outputTime), sourceTime: sourceTime,
                        keyChip: inTimeline ? keyChip : nil, texts: inTimeline ? texts : [],
+                       layers: model.project.layerStates(atOutput: outputTime).map { FrameState.Layer(block: $0.block, opacity: $0.opacity, progress: $0.progress, rect: $0.rect) },
                        project: model.project)
 }
 

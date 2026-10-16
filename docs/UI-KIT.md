@@ -332,7 +332,13 @@ alone, Command bypasses snapping and Escape cancels. Dashed idle spans on Layer 
 missing files show a labelled hatch. Headers retain compact mode and native vertical scrolling. Layer selection,
 focus, clipboard and accessibility use the real editor model. `--selftest timeline-png <png> --layers` renders
 the import fixture; `media-import` also captures minimum-size, compact and missing-media states.
-Layer preview/export rendering and the detailed layer inspector remain T-647…T-649.
+Image layers render through the shared compositor in Card, Full, Corner or free canvas rects, with the stored
+fade/scale/slide motion. Card rounding/shadow uses frame styling even when the screen itself is unframed.
+Dim and screen/cursor-only blur sit below layer lanes; camera, above-camera images, text and keys retain that order.
+ImageIO decodes bounded, orientation-correct sRGB textures per file/resolution; transparent PNGs retain their alpha,
+and missing/out-of-package files render neither an image nor a backdrop. `make-layers-fixture` covers these states;
+`editor-png <package> <png> [width height] --time <seconds>` captures the actual settled native drawable at a chosen
+output time. Video-layer playback and the detailed layer inspector remain T-648/T-649.
 
 Project opening preserves the editor’s layout from the first frame: top bar, preview status, inspector and timeline. Preparation happens off the UI thread, with no artificial minimum wait. Ready controls reveal over 160 ms; Reduce Motion switches immediately. Preview loading remains labelled until the first video frame arrives.
 

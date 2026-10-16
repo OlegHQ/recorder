@@ -1,5 +1,34 @@
 import CoreGraphics
 
+func fadeOpacity(elapsed: Double, duration: Double, fadeIn: Double?, fadeOut: Double?) -> Double {
+    func ramp(_ distance: Double, _ seconds: Double?) -> Double {
+        guard let seconds, seconds.isFinite, seconds > 0 else { return 1 }
+        let progress = min(1, max(0, distance / min(seconds, duration)))
+        return progress * progress * (3 - 2 * progress)
+    }
+    return min(ramp(elapsed, fadeIn), ramp(duration - elapsed, fadeOut))
+}
+
+public extension Project {
+    func layerStates(atOutput time: Double) -> [(block: LayerBlock, opacity: Double, progress: Double, rect: NormRect)] {
+        guard time.isFinite, time >= 0 else { return [] }
+        let map = TimeMap(clips)
+        return layers.sorted { $0.track < $1.track }.compactMap { block in
+            let duration = block.end - block.start
+            guard duration.isFinite, duration > 0, let start = map.outputTime(atSource: block.start),
+                  time >= start, time < start + duration else { return nil }
+            let progress = fadeOpacity(elapsed: time - start, duration: duration, fadeIn: block.fadeIn, fadeOut: block.fadeOut)
+            var rect = block.rect
+            if block.motion == .scale {
+                let scale = 0.94 + 0.06 * progress
+                rect.x += rect.w * (1 - scale) / 2; rect.y += rect.h * (1 - scale) / 2
+                rect.w *= scale; rect.h *= scale
+            } else if block.motion == .slide { rect.y += 0.04 * (1 - progress) }
+            return (block, progress, progress, rect)
+        }
+    }
+}
+
 /// Pure layout math for the render pipeline (SPEC §6.2 pass 2). No AppKit/AVFoundation/Metal —
 /// just the rect the "screen" quad occupies inside the output frame.
 /// (A free function, not a `Layout` type: `Project.swift` already has a `Layout` struct for

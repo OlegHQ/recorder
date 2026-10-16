@@ -643,7 +643,7 @@ final class PreviewView: MTKView {
     private func seekToShowCurrentFrame(resumeSeconds: Double) {
         guard !model.voiceover.isActive else { return }
         guard let player else { return }
-        let time = CMTime(seconds: resumeSeconds, preferredTimescale: 600)
+        let time = CMTime(seconds: model.isPlaying ? resumeSeconds : model.playhead, preferredTimescale: 600)
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             self?.needsDisplay = true
         }
@@ -734,6 +734,24 @@ final class PreviewView: MTKView {
 
     /// Copies the actual rendered drawable for gallery verification. Callers opt into readable
     /// drawables before presentation; ordinary editor playback keeps framebufferOnly enabled.
+    func captureRenderedFrame(atOutput time: Double) async throws -> CGImage {
+        guard time.isFinite, time >= 0, time < model.project.exportDuration, !model.voiceover.isActive else { throw CocoaError(.coderInvalidValue) }
+        model.isPlaying = false; model.playhead = time
+        framebufferOnly = false
+        let source = model.timeMap.sourceTime(atOutput: time)
+        let cameraExpected = model.project.cameraClips.contains { source >= $0.start && source < $0.end }
+        let deadline = Date().addingTimeInterval(10)
+        await Task.yield()
+        while isSeeking || player?.currentItem?.status != .readyToPlay || abs((player?.currentTime().seconds ?? -1) - time) > 0.002 || currentScreenPixelBuffer() == nil ||
+                (cameraExpected && (abs((cameraPlayer?.currentTime().seconds ?? -1) - time) > 0.002 || currentCameraPixelBuffer() == nil)) {
+            guard Date() < deadline else {
+                throw NSError(domain: "Recorder.PreviewSnapshot", code: 1, userInfo: [NSLocalizedDescriptionKey: "Preview did not settle: seeking=\(isSeeking), screen time=\(player?.currentTime().seconds ?? -1), camera time=\(cameraPlayer?.currentTime().seconds ?? -1), screen buffer=\(lastScreenPixelBuffer != nil), camera buffer=\(lastCameraPixelBuffer != nil)"])
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        return try await captureRenderedFrame()
+    }
+
     func captureRenderedFrame() async throws -> CGImage {
         enum Failure: Error { case unavailable, copy, render, image }
         guard !framebufferOnly else { throw Failure.unavailable }

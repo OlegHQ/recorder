@@ -40,6 +40,7 @@ private struct Uniforms {
     var globalAlpha: Float = 1
     var mode: Int32 = 0
     var rotation: Float = 0
+    var blendAmount: Float = 0
 }
 
 /// `Compositor.render` draws `FrameState` → `target` with the single shader library in
@@ -72,6 +73,7 @@ final class Compositor {
     // in together, straight alpha) — cached per string so a repeated shortcut doesn't re-render.
     private var keyChipTextureCache: [String: MTLTexture] = [:]
     private var textTextureCache: [String: MTLTexture] = [:]
+    private var layerImageCache: [String: (longEdge: Int, texture: FrameState.Texture)] = [:]
 
     /// `package` is the project's `.recorder` directory, for `cursors/<id>.png`/`.json` (T-413);
     /// `nil` for the synthetic `render` selftest, which never sets `FrameState.cursor`.
@@ -122,29 +124,35 @@ final class Compositor {
         var s = s
         s.screen = colorManaged(s.screen, commandBuffer: commandBuffer)
         s.camera = colorManaged(s.camera, commandBuffer: commandBuffer)
+        s.layers = s.layers.compactMap { layer in
+            guard layer.opacity > 0 else { return nil }
+            var layer = layer
+            if layer.texture == nil, layer.block.kind == .image { layer.texture = layerImage(layer.block.file, outputSize: s.outputSize) }
+            layer.texture = colorManaged(layer.texture, commandBuffer: commandBuffer)
+            return layer.texture == nil ? nil : layer
+        }
         if s.project.windowCount > 1, let screen = s.screen {
             // Multi-window: the decoded window's own size drives aspect-fit and scale (the canvas stays window 0's); no crop.
             s.project.source.pixelWidth = screen.luma.width
             s.project.source.pixelHeight = screen.luma.height
             s.project.crop = NormRect()
         }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = target
-        pass.colorAttachments[0].loadAction = .clear
-        let bg = Theme.mediaMatte
-        pass.colorAttachments[0].clearColor = MTLClearColor(
-            red: Double(bg.redComponent), green: Double(bg.greenComponent), blue: Double(bg.blueComponent), alpha: 1)
-        pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
-        encoder.setRenderPipelineState(pipeline)
-        encoder.setFragmentSamplerState(sampler, index: 0)
-        encoder.setFragmentTexture(dummyTexture, index: 0)
-        encoder.setFragmentTexture(dummyTexture, index: 1)
-        if let viewport {
-            encoder.setViewport(MTLViewport(originX: Double(viewport.minX), originY: Double(viewport.minY),
-                                             width: Double(viewport.width), height: Double(viewport.height),
-                                             znear: 0, zfar: 1))
+        let blurAmount = s.layers.filter { $0.block.backdrop == .blur }.reduce(0.0) { 1 - (1 - $0) * (1 - $1.opacity) }
+        var screenBase: MTLTexture?
+        var blurredScreen: MTLTexture?
+        if blurAmount > 0 {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: Int(s.outputSize.width), height: Int(s.outputSize.height), mipmapped: false)
+            descriptor.usage = [.renderTarget, .shaderRead, .shaderWrite]
+            if let base = device.makeTexture(descriptor: descriptor),
+               let baseEncoder = renderEncoder(to: base, clear: MTLClearColorMake(0, 0, 0, 0), commandBuffer: commandBuffer) {
+                drawScreenContent(s, encoder: baseEncoder)
+                baseEncoder.endEncoding()
+                screenBase = base
+                blurredScreen = blurred(base, amount: 0.5 * max(s.outputSize.width, s.outputSize.height) / 1920, commandBuffer: commandBuffer)
+            }
         }
+        let bg = Theme.mediaMatte
+        guard let encoder = renderEncoder(to: target, clear: MTLClearColorMake(Double(bg.redComponent), Double(bg.greenComponent), Double(bg.blueComponent), 1), commandBuffer: commandBuffer, viewport: viewport) else { return }
 
         // Pass 1: background.
         drawBackground(s.project.background, outputSize: s.outputSize, encoder: encoder)
@@ -153,35 +161,18 @@ final class Compositor {
         // `cameraFull` fades the screen out as the camera grows to fill the canvas, `hidden` fades
         // the camera bubble out (screen unaffected). Gaps between blocks ⇒ `kind == nil`, amount 0.
         let (layoutKind, layoutAmount) = (s.layoutKind, s.layoutAmount)
-        let screenAlpha = (s.camera != nil && layoutKind == .cameraFull ? 1 - layoutAmount : 1) * s.videoOpacity
-
-        // Pass 2: screen (rounded rect + shadow + crop/zoom UV + motion blur, SPEC §6.2 pass 2,
-        // T-501). Pass 3 (cursor) shares the same content rect + crop/zoom UV mapping so it lands
-        // in "screen space" and zooms with the content (SPEC §6.2 pass 3, T-413).
-        if let screen = s.screen, screenAlpha > 0 {
-            let rectPx = screenRect(output: s.outputSize, cropAspect: cropAspect(s.project), padding: s.project.renderedFrame.padding)
-            let contentUV = cropUV(s.project.crop, view: s.view)
-            let prevContentUV = motionBlurContentUV(project: s.project, view: s.view, prevView: s.prevView, contentUV: contentUV, rectPx: rectPx)
-            // Zoom scales the whole frame (corners, shadow, clip), not just the UVs inside a fixed one;
-            // cursor/masks map through `frameRect` + the un-zoomed crop — the same linear mapping.
-            let frameRect = zoomedScreenRect(base: rectPx, view: s.view)
-            let frameUV = cropUV(s.project.crop, view: .identity)
-            drawScreen(screen, project: s.project, rectPx: rectPx, frameRect: frameRect, contentUV: contentUV, prevContentUV: prevContentUV,
-                       alpha: screenAlpha, outputSize: s.outputSize, encoder: encoder)
-            if let cursor = s.cursor, cursor.alpha > 0 {
-                drawCursor(cursor, project: s.project, rectPx: frameRect, contentUV: frameUV,
-                           alphaMultiplier: screenAlpha, outputSize: s.outputSize, encoder: encoder)
-            }
-
-            // T-601: masks/highlights active at this frame's SOURCE time (SPEC §7.1 lane, §6.6 Mask
-            // panel) — same rectPx/contentUV as the cursor above, so a mask zooms/pans with the
-            // content instead of staying fixed to the canvas.
-            let activeMasks = s.project.masks.filter { s.sourceTime >= $0.start && s.sourceTime <= $0.end }
-            if !activeMasks.isEmpty {
-                drawMasks(activeMasks, texture: screen, sourceTime: s.sourceTime, rectPx: frameRect, contentUV: frameUV, alphaMultiplier: screenAlpha,
-                          outputSize: s.outputSize, encoder: encoder)
-            }
+        if let screenBase, let blurredScreen {
+            var uniforms = Uniforms()
+            uniforms.mode = 8; uniforms.blendAmount = Float(blurAmount)
+            encoder.setFragmentTexture(screenBase, index: 0); encoder.setFragmentTexture(blurredScreen, index: 1)
+            draw(uniforms, encoder: encoder)
+            encoder.setFragmentTexture(dummyTexture, index: 0); encoder.setFragmentTexture(dummyTexture, index: 1)
+        } else { drawScreenContent(s, encoder: encoder) }
+        for layer in s.layers where layer.block.backdrop == .dim {
+            var uniforms = Uniforms(); uniforms.color = SIMD4(0, 0, 0, Float(0.5 * layer.opacity))
+            draw(uniforms, encoder: encoder)
         }
+        for layer in s.layers where !layer.block.aboveCamera { drawLayer(layer, project: s.project, outputSize: s.outputSize, encoder: encoder) }
 
         // Pass 4: camera (rounded-rect SDF quad, SPEC §6.2 pass 4, §6.6 Camera, T-502) — bubble in
         // its corner, or cross-faded into a full-canvas quad while a `cameraFull` layout is active.
@@ -196,6 +187,9 @@ final class Compositor {
             }
         }
 
+        for layer in s.layers where layer.block.aboveCamera { drawLayer(layer, project: s.project, outputSize: s.outputSize, encoder: encoder) }
+        for (block, word) in s.texts { drawText(block, word: word, outputSize: s.outputSize, encoder: encoder) }
+
         // Pass 5: keyboard-shortcut chip (SPEC §6.2 pass 4 "key overlay", §6.6 Keys tab, T-602) —
         // bottom-centre of the whole canvas (not "screen space": like the camera bubble, it doesn't
         // zoom/pan with the content).
@@ -203,10 +197,62 @@ final class Compositor {
             drawKeyChip(chip, keys: overlayKeys(project: s.project, atSource: s.sourceTime), outputSize: s.outputSize, encoder: encoder)
         }
 
-        // Pass 6: Text-lane blocks (captions / titles / labels), on top of everything, canvas space.
-        for (block, word) in s.texts { drawText(block, word: word, outputSize: s.outputSize, encoder: encoder) }
-
         encoder.endEncoding()
+    }
+
+    private func renderEncoder(to target: MTLTexture, clear: MTLClearColor, commandBuffer: MTLCommandBuffer, viewport: CGRect? = nil) -> MTLRenderCommandEncoder? {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target; pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = clear; pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+        encoder.setRenderPipelineState(pipeline); encoder.setFragmentSamplerState(sampler, index: 0)
+        encoder.setFragmentTexture(dummyTexture, index: 0); encoder.setFragmentTexture(dummyTexture, index: 1)
+        if let viewport { encoder.setViewport(MTLViewport(originX: Double(viewport.minX), originY: Double(viewport.minY), width: Double(viewport.width), height: Double(viewport.height), znear: 0, zfar: 1)) }
+        return encoder
+    }
+
+    private func drawScreenContent(_ state: FrameState, encoder: MTLRenderCommandEncoder) {
+        let alpha = (state.camera != nil && state.layoutKind == .cameraFull ? 1 - state.layoutAmount : 1) * state.videoOpacity
+        guard let screen = state.screen, alpha > 0 else { return }
+        let rect = screenRect(output: state.outputSize, cropAspect: cropAspect(state.project), padding: state.project.renderedFrame.padding)
+        let contentUV = cropUV(state.project.crop, view: state.view)
+        let previousUV = motionBlurContentUV(project: state.project, view: state.view, prevView: state.prevView, contentUV: contentUV, rectPx: rect)
+        let frame = zoomedScreenRect(base: rect, view: state.view)
+        let frameUV = cropUV(state.project.crop, view: .identity)
+        drawScreen(screen, project: state.project, rectPx: rect, frameRect: frame, contentUV: contentUV, prevContentUV: previousUV, alpha: alpha, outputSize: state.outputSize, encoder: encoder)
+        if let cursor = state.cursor, cursor.alpha > 0 { drawCursor(cursor, project: state.project, rectPx: frame, contentUV: frameUV, alphaMultiplier: alpha, outputSize: state.outputSize, encoder: encoder) }
+        let masks = state.project.masks.filter { state.sourceTime >= $0.start && state.sourceTime <= $0.end }
+        if !masks.isEmpty { drawMasks(masks, texture: screen, sourceTime: state.sourceTime, rectPx: frame, contentUV: frameUV, alphaMultiplier: alpha, outputSize: state.outputSize, encoder: encoder) }
+    }
+
+    private func layerImage(_ file: String, outputSize: CGSize) -> FrameState.Texture? {
+        guard let package, file.hasPrefix("media/"), !file.split(separator: "/").contains("..") else { return nil }
+        let url = package.appendingPathComponent(file).standardizedFileURL.resolvingSymlinksInPath()
+        guard url.path.hasPrefix(package.standardizedFileURL.resolvingSymlinksInPath().path + "/"), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let edge = max(1, Int(2 * max(outputSize.width, outputSize.height)))
+        if let cached = layerImageCache[file], cached.longEdge >= edge { return cached.texture }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: edge] as CFDictionary),
+              let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0, space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.translateBy(x: 0, y: CGFloat(image.height)); context.scaleBy(x: 1, y: -1)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: image.width, height: image.height, mipmapped: false)
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor), let bytes = context.data else { return nil }
+        texture.replace(region: MTLRegionMake2D(0, 0, image.width, image.height), mipmapLevel: 0, withBytes: bytes, bytesPerRow: context.bytesPerRow)
+        let result = FrameState.Texture(luma: texture)
+        layerImageCache[file] = (edge, result)
+        return result
+    }
+
+    private func drawLayer(_ layer: FrameState.Layer, project: Project, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+        guard let texture = layer.texture else { return }
+        let rect = CGRect(x: layer.rect.x * outputSize.width, y: layer.rect.y * outputSize.height, width: layer.rect.w * outputSize.width, height: layer.rect.h * outputSize.height)
+        let uv = cameraContentUV(texture: texture, destination: rect.size, mirror: false)
+        var style = project
+        style.frame.enabled = true
+        if layer.block.rect == NormRect() { style.frame.cornerRadius = 0; style.frame.shadow = 0 }
+        drawScreen(texture, project: style, rectPx: rect, frameRect: rect, contentUV: uv, prevContentUV: uv, alpha: layer.opacity, outputSize: outputSize, encoder: encoder, preserveAlpha: layer.block.kind == .image)
     }
 
     /// Core Image honors the buffer's primaries, transfer function, YCbCr matrix
@@ -316,13 +362,18 @@ final class Compositor {
 
     private func blurred(_ texture: MTLTexture, amount: Double) -> MTLTexture? {
         guard let queue = device.makeCommandQueue(), let cb = queue.makeCommandBuffer() else { return nil }
+        let result = blurred(texture, amount: amount, commandBuffer: cb)
+        cb.commit()
+        cb.waitUntilCompleted()
+        return result
+    }
+
+    private func blurred(_ texture: MTLTexture, amount: Double, commandBuffer: MTLCommandBuffer) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: texture.pixelFormat, width: texture.width, height: texture.height, mipmapped: false)
         descriptor.usage = [.shaderRead, .shaderWrite]
         guard let out = device.makeTexture(descriptor: descriptor) else { return nil }
-        MPSImageGaussianBlur(device: device, sigma: Float(amount * 40)).encode(commandBuffer: cb, sourceTexture: texture, destinationTexture: out)
-        cb.commit()
-        cb.waitUntilCompleted()
+        MPSImageGaussianBlur(device: device, sigma: Float(amount * 40)).encode(commandBuffer: commandBuffer, sourceTexture: texture, destinationTexture: out)
         return out
     }
 
@@ -332,7 +383,7 @@ final class Compositor {
     /// shadow — computed by the fragment shader's SDF, offset to the content rect — can bleed
     /// outward into the padding (SPEC §6.2 pass 2: "quad is enlarged by blurPx"; a full-canvas
     /// quad is the simplest way to give it room on every side without a second uniform set).
-    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, frameRect: CGRect, contentUV: SIMD4<Float>, prevContentUV: SIMD4<Float>, alpha: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder) {
+    private func drawScreen(_ texture: FrameState.Texture, project: Project, rectPx: CGRect, frameRect: CGRect, contentUV: SIMD4<Float>, prevContentUV: SIMD4<Float>, alpha: Double, outputSize: CGSize, encoder: MTLRenderCommandEncoder, preserveAlpha: Bool = false) {
         var u = Uniforms()
         u.rectNDC = SIMD4(-1, 1, 1, -1)
         u.uvRect = extrapolatedUV(contentUV, contentRect: rectPx, to: outputSize)
@@ -346,7 +397,7 @@ final class Compositor {
         let sourcePointsWide = project.crop.w * Double(max(project.source.pixelWidth, 1)) / max(project.source.scale, 0.0001)
         u.shadowBlur = Float(20 * frameRect.width / sourcePointsWide)
         u.globalAlpha = Float(alpha)
-        u.mode = texture.chroma != nil ? 4 : 3   // biplanar YCbCr (real capture) vs already-RGB (fixtures)
+        u.mode = texture.chroma != nil ? 4 : preserveAlpha ? 9 : 3
         encoder.setFragmentTexture(texture.luma, index: 0)
         encoder.setFragmentTexture(texture.chroma ?? dummyTexture, index: 1)
         draw(u, encoder: encoder)
@@ -789,6 +840,105 @@ final class Compositor {
 // MARK: - Selftest `render <package> <out.png>` (SPEC §6.2, plan T-304)
 
 extension Compositor {
+    @MainActor static func runLayersSelfTest(package: URL) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ value: Bool, _ message: String) throws { if !value { throw Fail(description: message) } }
+        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { throw Fail(description: "Layer test needs Metal") }
+        let compositor = try Compositor(device: device, package: package)
+        let width = 320, height = 180
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.storageMode = .shared; descriptor.usage = [.renderTarget, .shaderRead]
+        let screen = device.makeTexture(descriptor: descriptor)!, camera = device.makeTexture(descriptor: descriptor)!
+        let white = [UInt8](repeating: 255, count: width * height * 4)
+        var blue = white
+        for index in stride(from: 0, to: blue.count, by: 4) { blue[index + 1] = 0; blue[index + 2] = 0 }
+        screen.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: white, bytesPerRow: width * 4)
+        camera.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: blue, bytesPerRow: width * 4)
+        var project = Project(source: Source(pixelWidth: width, pixelHeight: height, duration: 9, hasCamera: true), clips: [Clip(sourceStart: 0, sourceEnd: 9)])
+        project.frame.enabled = false; project.background = Background(kind: .color, color: "#FFFFFF")
+        project.camera.roundness = 0; project.camera.shadow = 0
+        project.camera.size = 0.25
+        func render(_ project: Project, at time: Double = 1) async throws -> [UInt8] {
+            let model = EditorModel(packageURL: package, project: project, events: EventLog())
+            let state = makeFrameState(model: model, outputTime: time, screen: .init(luma: screen), camera: .init(luma: camera), size: CGSize(width: width, height: height))
+            guard let target = device.makeTexture(descriptor: descriptor), let command = queue.makeCommandBuffer() else { throw Fail(description: "Layer test target") }
+            compositor.render(state, to: target, commandBuffer: command)
+            try await command.commitAndWait()
+            var bytes = [UInt8](repeating: 0, count: width * height * 4)
+            target.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+            return bytes
+        }
+        func pixel(_ bytes: [UInt8], _ x: Int, _ y: Int) -> SIMD3<Int> {
+            let index = (y * width + x) * 4
+            return SIMD3(Int(bytes[index + 2]), Int(bytes[index + 1]), Int(bytes[index]))
+        }
+        func near(_ color: SIMD3<Int>, _ expected: SIMD3<Int>) -> Bool { (0..<3).allSatisfy { abs(color[$0] - expected[$0]) <= 2 } }
+        var layer = LayerBlock(kind: .image, start: 0, end: 9, file: "media/red.png", rect: NormRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5), backdrop: .none, fadeIn: nil, fadeOut: nil)
+        project.layers = [layer]
+        var bytes = try await render(project)
+        try writePNG(bytes: bytes, width: width, height: height, to: URL(fileURLWithPath: "/tmp/recorder-layers-color-proof.png"))
+        try check(near(pixel(bytes, 160, 90), SIMD3(255, 0, 0)) && near(pixel(bytes, 20, 90), SIMD3(255, 255, 255)), "Image rect/color: center \(pixel(bytes, 160, 90)), outside \(pixel(bytes, 20, 90))")
+        project.frame.cornerRadius = 0.2; project.frame.shadow = 1
+        bytes = try await render(project)
+        try check(pixel(bytes, 81, 46).y > 40 && (100...250).contains(pixel(bytes, 76, 90).y), "Card radius/shadow must use frame styling even with an unframed screen")
+        project.frame.cornerRadius = 0.02; project.frame.shadow = 0.5
+        layer.file = "media/alpha.png"; layer.rect = NormRect(); project.layers = [layer]
+        bytes = try await render(project)
+        try check(near(pixel(bytes, 80, 90), SIMD3(255, 127, 127)) && near(pixel(bytes, 240, 90), SIMD3(255, 255, 255)), "PNG premultiplied alpha / transparent pixels")
+        layer.file = "media/orientation.png"; project.layers = [layer]
+        bytes = try await render(project)
+        try check(near(pixel(bytes, 160, 30), SIMD3(255, 0, 0)) && near(pixel(bytes, 160, 150), SIMD3(0, 255, 0)), "Image orientation")
+        layer.file = "media/red.png"; layer.rect = NormRect(x: 0.8, y: 0.05, w: 0.1, h: 0.1)
+        layer.backdrop = .dim; layer.fadeIn = 0.3; project.layers = [layer]
+        bytes = try await render(project, at: 0.15)
+        try check(near(pixel(bytes, 20, 90), SIMD3(191, 191, 191)), "Mid-fade dim opacity")
+        bytes = try await render(project)
+        try check(near(pixel(bytes, 20, 90), SIMD3(127, 127, 127)), "Dim opacity")
+        layer.file = "media/missing.png"; project.layers = [layer]
+        bytes = try await render(project)
+        try check(near(pixel(bytes, 20, 90), SIMD3(255, 255, 255)), "Missing image must not draw a backdrop")
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("layers-escape-" + UUID().uuidString + ".png")
+        let link = package.appendingPathComponent("media/escaped.png")
+        try FileManager.default.copyItem(at: package.appendingPathComponent("media/red.png"), to: outside)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        defer { try? FileManager.default.removeItem(at: link); try? FileManager.default.removeItem(at: outside) }
+        layer.file = "media/escaped.png"; project.layers = [layer]
+        bytes = try await render(project)
+        try check(near(pixel(bytes, 20, 90), SIMD3(255, 255, 255)), "Escaped image must not render")
+        layer.file = "media/red.png"; layer.rect = NormRect(); layer.backdrop = .none; layer.fadeIn = nil
+        project.layers = [layer]
+        let bubble = cameraOverlayRect(camera: project.camera, output: CGSize(width: width, height: height))
+        let cameraX = Int(bubble.midX), cameraY = Int(bubble.midY)
+        bytes = try await render(project)
+        try check(near(pixel(bytes, cameraX, cameraY), SIMD3(0, 0, 255)), "Camera must cover normal image layers")
+        layer.aboveCamera = true; project.layers = [layer]
+        bytes = try await render(project)
+        try check(near(pixel(bytes, cameraX, cameraY), SIMD3(255, 0, 0)), "Above-camera layer ordering")
+        var upper = layer; upper.id = UUID().uuidString; upper.track = 1; upper.file = "media/green.png"
+        project.layers = [upper, layer]
+        bytes = try await render(project)
+        try check(near(pixel(bytes, 160, 90), SIMD3(0, 255, 0)), "Higher layer lanes must draw last")
+        var checks = white
+        for row in 0..<height {
+            for column in 0..<width {
+                let value: UInt8 = (row / 2 + column / 2).isMultiple(of: 2) ? 0 : 255
+                let index = (row * width + column) * 4
+                checks[index] = value; checks[index + 1] = value; checks[index + 2] = value
+            }
+        }
+        screen.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: checks, bytesPerRow: width * 4)
+        layer.rect = NormRect(x: 0.8, y: 0.05, w: 0.1, h: 0.1); layer.backdrop = .blur; layer.aboveCamera = false
+        project.layers = [layer]
+        bytes = try await render(project)
+        let blurred = pixel(bytes, 80, 90)
+        try check((70...185).contains(blurred.x) && near(pixel(bytes, cameraX, cameraY), SIMD3(0, 0, 255)), "Screen blur / sharp camera")
+        try writePNG(bytes: bytes, width: width, height: height, to: URL(fileURLWithPath: "/tmp/recorder-layers-blur-proof.png"))
+        let cached = compositor.layerImage("media/card.png", outputSize: CGSize(width: width, height: height))
+        let repeated = compositor.layerImage("media/card.png", outputSize: CGSize(width: width, height: height))
+        try check(cached != nil && cached!.luma.width <= width * 2 && cached!.luma === repeated?.luma, "Bounded image decode / texture reuse")
+        print("layers: image rect/orientation/alpha, fade/dim, screen-only blur, camera/lane ordering, missing/path rejection and bounded texture cache verified")
+    }
+
     /// Renders output frame 0 at 1920 long edge to `out.png`. `screen.mov` decoding is
     /// `FrameSource`'s job (T-305) and the preview/export wiring is later still (T-306/T-413);
     /// this only exercises the compositor, so it stands in for the recorded frame with a

@@ -321,11 +321,11 @@ T-640 merges; T-648 needs T-643). T-650 last.
     tracks; layer lanes with thumbnail strips, fade handles, idle slots, vertical lane change, missing-file state.
   - Verify: `make test FILTER=idleRanges` (AC-LY-2) and `FILTER=layerBlocks`; `--selftest media-import` (AC-LY-3);
     `timeline-png` with an image, a video + its linked sound, an audio file and slots, inspected; `timeline-ops`.
-- [ ] **T-647 Image layer render pass**
+- [x] **T-647 Image layer render pass**
   - Do: §4.6 for images: texture cache, Card/Full/Corner/Free rect, motion, backdrop dim/blur, aboveCamera ordering;
     FrameState gains `layers` (active blocks + progress + texture).
   - Verify: `--selftest make-layers-fixture` (images only for now) + `parity` maxDelta=0; `editor-png` mid-fade inspected;
-    `export`.
+    `export`; `make test FILTER=layerRendering` (connected timing, fade/motion and lane order).
 - [ ] **T-648 Video layer playback**
   - Do: §4.6 video: one composition track per layer lane, preview via `isolateTrack` players, export via per-lane reader
     + `FrameHold`; 4-lane ceiling.

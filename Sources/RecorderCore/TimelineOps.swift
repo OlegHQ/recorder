@@ -676,12 +676,7 @@ public extension Project {
         guard let i = clipIndex(atOutput: time), !clips[i].isEmpty else { return 0 }
         let clip = clips[i]
         let elapsed = time - clips[..<i].reduce(0) { $0 + $1.outputDuration }
-        func ramp(_ distance: Double, _ seconds: Double?) -> Double {
-            guard let seconds, seconds.isFinite, seconds > 0 else { return 1 }
-            let t = min(1, max(0, distance / min(seconds, clip.outputDuration)))
-            return t * t * (3 - 2 * t)
-        }
-        return min(ramp(elapsed, clip.fadeIn), ramp(clip.outputDuration - elapsed, clip.fadeOut))
+        return fadeOpacity(elapsed: elapsed, duration: clip.outputDuration, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut)
     }
 
     /// Trim/move only within adjacent free space. Gap pieces retain the clock mapping, so

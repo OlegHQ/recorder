@@ -1794,10 +1794,10 @@ enum SelfTest {
             to: URL(fileURLWithPath: args.first ?? "build/editor-final"), readme: args.contains("--readme")) },
         "editor-png": { @MainActor args in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png> [width height]") }
+            guard args.count >= 2 else { throw Fail(description: "usage: editor-png <package> <out.png> [width height] [--time seconds]") }
             let packageURL = URL(fileURLWithPath: args[0])
             let outURL = URL(fileURLWithPath: args[1])
-            try await MainActor.run {
+            do {
                 guard let window = EditorWindowController.makeOffscreen(package: packageURL) else {
                     throw Fail(description: "couldn't load project.json at \(packageURL.path)")
                 }
@@ -1808,6 +1808,18 @@ enum SelfTest {
                 let capture = window.contentView?.superview ?? window.contentView
                 guard let capture else { throw Fail(description: "no capturable view") }
                 capture.layoutSubtreeIfNeeded()
+                var frameOverlay: NSImageView?
+                defer { frameOverlay?.removeFromSuperview(); window.orderOut(nil) }
+                if let flag = args.firstIndex(of: "--time") {
+                    func preview(in view: NSView) -> PreviewView? { (view as? PreviewView) ?? view.subviews.compactMap { preview(in: $0) }.first }
+                    guard args.indices.contains(flag + 1), let time = Double(args[flag + 1]), let view = preview(in: capture) else { throw Fail(description: "editor-png --time requires a valid output time") }
+                    window.orderFront(nil)
+                    let frame = try await view.captureRenderedFrame(atOutput: time)
+                    let overlay = NSImageView(frame: view.bounds)
+                    overlay.image = NSImage(cgImage: frame, size: view.bounds.size); overlay.imageScaling = .scaleAxesIndependently
+                    view.addSubview(overlay, positioned: .below, relativeTo: view.subviews.first)
+                    frameOverlay = overlay
+                }
                 for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
                     guard let button = window.standardWindowButton(kind), let parent = button.superview,
                           parent.bounds.contains(button.frame) else {
@@ -3557,6 +3569,65 @@ enum SelfTest {
         },
         // T-635: a 2-window package (640x360 `screen.mov`, 400x400 `window-1.mov`) with the second window visible
         // for the back half; pointer events are global points. Feed it to `parity`, `export`, `preview-frame`.
+        "make-layers-fixture": { @MainActor args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let package = URL(fileURLWithPath: args.first ?? "/tmp/LayersFixture.recorder")
+            let marker = package.appendingPathComponent(".layers-selftest")
+            if FileManager.default.fileExists(atPath: package.path) {
+                guard (try? String(contentsOf: marker, encoding: .utf8)) == "Recorder layers fixture" else { throw Fail(description: "Refusing to overwrite a non-fixture package") }
+                try FileManager.default.removeItem(at: package)
+            }
+            try FileManager.default.createDirectory(at: package.appendingPathComponent("media"), withIntermediateDirectories: true)
+            try "Recorder layers fixture".write(to: marker, atomically: true, encoding: .utf8)
+            try await synthesizeGradientMovie(at: package.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 5, frameCount: 45)
+            try await synthesizeMovie(at: package.appendingPathComponent("camera.mov"), width: 160, height: 160, fps: 5, frameCount: 45)
+            func image(_ file: String, width: Int = 1280, height: Int = 720, draw: (CGContext) -> Void) throws {
+                guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+                      let destination = CGImageDestinationCreateWithURL(package.appendingPathComponent(file) as CFURL, UTType.png.identifier as CFString, 1, nil) else { throw Fail(description: "Image fixture context") }
+                context.translateBy(x: 0, y: CGFloat(height)); context.scaleBy(x: 1, y: -1)
+                draw(context)
+                CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+                guard CGImageDestinationFinalize(destination) else { throw Fail(description: "Image fixture write") }
+            }
+            try image("media/card.png") { context in
+                context.setFillColor(CGColor(red: 0.89, green: 0.93, blue: 0.96, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 1280, height: 720))
+                context.setFillColor(CGColor(gray: 0.08, alpha: 1)); context.fill(CGRect(x: 0, y: 590, width: 1280, height: 130))
+                context.setFillColor(CGColor(red: 0.55, green: 0.68, blue: 0.6, alpha: 1)); context.fill(CGRect(x: 70, y: 70, width: 450, height: 450))
+                context.setFillColor(CGColor(gray: 0.24, alpha: 1))
+                for row in 0..<4 { context.fill(CGRect(x: 590, y: 430 - row * 95, width: 580 - row * 65, height: 45)) }
+            }
+            for (file, color) in [("red", CGColor(colorSpace: VideoColor.space, components: [1, 0, 0, 1])!), ("green", CGColor(colorSpace: VideoColor.space, components: [0, 1, 0, 1])!)] {
+                try image("media/\(file).png", width: 64, height: 64) { context in context.setFillColor(color); context.fill(CGRect(x: 0, y: 0, width: 64, height: 64)) }
+            }
+            try image("media/alpha.png", width: 64, height: 64) { context in
+                context.setFillColor(CGColor(colorSpace: VideoColor.space, components: [1, 0, 0, 0.5])!); context.fill(CGRect(x: 0, y: 0, width: 32, height: 64))
+            }
+            try image("media/orientation.png", width: 64, height: 64) { context in
+                context.setFillColor(CGColor(colorSpace: VideoColor.space, components: [1, 0, 0, 1])!); context.fill(CGRect(x: 0, y: 32, width: 64, height: 32))
+                context.setFillColor(CGColor(colorSpace: VideoColor.space, components: [0, 1, 0, 1])!); context.fill(CGRect(x: 0, y: 0, width: 64, height: 32))
+            }
+            var project = Project(title: "Layers Fixture", source: Source(pixelWidth: 640, pixelHeight: 360, scale: 1, duration: 9, hasCamera: true), clips: [Clip(sourceStart: 0, sourceEnd: 9)])
+            project.background = Background(kind: .color, color: "#1F2428")
+            project.camera.size = 0.24
+            project.layers = [
+                LayerBlock(kind: .image, start: 0, end: 1.5, file: "media/card.png", rect: NormRect(x: 0.18, y: 0.18, w: 0.64, h: 0.64)),
+                LayerBlock(kind: .image, start: 1.5, end: 3, file: "media/card.png", rect: NormRect(), backdrop: .none, motion: .scale),
+                LayerBlock(kind: .image, start: 3, end: 4.5, file: "media/card.png", rect: NormRect(x: 0.68, y: 0.68, w: 0.28, h: 0.28), backdrop: .none, motion: .slide),
+                LayerBlock(kind: .image, start: 4.5, end: 6, file: "media/card.png", rect: NormRect(x: 0.08, y: 0.2, w: 0.5, h: 0.5), backdrop: .blur),
+                LayerBlock(kind: .image, start: 6, end: 7.5, file: "media/card.png", rect: NormRect(x: 0.18, y: 0.18, w: 0.64, h: 0.64), backdrop: .none),
+                LayerBlock(kind: .image, start: 6, end: 7.5, file: "media/green.png", track: 1, rect: NormRect(x: 0.64, y: 0.6, w: 0.32, h: 0.32), backdrop: .none, aboveCamera: true),
+                LayerBlock(kind: .image, start: 7.5, end: 9, file: "media/missing.png", rect: NormRect(), backdrop: .dim),
+                LayerBlock(kind: .image, start: 7.5, end: 9, file: "media/alpha.png", track: 1, rect: NormRect(x: 0.2, y: 0.15, w: 0.6, h: 0.6), backdrop: .none),
+            ]
+            project.layers.sort { $0.start < $1.start }
+            project.keys.show = true
+            project.texts = [TextBlock(start: 6, end: 7.5, text: "Image above camera", style: .label, position: NormPoint(x: 0.5, y: 0.88), size: 42)]
+            guard project.checkInvariants() == nil else { throw Fail(description: "Invalid layer fixture") }
+            try project.save(to: package.appendingPathComponent("project.json"))
+            try JSONEncoder().encode(EventLog(events: [InputEvent(t: 0, k: .move, x: 0.5, y: 0.5), InputEvent(t: 6.3, k: .key, keyCode: 8, mods: 1 << 20)])).write(to: package.appendingPathComponent("events.json"))
+            try await Compositor.runLayersSelfTest(package: package)
+            print("wrote \(package.path)")
+        },
         "make-windows-fixture": { _ in
             let url = URL(fileURLWithPath: "/tmp/WindowsFixture.recorder")
             try? FileManager.default.removeItem(at: url)

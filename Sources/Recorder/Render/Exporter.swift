@@ -604,7 +604,7 @@ enum ExporterSelfTest {
         let packageURL = URL(fileURLWithPath: packagePath)
         let model = try loadEditorModel(package: packageURL)
         let project = model.project
-        let duration = model.timeMap.outputDuration
+        let duration = model.project.exportDuration
         let timeMap = model.timeMap
 
         // ≥ 5 times spread across the timeline, plus: one exactly on a likely (30 fps) frame
@@ -639,6 +639,13 @@ enum ExporterSelfTest {
         // T-629: inside each text block, and 0.1 s in (a caption's first word is already inverted).
         for text in project.texts {
             for s in [(text.start + text.end) / 2, text.start + 0.1] { if let t = timeMap.outputTime(atSource: s) { times.insert(t) } }
+        }
+        for layer in project.layers {
+            guard let start = timeMap.outputTime(atSource: layer.start) else { continue }
+            let length = layer.end - layer.start
+            times.insert(start + length / 2)
+            times.insert(start + min(layer.fadeIn ?? 0, length) / 2)
+            times.insert(start + length - min(layer.fadeOut ?? 0, length) / 2)
         }
         let orderedTimes = times.filter { $0 >= 0 && $0 < duration }.sorted()
 

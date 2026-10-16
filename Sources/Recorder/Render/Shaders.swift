@@ -51,6 +51,7 @@ struct Uniforms {
     float globalAlpha;     // mode 3/4: layout cross-fade (T-503), multiplies the final alpha
     int mode;
     float rotation;        // mode 5: radians, about the quad centre
+    float blendAmount;
 };
 
 struct VertexOut {
@@ -73,7 +74,7 @@ vertex VertexOut vertexMain(uint vid [[vertex_id]], constant Uniforms &u [[buffe
 
 // Mode 3/4 shared SDF: quad spans the whole output (not just the content rect) so the shadow can
 // bleed into the padding; the SDF is evaluated against the content rect, offset from the quad centre.
-float4 roundedRectShadow(float2 localPos, constant Uniforms &u, float4 texColor) {
+float4 roundedRectShadow(float2 localPos, constant Uniforms &u, float4 texColor, bool preserveAlpha = false) {
     float2 halfSize = u.contentSize * 0.5;
     float2 p = localPos - u.contentOffset;
     float2 q = abs(p) - halfSize + u.radius;
@@ -89,6 +90,11 @@ float4 roundedRectShadow(float2 localPos, constant Uniforms &u, float4 texColor)
     float soft = 0.78 * u.shadowAlpha / (1.0 + exp(1.702 * ds / sigma));
     float rim = 0.31 * u.shadowAlpha * (1.0 - smoothstep(-0.5, 0.5, d - sigma / 20.0));
     float shadowAlpha = 1.0 - (1.0 - soft) * (1.0 - rim);
+    if (preserveAlpha) {
+        float contentAlpha = fillAlpha * texColor.a;
+        float alpha = contentAlpha + shadowAlpha * (1.0 - contentAlpha);
+        return float4(texColor.rgb * contentAlpha / max(alpha, 0.00001), alpha);
+    }
     float4 shadowColor = float4(0.0, 0.0, 0.0, shadowAlpha);
     float4 result = mix(shadowColor, float4(texColor.rgb, 1.0), fillAlpha);
     result.a = max(fillAlpha, shadowAlpha);
@@ -121,6 +127,15 @@ fragment float4 fragmentMain(VertexOut in [[stage_in]],
         float4 c = tex.sample(smp, in.uv);
         c.a *= u.globalAlpha;
         return c;
+    } else if (u.mode == 8) {
+        float4 color = mix(tex.sample(smp, in.uv), texChroma.sample(smp, in.uv), u.blendAmount);
+        return float4(color.rgb / max(color.a, 0.00001), color.a);
+    } else if (u.mode == 9) {
+        float4 color = tex.sample(smp, in.uv);
+        color.rgb /= max(color.a, 0.00001);
+        float4 result = roundedRectShadow(in.localPos, u, color, true);
+        result.a *= u.globalAlpha;
+        return result;
     } else if (u.mode == 3) {
         float4 sum = float4(0.0);
         for (int i = 0; i < 8; i++) {
