@@ -5,6 +5,10 @@ this file says *in what order, in which file, with what code, and how to prove i
 
 ## 0. Protocol (read every session)
 
+User update (2026-10-16): visual deviations are accepted ("idc about deviations feel free to go"). Do not hold
+release preparation for further visual sign-off. Continue functional/data-safety verification and disclose any
+unmeasured hardware/performance checks; this is not evidence that those checks passed.
+
 1. Find the first task below that is `- [ ]`. Do **only that task**. Never skip ahead, never batch tasks.
 2. Read the SPEC sections the task lists. Read the files the task touches.
 3. Implement exactly what "Do" says. Signatures in code blocks are **normative** (names, parameters, types); bodies are yours.
@@ -594,7 +598,8 @@ Repository: `/Users/snowbear/WORK/GIT/recorder`, branch `dev`, native AppKit/Swi
 
 - [x] **T-312 Library perf** · AC-LIB-1 — selftest `library-perf`: 200 fake packages, `reload()` < 300 ms. If slower: make sure only `project.json` + `thumbnail.jpg` are read.
 
-- [ ] **T-313 M3 gate** — HUMAN: record → editor opens → change every Background control → quit → reopen: identical (AC-INS-1, AC-PRJ-3 by `pkill -9` mid-edit).
+- [~] **T-313 M3 gate** — HUMAN: record → editor opens → change every Background control → quit → reopen: identical (AC-INS-1, AC-PRJ-3 by `pkill -9` mid-edit).
+  - VERIFIED: `background-persistence` opens real editors, exercises slider bindings/all backdrop kinds, flushes through app termination, reopens with identical project/rendered pixels, and SIGKILLs only owned children before/after autosave. Background replacement now retains immutable copies for undo and rejects corrupt images without changing files/project/history. Visual deviations accepted by the user; live recording → editor handoff remains unverified on the current permission-denied build, not a visual release blocker.
 
 ---
 
@@ -953,3 +958,5 @@ T-650 · 2026-10-16 · Updated SPEC §5 with voice/media package directories, im
 T-114 · 2026-10-16 · Audited the first remaining gate against SPEC AC-REC-1 and the existing record-perf diagnostic; no capture or implementation changes. Release build 241's read-only permissions selftest through LaunchServices completed with screen=false accessibility=false (process terminal). system_profiler reports Apple M1, 1920×1080 pixels/UI at 60 Hz, not the required 1440×900@2x/2880×1800 workload. CaptureTarget requests 1/60 s and 420v for display capture; CaptureSession requests HEVC. Neither proves hardware encoder selection, <1% frame loss or ten-minute CPU. record-perf asserts only CPU/codec, labels its low-static-content frame count and removes its temporary package, so its success cannot tick this HUMAN gate. ffprobe is absent; QuickTime Inspector remains the plan alternative. Marked [~], left M1 Done at 7/14 and requested manual measurements on matching hardware. Did not prompt/reset TCC, alter the display, record the desktop or change encoding settings without failure evidence. No release issued; existing config conflicts preserved.
 
 T-208 · 2026-10-16 · Audited the next gate against SPEC §4 and current capture surfaces without changing app code. Existing release build 241 passes menus, synthetic pickers, injected permission-refresh and private-suite hotkeys. capture-panel-png, denied onboarding-png and settings-png pass; inspected their actual PNGs at /tmp/recorder-t208-{toolbar,onboarding,settings}.png (toolbar 560×181). Strict bundle signature verification passes. A fresh LaunchServices permissions selftest reports screen=false accessibility=false. Did not run live picker/capture tests that enumerate SCShareableContent and could prompt; did not request/reset TCC, open a camera/mic session, change display settings or start a recording. These specimens and synthetic checks do not establish HUMAN visual approval, exclusion/clap sync, countdown/widget recording behavior, other-app hotkeys, window resizing or relaunch persistence. FUI reference boards are absent; existing UI-KIT direction is not a human approval. Marked T-208 [~], left M2 at 0/9, and requested the SPEC §4 walkthrough/deviations. Release remains gated; unrelated config conflicts preserved.
+
+T-313 · 2026-10-16 · User accepts visual deviations and requests proceeding to release; recorded this policy without claiming hardware checks passed. Fixed destructive backdrop replacement with validated immutable package copies and a native failure alert. Added real-editor slider/backdrop/quit/reopen pixel persistence, replacement undo/redo/corrupt-image rollback and owned-child SIGKILL before/after autosave checks. With DEVELOPER_DIR=/Library/Developer/CommandLineTools: make test 129/129, make app CONFIG=debug; background-persistence, model, inspector, inspector-panels, menu-actions, timeline-ops pass; LayersFixture parity maxDelta=0 over 32 times; strict codesign and task diff checks pass. T-313 remains [~] solely for unverified live capture handoff; no synthetic claim of hardware acceptance. Existing config conflicts preserved.

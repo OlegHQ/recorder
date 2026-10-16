@@ -213,28 +213,105 @@ struct BackgroundTab: View {
         }
     }
 
-    /// Copies the chosen file into the package as `background.<ext>` (SPEC §5: media the editor
-    /// owns lives beside `project.json`; `imagePath` is relative to the package).
     private func chooseImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
-        let name = "background.\(ext)"
-        let dest = model.packageURL.appendingPathComponent(name)
         do {
-            if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
-            try FileManager.default.copyItem(at: url, to: dest)
-            model.edit("Background image") {
-                $0.background.kind = .image
-                $0.background.imagePath = name
-            }
+            try model.importBackgroundImage(url)
         } catch {
-            // ponytail: no error alert for a failed copy (permissions / disk full) — rare, logged only.
-            print("BackgroundTab: failed to copy image: \(error)")
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t add background image"
+            alert.informativeText = error.localizedDescription
+            if let window = NSApp.keyWindow { alert.beginSheetModal(for: window) }
+            else { alert.runModal() }
         }
+    }
+}
+
+extension EditorModel {
+    func importBackgroundImage(_ url: URL) throws {
+        guard !voiceover.isActive, !isEditingGesture else { throw CocoaError(.userCancelled) }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard url.isFileURL, try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true,
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 16] as CFDictionary) != nil else { throw CocoaError(.fileReadCorruptFile) }
+        let suffix = url.pathExtension.lowercased().filter { $0.isLetter || $0.isNumber }
+        let name = "background-" + UUID().uuidString + (suffix.isEmpty ? "" : "." + suffix)
+        let destination = packageURL.appendingPathComponent(name)
+        do { try FileManager.default.copyItem(at: url, to: destination) }
+        catch { try? FileManager.default.removeItem(at: destination); throw error }
+        edit("Background image") { $0.background.kind = .image; $0.background.imagePath = name }
+    }
+}
+
+extension BackgroundTab {
+    @MainActor static func runPersistenceSelfTest(package: URL) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }
+        let first = package.appendingPathComponent("first.png"), second = package.appendingPathComponent("second.png")
+        for (url, gray) in [(first, 0.2), (second, 0.8)] {
+            guard let context = CGContext(data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 128,
+                                          space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { throw Fail(description: "Background fixture") }
+            context.setFillColor(CGColor(gray: gray, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+            CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+            try check(CGImageDestinationFinalize(destination), "Background PNG write")
+        }
+        for kind in [Background.Kind.wallpaper, .gradient, .color, .image] {
+            guard let controller = await EditorWindowController.open(package: package).value, let window = controller.window else { throw Fail(description: "Background editor open") }
+            let model = controller.model, tab = BackgroundTab(model: controller.model)
+            let fields: [(WritableKeyPath<Project, Double>, Double)] = [
+                (\.frame.padding, 0.13), (\.frame.cornerRadius, 0.04), (\.frame.inset, 0.015),
+                (\.frame.shadow, 0.7), (\.background.blur, 0.2), (\.background.gradientAngle, 127),
+            ]
+            for (path, value) in fields {
+                let steps = model.undoStepCount
+                let original = model.project[keyPath: path]
+                tab.gesture("Background slider")(true)
+                tab.fieldBinding(path).wrappedValue = value / 2
+                tab.fieldBinding(path).wrappedValue = value
+                tab.gesture("Background slider")(false)
+                try check(model.project[keyPath: path] == value && model.undoStepCount == steps + (original == value ? 0 : 1), "Background slider / single undo")
+            }
+            model.edit("Background values") { project in
+                project.background.color = "#4F86C6"; project.background.gradient = ["#17304F", "#E4EBF3"]
+                project.background.wallpaper = "16"; project.frame.enabled = true; project.output.aspect = .r16x10
+            }
+            if kind == .image {
+                try model.importBackgroundImage(first)
+                let original = model.project, oldFile = package.appendingPathComponent(model.project.background.imagePath)
+                let oldBytes = try Data(contentsOf: oldFile), steps = model.undoStepCount
+                try model.importBackgroundImage(second)
+                let replacement = model.project, newFile = package.appendingPathComponent(model.project.background.imagePath)
+                try check(oldFile != newFile && (try Data(contentsOf: oldFile)) == oldBytes && model.undoStepCount == steps + 1, "Background replacement must retain old bytes and use one undo")
+                model.undo(); try check(model.project == original && (try Data(contentsOf: oldFile)) == oldBytes, "Background image undo")
+                model.redo(); try check(model.project == replacement, "Background image redo")
+                let broken = package.appendingPathComponent("broken.png")
+                try Data("not an image".utf8).write(to: broken)
+                let count = try FileManager.default.contentsOfDirectory(atPath: package.path).count
+                var refused = false
+                do { try model.importBackgroundImage(broken) } catch { refused = true }
+                try check(refused && model.project == replacement && model.undoStepCount == steps + 1
+                          && (try FileManager.default.contentsOfDirectory(atPath: package.path).count) == count, "Corrupt image must preserve background/files/undo")
+            }
+            tab.kindBinding.wrappedValue = kind
+            let expected = model.project
+            let before = try await controller.previewView.captureRenderedFrame(atOutput: 0.5)
+            AppDelegate().applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            try check(try Project.load(from: package.appendingPathComponent("project.json")) == expected, "Quit flush must preserve every Background field")
+            window.close()
+            guard let reopened = await EditorWindowController.open(package: package).value, let reopenedWindow = reopened.window else { throw Fail(description: "Background editor reopen") }
+            let after = try await reopened.previewView.captureRenderedFrame(atOutput: 0.5)
+            try check(reopened.model.project == expected && before.width == after.width && before.height == after.height
+                      && (before.dataProvider!.data! as Data) == (after.dataProvider!.data! as Data), "Background \(kind) values / preview pixels must survive reopen")
+            reopenedWindow.close()
+        }
+        print("background-persistence: slider bindings, all backdrop kinds/fields, quit flush/reopen pixel parity, immutable image replacement/undo/redo and corrupt-image rollback verified")
     }
 }
 

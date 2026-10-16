@@ -474,6 +474,8 @@ Rules:
 - Recorded media, committed takes and imported copies are immutable. The editor may create new files in `voice/`
   and `media/`, but only ever rewrites `project.json`. Replaced/removed media stays in the package for undo; deleting
   the project removes it. "Extract raw files" = reveal the package contents in Finder.
+- Chosen backdrop images use immutable `background-<id>.<ext>` files beside `project.json`; `background.imagePath`
+  selects the current copy. Replacing a backdrop never overwrites the file a previous undo state references.
 - `audioTracks`/`audioClips`/`layers` are additive version-3 keys; no version bump. When `audioClips` is absent, derive
   Mic/System tracks and one linked audio clip per non-gap video clip from the legacy source/audio fields. Mic links
   to camera if present, otherwise screen; System links to screen. An explicit `audioClips: []` stays silent. Layers

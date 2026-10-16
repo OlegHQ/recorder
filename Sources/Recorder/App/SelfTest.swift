@@ -1171,6 +1171,57 @@ enum SelfTest {
         // (drag: beginGesture → update × N → commitGesture) for the Padding slider, and
         // `kindBinding` (a plain `model.edit`) for the kind picker — and checks they behave as
         // the two undo steps AC-INS-2 requires, with autosave round-tripping both edits.
+        "background-persistence": { @MainActor _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let package = FileManager.default.temporaryDirectory.appendingPathComponent("background-persistence-" + UUID().uuidString + ".recorder")
+            try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: package) }
+            try "Recorder background persistence fixture".write(to: package.appendingPathComponent(".background-persistence-selftest"), atomically: true, encoding: .utf8)
+            try await synthesizeGradientMovie(at: package.appendingPathComponent("screen.mov"), width: 320, height: 180, fps: 5, frameCount: 10)
+            var project = Project(title: "Background persistence", source: Source(pixelWidth: 320, pixelHeight: 180, duration: 2))
+            project.clips = [Clip(sourceStart: 0, sourceEnd: 2)]
+            try project.save(to: package.appendingPathComponent("project.json"))
+            try await BackgroundTab.runPersistenceSelfTest(package: package)
+            for mode in ["before", "after"] {
+                var baseline = try Project.load(from: package.appendingPathComponent("project.json"))
+                baseline.frame.padding = 0.19
+                var latest = baseline; latest.frame.padding = 0.21
+                let ready = package.appendingPathComponent("crash-ready-" + mode)
+                let child = Process()
+                child.executableURL = Bundle.main.executableURL
+                child.arguments = ["--selftest", "background-crash-writer", package.path, mode]
+                try child.run()
+                defer { if child.isRunning { kill(child.processIdentifier, SIGKILL); child.waitUntilExit() } }
+                let deadline = Date().addingTimeInterval(15)
+                while !FileManager.default.fileExists(atPath: ready.path) {
+                    guard child.isRunning, Date() < deadline else { throw Fail(description: "Background crash writer did not become ready") }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                guard kill(child.processIdentifier, SIGKILL) == 0 else { throw Fail(description: "Could not stop owned background crash fixture process") }
+                child.waitUntilExit()
+                let recovered = try Project.load(from: package.appendingPathComponent("project.json"))
+                guard recovered == latest || (mode == "before" && recovered == baseline) else {
+                    throw Fail(description: "Background crash lost a flushed edit or corrupted project.json (\(mode))")
+                }
+            }
+            print("background-persistence: owned child SIGKILL before/after the 0.5 s autosave preserves a complete old/new project and all flushed edits")
+        },
+        "background-crash-writer": { @MainActor args in
+            guard args.count == 2, ["before", "after"].contains(args[1]) else { throw CocoaError(.fileReadInvalidFileName) }
+            let package = URL(fileURLWithPath: args[0])
+            guard try String(contentsOf: package.appendingPathComponent(".background-persistence-selftest"), encoding: .utf8) == "Recorder background persistence fixture" else {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            let model = try loadEditorModel(package: package)
+            model.edit("Flushed background fixture") { $0.frame.padding = 0.19 }
+            try await Task.sleep(for: .milliseconds(700))
+            model.edit("Pending background fixture") { $0.frame.padding = 0.21 }
+            if args[1] == "after" { try await Task.sleep(for: .milliseconds(700)) }
+            try Data().write(to: package.appendingPathComponent("crash-ready-" + args[1]), options: .atomic)
+            try await Task.sleep(for: .seconds(30))
+            withExtendedLifetime(model) {}
+            throw CocoaError(.userCancelled)
+        },
         "inspector": { _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
