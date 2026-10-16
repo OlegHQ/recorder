@@ -925,7 +925,8 @@ PLAN T-640…T-650.
 - **Audio is clips on tracks.** `Project.audioTracks` (name, volume, muted) and `audioClips` (file, media in-point, track,
   gain, fades, `link`). Mic and system audio become clips; old projects derive one clip per video clip and sound unchanged.
 - **Links.** `screen`-linked audio always follows video edits; `camera`-linked follows the camera clip; `layer`-linked
-  follows its video layer. ⌥ acts on one clip. Unlink/relink per clip; an out-of-sync clip shows a red offset chip with
+  follows its video layer. ⌥ acts on one clip; deleting a video layer this way preserves and detaches its sound.
+  Unlink/relink per clip; an out-of-sync clip shows a red offset chip with
   Move into Sync.
 - **Connected.** Unlinked audio, voiceover takes, audio files and all layers ride the video clock (ripple carries them),
   are never cut by video edits, and are pushed to another lane instead of overlapping.

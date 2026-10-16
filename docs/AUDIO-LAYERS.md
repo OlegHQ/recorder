@@ -135,6 +135,7 @@ video edits, sped with the clip).
   closure inside `editLinkedLayers` into one private generic `applyLinkedEdit(_:in:moveBy:)` and call it for camera- and
   layer-driven edits too. No second slicing implementation.
 - ⌥ while dragging/trimming/deleting applies the op to the grabbed clip only. That breaks sync; the clip keeps its link.
+  Exception: deleting a video layer with ⌥ preserves its audio and detaches it, because a link cannot name a deleted layer.
 - `syncOffset(_ clip) -> Double?` (Core): output-time difference between the clip's media clock and its reference's
   media clock. Reference: link target; for unlinked mic → overlapping camera, unlinked system → overlapping screen,
   detached video-layer sound → the video layer with the same file. nil for voiceover and audio files.
@@ -278,7 +279,7 @@ T-640 merges; T-648 needs T-643). T-650 last.
     invariants; conform `AudioClip` and `LayerBlock` to `TimedBlock` (`advanceMedia` like `CameraClip`).
   - Verify: `make test FILTER=audioModel` (round-trip fully populated; legacy derivation incl. 2× clip and gap; invariants
     reject overlap, out-of-range track, dangling `layer`); AC-PRJ-1/2 still pass; `make test`.
-- [ ] **T-641 Linked audio edits (Core)**
+- [x] **T-641 Linked audio edits (Core)**
   - Do: §4.1: extract `applyLinkedEdit`; `screen` audio in every video op regardless of `linkVideoEdits`; camera ops
     propagate to `camera` audio; layer ops propagate to `layer` audio (split re-points the right piece); audio ops on
     linked clips propagate to partners; `unlinkAudio`, `linkAudio(_:to:)`, `syncOffset`, `moveIntoSync`; ⌥ variant =

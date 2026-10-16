@@ -216,3 +216,331 @@ private func linkedFixture() -> Project {
     #expect(p.texts.contains { $0.style == .title } && p.checkInvariants() == nil)
     #expect(captionPhrases(words: []).isEmpty)
 }
+
+private func linkedAudioFixture() -> Project {
+    let layer = LayerBlock(kind: .video, start: 10, end: 14, file: "media/video.mov", mediaStart: 1, rect: NormRect())
+    return Project(source: Source(duration: 20, hasCamera: true, hasMic: true, hasSystemAudio: true),
+        clips: [Clip(sourceStart: 0, sourceEnd: 20)], cameraClips: [CameraClip(start: 2, end: 8, mediaStart: 2)],
+        audioTracks: [AudioTrack(name: "Mic"), AudioTrack(name: "System"), AudioTrack(name: "Audio 1")],
+        audioClips: [AudioClip(start: 2, end: 8, mediaStart: 2, file: "mic.m4a", track: 0, link: .camera),
+                     AudioClip(start: 0, end: 20, file: "system.m4a", track: 1, link: .screen),
+                     AudioClip(start: 10, end: 14, mediaStart: 1, file: layer.file, track: 2, link: .layer, layer: layer.id)],
+        layers: [layer])
+}
+
+@Test func linkedAudioScreenIgnoresGlobalToggle() throws {
+    var project = Project(source: Source(duration: 12, hasCamera: true, hasMic: true, hasSystemAudio: true),
+                          clips: [Clip(sourceStart: 0, sourceEnd: 12)])
+    project.linkVideoEdits = false
+    let originalCamera = project.cameraClips
+    let mic = project.audioClips.filter { $0.link == .camera }
+    let didSplit = project.split(atOutput: 4)
+    #expect(didSplit)
+    #expect(project.audioClips.filter { $0.link == .screen }.count == 2)
+    let moved = project.placeClip(1, start: 8, end: 16, moving: true)
+    let trimmed = project.placeClip(moved, start: 9, end: 15)
+    let audio = try #require(project.audioClips.first { $0.start == 9 && $0.link == .screen })
+    #expect(audio.end == 15 && audio.mediaStart == 5)
+    #expect(project.cameraClips == originalCamera && project.audioClips.filter { $0.link == .camera } == mic)
+    #expect(project.syncOffset(audio) == 0)
+    project.rippleDelete = false
+    project.deleteClips([trimmed])
+    #expect(project.audioClips.filter { $0.link == .screen }.map(\.end) == [4])
+    #expect(project.checkInvariants() == nil)
+
+    for linked in [false, true] {
+        var speed = Project(source: Source(duration: 12, hasCamera: true, hasMic: true, hasSystemAudio: true),
+                            clips: [Clip(sourceStart: 0, sourceEnd: 12)])
+        speed.linkVideoEdits = linked
+        speed.setSpeed(0, 2)
+        let system = try #require(speed.audioClips.first { $0.link == .screen })
+        #expect(system.end == (linked ? 12 : 6))
+        #expect((system.end - system.start) * (system.mediaRate ?? 1) == 12)
+        #expect(speed.syncOffset(system) == 0)
+        #expect(speed.audioClips.allSatisfy { speed.syncOffset($0) == 0 })
+        speed.setSpeed(0, 0.5)
+        #expect(speed.audioClips.allSatisfy { speed.syncOffset($0) == 0 })
+        #expect(speed.checkInvariants() == nil)
+    }
+}
+
+@Test func linkedAudioCameraEditsAreBidirectional() throws {
+    var project = linkedAudioFixture()
+    let camera = try #require(project.cameraClips.first)
+    let cameraID = try #require(UUID(uuidString: camera.id))
+    let screen = project.clips, system = project.audioClips.filter { $0.link == .screen }
+    project.moveCamera(cameraID, toStart: 4)
+    #expect(project.audioClips.first { $0.file == "mic.m4a" }?.start == 4)
+    let didSplit = project.splitBlock(cameraID, atSource: 7)
+    #expect(didSplit)
+    let rightID = try #require(UUID(uuidString: project.cameraClips[1].id))
+    project.resizeCamera(rightID, edge: .leading, to: 8)
+    #expect(project.audioClips.first { $0.start == 8 && $0.link == .camera }?.mediaStart == 6)
+    project.resizeCamera(rightID, edge: .leading, to: 7)
+    #expect(project.audioClips.first { $0.start == 7 && $0.link == .camera }?.mediaStart == 5)
+    let leftAudio = try #require(project.audioClips.first { $0.link == .camera && $0.start == 4 })
+    let leftID = try #require(UUID(uuidString: leftAudio.id))
+    project.moveAudio(leftID, toStart: 2)
+    #expect(project.cameraClips[0].start == 2 && project.cameraClips[0].mediaStart == 2)
+    #expect(project.audioClips.filter { $0.link != .layer }.allSatisfy { project.syncOffset($0) == 0 })
+    project.resizeAudio(leftID, edge: .leading, to: 3)
+    #expect(project.cameraClips[0].start == 3 && project.cameraClips[0].mediaStart == 3)
+    project.removeBlock(leftID)
+    #expect(project.cameraClips.count == 1)
+    #expect(project.clips == screen && project.audioClips.filter { $0.link == .screen } == system)
+    #expect(project.checkInvariants() == nil)
+}
+
+@Test func linkedAudioLayerEditsKeepPieceReferences() throws {
+    var project = linkedAudioFixture()
+    let layerID = try #require(UUID(uuidString: project.layers[0].id))
+    project.moveLayer(layerID, toStart: 12)
+    #expect(project.audioClips.first { $0.link == .layer }?.start == 12)
+    let audioID = try #require(UUID(uuidString: project.audioClips.first { $0.link == .layer }!.id))
+    let didSplit = project.splitBlock(audioID, atSource: 14)
+    #expect(didSplit)
+    #expect(project.layers.count == 2)
+    for audio in project.audioClips where audio.link == .layer {
+        let layer = try #require(project.layers.first { $0.id == audio.layer })
+        #expect(audio.start == layer.start && audio.end == layer.end && audio.mediaStart == layer.mediaStart)
+    }
+    let rightID = try #require(UUID(uuidString: project.audioClips.first { $0.link == .layer && $0.start == 14 }!.id))
+    project.resizeAudio(rightID, edge: .leading, to: 15, mediaDuration: 10)
+    #expect(project.layers.last?.start == 15 && project.layers.last?.mediaStart == 4)
+    project.moveAudio(rightID, toStart: 17)
+    #expect(project.layers.last?.start == 17 && project.layers.last?.end == 18)
+    #expect(project.audioClips.filter { $0.link == .layer }.allSatisfy { project.syncOffset($0) == 0 })
+    project.removeBlock(rightID)
+    #expect(project.layers.count == 1 && project.layers[0].start == 12 && project.layers[0].end == 14)
+    #expect(project.checkInvariants() == nil)
+}
+
+@Test func linkedAudioUnlinkRelinkAndSync() throws {
+    for link in [AudioClip.Link.screen, .camera, .layer] {
+        var project = linkedAudioFixture()
+        project.audioClips[1].end = 12
+        project.setSpeed(0, 2)
+        let original = try #require(project.audioClips.first { $0.link == link })
+        let id = try #require(UUID(uuidString: original.id))
+        let map = TimeMap(project.clips)
+        let outputStart = try #require(map.outputTime(atSource: original.start))
+        let outputLength = link == .layer ? original.end - original.start : try #require(map.outputTime(atSource: original.end)) - outputStart
+        let didDetach = project.unlinkAudio(id)
+        #expect(didDetach)
+        let detached = try #require(project.audioClips.first { $0.id == original.id })
+        #expect(detached.link == nil && detached.layer == nil)
+        #expect(detached.end - detached.start == outputLength)
+        #expect((detached.end - detached.start) * (detached.mediaRate ?? 1) == (original.end - original.start) * (original.mediaRate ?? 1))
+        let didRelink = project.linkAudio(id, to: link)
+        #expect(didRelink)
+        let relinked = try #require(project.audioClips.first { $0.id == original.id })
+        #expect(relinked.start == original.start && relinked.end == original.end && relinked.mediaStart == original.mediaStart)
+        #expect(abs(project.syncOffset(relinked) ?? 100) < 1e-9)
+        project.moveAudio(id, toStart: original.start + 1, propagate: false)
+        let shifted = try #require(project.audioClips.first { $0.id == original.id })
+        #expect(abs((project.syncOffset(shifted) ?? 100) - 0.5) < 1e-9)
+        project.moveIntoSync(id)
+        #expect(abs(project.syncOffset(project.audioClips.first { $0.id == original.id }!) ?? 100) < 1e-9)
+        #expect(project.checkInvariants() == nil)
+    }
+    var project = linkedAudioFixture()
+    let mic = try #require(project.audioClips.first { $0.link == .camera })
+    let id = try #require(UUID(uuidString: mic.id))
+    let camera = project.cameraClips
+    project.moveAudio(id, toStart: 3, propagate: false)
+    #expect(project.cameraClips == camera && project.syncOffset(project.audioClips.first { $0.id == mic.id }!) == 1)
+    project.removeBlock(id, propagate: false)
+    #expect(project.cameraClips == camera)
+    let layer = project.layers[0]
+    project.removeBlock(UUID(uuidString: layer.id)!, propagate: false)
+    #expect(project.audioClips.contains { $0.file == layer.file && $0.link == nil && $0.layer == nil })
+    #expect(project.checkInvariants() == nil)
+    #expect(project.syncOffset(AudioClip(start: 0, end: 2, file: "voice/take.m4a")) == nil)
+}
+
+@Test func linkedAudioLinkSlicesAtClockAndTargetEdges() throws {
+    var project = Project(source: Source(duration: 20),
+        clips: [Clip(sourceStart: 0, sourceEnd: 4), Clip(sourceStart: 4, sourceEnd: 8, speed: 2), Clip(sourceStart: 8, sourceEnd: 20)],
+        audioTracks: [AudioTrack(name: "Audio 1")], audioClips: [AudioClip(start: 2, end: 7, file: "media/music.m4a")])
+    let id = UUID(uuidString: project.audioClips[0].id)!
+    let didLink = project.linkAudio(id, to: .screen)
+    #expect(didLink)
+    #expect(project.audioClips.map(\.start) == [2, 4, 8])
+    #expect(project.audioClips.map(\.end) == [4, 8, 9])
+    #expect(project.audioClips.map(\.mediaStart) == [0, 2, 4])
+    #expect(project.audioClips.map(\.mediaRate) == [1, 0.5, 1])
+    for audio in project.audioClips {
+        let didDetach = project.unlinkAudio(UUID(uuidString: audio.id)!)
+        #expect(didDetach)
+    }
+    #expect(project.audioClips.map { $0.end - $0.start } == [2, 2, 1])
+    #expect(project.audioClips.allSatisfy { $0.mediaRate == 1 && $0.link == nil })
+    #expect(project.checkInvariants() == nil)
+    let before = project
+    let didLinkCamera = project.linkAudio(id, to: .camera)
+    #expect(!didLinkCamera)
+    #expect(project == before)
+}
+
+@Test func linkedAudioRandomEditsKeepSync() throws {
+    var generator = LinkedAudioRandom(state: 641)
+    var project = linkedAudioFixture()
+    var changedCount = 0
+    for iteration in 0..<500 {
+        if iteration % 25 == 0 { project = linkedAudioFixture() }
+        let before = project
+        switch Int.random(in: 0..<11, using: &generator) {
+        case 0: _ = project.split(atOutput: Double.random(in: 1...9, using: &generator))
+        case 1: project.setSpeed(Int.random(in: project.clips.indices, using: &generator), [0.5, 1, 2].randomElement(using: &generator)!)
+        case 2:
+            if let camera = project.cameraClips.randomElement(using: &generator), let id = UUID(uuidString: camera.id) {
+                project.moveCamera(id, toStart: Double.random(in: 1...7, using: &generator))
+            }
+        case 3:
+            if let camera = project.cameraClips.randomElement(using: &generator), let id = UUID(uuidString: camera.id) {
+                project.resizeCamera(id, edge: .leading, to: camera.start + 0.2)
+            }
+        case 4:
+            if let layer = project.layers.first { project.moveLayer(UUID(uuidString: layer.id)!, toStart: Double.random(in: 8...15, using: &generator)) }
+        case 5:
+            if let audio = project.audioClips.filter({ $0.link == .camera }).randomElement(using: &generator) {
+                _ = project.splitBlock(UUID(uuidString: audio.id)!, atSource: (audio.start + audio.end) / 2)
+            }
+        case 6:
+            if let audio = project.audioClips.first(where: { $0.link == .layer }) {
+                project.resizeAudio(UUID(uuidString: audio.id)!, edge: .trailing, to: audio.start + 1.5, mediaDuration: 20)
+            }
+        case 7:
+            if let camera = project.cameraClips.randomElement(using: &generator) { project.removeBlock(UUID(uuidString: camera.id)!) }
+        case 8:
+            _ = project.moveClips([Int.random(in: project.clips.indices, using: &generator)], byOutput: Double.random(in: -3...3, using: &generator))
+        case 9: project.deleteClips([Int.random(in: project.clips.indices, using: &generator)])
+        default:
+            let index = Int.random(in: project.clips.indices, using: &generator)
+            _ = project.placeClip(index, start: project.clips[index].sourceStart + 0.2, end: project.clips[index].sourceEnd)
+        }
+        if project != before { changedCount += 1 }
+        #expect(project.checkInvariants() == nil, "iteration \(iteration)")
+        for audio in project.audioClips where audio.link != nil {
+            let offset = try #require(project.syncOffset(audio), "iteration \(iteration), clips \(project.clips), camera \(project.cameraClips), audio \(audio)")
+            #expect(abs(offset) < 1e-8, "iteration \(iteration), \(audio)")
+        }
+    }
+    #expect(changedCount > 100)
+}
+
+@Test func linkedAudioMixedClockMovesAndScreenPartners() throws {
+    for linked in [false, true] {
+        var project = Project(source: Source(duration: 12, hasCamera: true, hasMic: true, hasSystemAudio: true),
+            clips: [Clip(sourceStart: 0, sourceEnd: 4), Clip(sourceStart: 4, sourceEnd: 8, speed: 2), Clip(sourceStart: 8, sourceEnd: 12)])
+        project.linkVideoEdits = linked
+        project.liftClip(1)
+        let selected = project.moveClips([2], byOutput: -3)
+        #expect(selected.count == 1 && project.clips[selected.first!].sourceStart == 4)
+        #expect(project.audioClips.allSatisfy { abs(project.syncOffset($0) ?? 100) < 1e-9 })
+        #expect(project.checkInvariants() == nil)
+    }
+    var project = Project(source: Source(duration: 20, hasCamera: true, hasMic: true, hasSystemAudio: true),
+                          clips: [Clip(sourceStart: 0, sourceEnd: 20)])
+    _ = project.placeClip(0, start: 0, end: 8)
+    let system = try #require(project.audioClips.first { $0.link == .screen })
+    let didSplit = project.splitBlock(UUID(uuidString: system.id)!, atSource: 4)
+    #expect(didSplit && project.clips.count == 3)
+    let rightID = UUID(uuidString: project.audioClips.first { $0.link == .screen && $0.start == 4 }!.id)!
+    project.moveAudio(rightID, toStart: 6)
+    #expect(project.clips.contains { !$0.isEmpty && $0.sourceStart == 6 && $0.sourceEnd == 10 && $0.mediaIn == 4 })
+    project.resizeAudio(rightID, edge: .leading, to: 7)
+    #expect(project.clips.contains { !$0.isEmpty && $0.sourceStart == 7 && $0.mediaIn == 5 })
+    #expect(project.audioClips.allSatisfy { abs(project.syncOffset($0) ?? 100) < 1e-9 })
+    project.removeBlock(rightID)
+    #expect(project.audioClips.allSatisfy { $0.end <= 4 })
+    #expect(project.checkInvariants() == nil)
+}
+
+@Test func linkedAudioIndependentCameraSurvivesVideoCuts() {
+    for clip in [Clip(sourceStart: 4, sourceEnd: 20), Clip(sourceStart: 0, sourceEnd: 6), Clip(sourceStart: 10, sourceEnd: 20)] {
+        var project = linkedAudioFixture()
+        project.layers = []; project.audioClips.removeAll { $0.link == .layer || $0.link == .screen }
+        project.clips = [clip]
+        #expect(project.checkInvariants() == nil)
+        #expect(project.syncOffset(project.audioClips[0]) == 0)
+    }
+}
+
+@Test func linkedAudioOffsetLayerEditsPreserveSound() throws {
+    var project = linkedAudioFixture()
+    let layer = project.layers[0], layerID = UUID(uuidString: project.layers[0].id)!
+    let audio = try #require(project.audioClips.first { $0.link == .layer })
+    let audioID = UUID(uuidString: audio.id)!
+    project.moveAudio(audioID, toStart: 11, propagate: false)
+    #expect(project.syncOffset(project.audioClips.first { $0.id == audio.id }!) == 1)
+    project.resizeLayer(layerID, edge: .leading, to: 10.5, mediaDuration: 10)
+    #expect(project.layers[0].start == 10.5)
+    #expect(project.audioClips.first { $0.id == audio.id }?.start == 11)
+    project.moveLayer(layerID, toStart: 12)
+    let shifted = try #require(project.audioClips.first { $0.id == audio.id })
+    #expect(shifted.start == 12.5 && shifted.end == 16.5 && shifted.mediaStart == audio.mediaStart)
+    #expect(project.syncOffset(shifted) == 1)
+    project.removeBlock(layerID)
+    #expect(project.audioClips.allSatisfy { $0.file != layer.file })
+    #expect(project.checkInvariants() == nil)
+}
+
+@Test func linkedAudioVideoClipboardPreservesSync() throws {
+    for linked in [false, true] {
+        var project = Project(source: Source(duration: 12, hasCamera: true, hasMic: true, hasSystemAudio: true),
+            clips: [Clip(sourceStart: 0, sourceEnd: 4), Clip(sourceStart: 4, sourceEnd: 8, speed: 2), Clip(sourceStart: 8, sourceEnd: 12)])
+        project.linkVideoEdits = linked
+        let copied = try #require(project.copySelection(clips: [1], blocks: []))
+        #expect(copied.audioClips.contains { $0.link == .screen && $0.start == 0 && $0.end == 2 && $0.mediaStart == 4 })
+        let pasted = project.pasteSelection(copied, atOutput: 1)
+        #expect(pasted != nil)
+        #expect(project.audioClips.allSatisfy { abs(project.syncOffset($0) ?? 100) < 1e-9 })
+        #expect(project.checkInvariants() == nil)
+    }
+}
+
+@Test func linkedAudioPartialPartnersAndOptionEdits() throws {
+    var project = Project(source: Source(duration: 20, hasSystemAudio: true), clips: [Clip(sourceStart: 0, sourceEnd: 20)],
+        audioTracks: [AudioTrack(name: "System")],
+        audioClips: [AudioClip(start: 2, end: 8, mediaStart: 2, file: "system.m4a", link: .screen)])
+    let id = UUID(uuidString: project.audioClips[0].id)!
+    project.resizeAudio(id, edge: .leading, to: 3)
+    #expect(project.clips.first?.sourceStart == 0 && project.clips.first?.sourceEnd == 2)
+    #expect(project.clips.last?.sourceStart == 8 && project.clips.last?.sourceEnd == 20)
+    #expect(project.clips.contains { $0.sourceStart == 2 && $0.sourceEnd == 3 && $0.isEmpty })
+    let video = project.clips
+    project.resizeAudio(id, edge: .leading, to: 4, propagate: false)
+    #expect(project.clips == video && project.audioClips[0].start == 4)
+    project.removeBlock(id, propagate: false)
+    #expect(project.clips == video && project.audioClips.isEmpty)
+    project = linkedAudioFixture()
+    let cameraID = UUID(uuidString: project.cameraClips[0].id)!
+    let audio = project.audioClips
+    project.moveCamera(cameraID, toStart: 3, propagate: false)
+    #expect(project.audioClips == audio && project.syncOffset(audio[0]) == -1)
+    project.removeBlock(cameraID, propagate: false)
+    #expect(project.audioClips == audio)
+    #expect(project.checkInvariants() == nil)
+}
+
+@Test func linkedAudioOptionVideoEditsTouchOnlyVideo() throws {
+    var project = Project(source: Source(duration: 12, hasCamera: true, hasMic: true, hasSystemAudio: true),
+                          clips: [Clip(sourceStart: 0, sourceEnd: 12)])
+    _ = project.placeClip(0, start: 0, end: 8)
+    let audio = project.audioClips, camera = project.cameraClips
+    let selected = project.moveClips([0], byOutput: 1, propagate: false)
+    let index = try #require(selected.first)
+    #expect(project.clips[index].sourceStart == 1 && project.audioClips == audio && project.cameraClips == camera)
+    project.trimClip(index, edge: .trailing, toSource: 8, propagate: false)
+    #expect(project.clips[index].sourceEnd == 8 && project.audioClips == audio && project.cameraClips == camera)
+    project.rippleDelete = false
+    project.deleteClips([index], propagate: false)
+    #expect(project.clips.allSatisfy(\.isEmpty) && project.audioClips == audio && project.cameraClips == camera)
+    #expect(project.checkInvariants() == nil)
+}
+
+private struct LinkedAudioRandom: RandomNumberGenerator {
+    var state: UInt64
+    mutating func next() -> UInt64 { state = state &* 6364136223846793005 &+ 1442695040888963407; return state }
+}

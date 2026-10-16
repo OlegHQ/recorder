@@ -29,6 +29,7 @@ public extension Project {
         let s = TimeMap(clips).sourceTime(atOutput: t)
         guard clip.mediaTime(atSource: s) - clip.mediaIn >= Self.minClipLength,
               clip.mediaIn + clip.mediaDuration - clip.mediaTime(atSource: s) >= Self.minClipLength else { return false }
+        let before = self
 
         clips[i] = Clip(sourceStart: clip.sourceStart, sourceEnd: s, speed: clip.speed)
         clips[i].mediaStart = clip.mediaStart
@@ -39,63 +40,71 @@ public extension Project {
         right.clockSpeed = clip.clockSpeed
         right.fadeOut = clip.fadeOut
         clips.insert(right, at: i + 1)
-        if linkVideoEdits { editLinkedLayers(in: s...s, moveBy: 0) }
+        editLinkedLayers(in: s...s, moveBy: 0)
+        guard checkInvariants() == nil else { self = before; return false }
         assert(checkInvariants() == nil)
         return true
     }
 
-    /// Only video edits call this. Editing a layer never calls back into video or its siblings.
     private mutating func editLinkedLayers(in range: ClosedRange<Double>, moveBy delta: Double?) {
-        func slice<T: TimedBlock>(_ block: T, _ start: Double, _ end: Double, newID: Bool) -> T {
-            var part = block
-            part.advanceMedia(by: start - block.start)
-            part.start = start; part.end = end
-            if newID { part.id = UUID().uuidString }
-            return part
+        editAudio(link: .screen, in: range, moveBy: delta)
+        guard linkVideoEdits else { return }
+        editCamera(in: range, moveBy: delta)
+        applyLinkedEdit(&zooms, in: range, moveBy: delta)
+        applyLinkedEdit(&keystrokeClips, in: range, moveBy: delta)
+        applyLinkedEdit(&layouts, in: range, moveBy: delta)
+        applyLinkedEdit(&masks, in: range, moveBy: delta)
+        applyLinkedEdit(&texts, in: range, moveBy: delta)
+        applyLinkedEdit(&windowShots, in: range, moveBy: delta)
+    }
+
+    private mutating func editAudio(link: AudioClip.Link, in range: ClosedRange<Double>, moveBy delta: Double?, layer: String? = nil) {
+        let selected = audioClips.filter { $0.link == link && (link != .layer || $0.layer == layer) }
+        audioClips.removeAll { $0.link == link && (link != .layer || $0.layer == layer) }
+        for track in Set(selected.map(\.track)).sorted() {
+            var blocks = selected.filter { $0.track == track }
+            applyLinkedEdit(&blocks, in: range, moveBy: delta, overwrite: false)
+            audioClips += blocks
         }
-        func edit<T: TimedBlock>(_ blocks: inout [T]) {
-            var stationary: [T] = [], moved: [T] = []
-            for block in blocks {
-                let lo = max(block.start, range.lowerBound), hi = min(block.end, range.upperBound)
-                guard lo <= hi, block.end > range.lowerBound, block.start < range.upperBound else {
-                    stationary.append(block); continue
-                }
-                if block.start < lo { stationary.append(slice(block, block.start, lo, newID: false)) }
-                if hi < block.end { stationary.append(slice(block, hi, block.end, newID: block.start < lo || hi > lo)) }
-                if hi > lo, let delta {
-                    var part = slice(block, lo, hi, newID: block.start < lo)
-                    part.start += delta; part.end += delta
-                    moved.append(part)
-                }
+        audioClips.sort { $0.start < $1.start }
+    }
+
+    private mutating func editCamera(in range: ClosedRange<Double>, moveBy delta: Double?) {
+        applyLinkedEdit(&cameraClips, in: range, moveBy: delta)
+        editAudio(link: .camera, in: range, moveBy: delta)
+    }
+
+    private mutating func resizeLinkedAudio(_ link: AudioClip.Link, from old: ClosedRange<Double>, to changed: ClosedRange<Double>) {
+        if changed.lowerBound > old.lowerBound { editAudio(link: link, in: old.lowerBound...changed.lowerBound, moveBy: nil) }
+        if changed.upperBound < old.upperBound { editAudio(link: link, in: changed.upperBound...old.upperBound, moveBy: nil) }
+        for index in audioClips.indices where audioClips[index].link == link {
+            if changed.lowerBound < old.lowerBound, abs(audioClips[index].start - old.lowerBound) < 1e-9 {
+                audioClips[index].advanceMedia(by: changed.lowerBound - old.lowerBound)
+                audioClips[index].start = changed.lowerBound
             }
-            // A linked move overwrites its destination on affected lanes, just as the video does.
-            for part in moved where delta != 0 {
-                stationary = stationary.flatMap { block -> [T] in
-                    guard block.start < part.end, block.end > part.start else { return [block] }
-                    var pieces: [T] = []
-                    if block.start < part.start { pieces.append(slice(block, block.start, part.start, newID: false)) }
-                    if block.end > part.end { pieces.append(slice(block, part.end, block.end, newID: block.start < part.start)) }
-                    return pieces
-                }
+            if changed.upperBound > old.upperBound, abs(audioClips[index].end - old.upperBound) < 1e-9 {
+                audioClips[index].end = changed.upperBound
             }
-            blocks = (stationary + moved).sorted { $0.start < $1.start }
         }
-        edit(&cameraClips); edit(&zooms); edit(&keystrokeClips); edit(&layouts); edit(&masks); edit(&texts); edit(&windowShots)
     }
 
     /// Lift video without changing the timing of any other lane.
-    mutating func liftClip(_ i: Int) {
-        guard clips.indices.contains(i) else { return }
-        if linkVideoEdits { editLinkedLayers(in: clips[i].sourceStart...clips[i].sourceEnd, moveBy: nil) }
+    mutating func liftClip(_ i: Int, propagate: Bool = true) {
+        guard clips.indices.contains(i), !clips[i].isEmpty else { return }
+        let before = self
+        if propagate { editLinkedLayers(in: clips[i].sourceStart...clips[i].sourceEnd, moveBy: nil) }
         clips[i].isGap = true
+        if checkInvariants() != nil { self = before }
     }
 
     /// Delete uses the two independent timeline modes. Keep one gap when deleting all video.
-    mutating func deleteClips(_ indices: Set<Int>) {
+    mutating func deleteClips(_ indices: Set<Int>, propagate: Bool = true) {
+        let before = self
         for i in indices.sorted(by: >) where clips.indices.contains(i) && !clips[i].isEmpty {
-            liftClip(i)
-            if rippleDelete && clips.count > 1 { clips.remove(at: i) }
+            liftClip(i, propagate: propagate)
+            if rippleDelete && clips.count > 1 && clips[i].isEmpty { clips.remove(at: i) }
         }
+        if checkInvariants() != nil { self = before }
     }
 
     /// Put mixed-speed clips on one editing clock before moving across their boundaries.
@@ -137,6 +146,20 @@ public extension Project {
         }
         retimeMedia(&cameraClips, rate: \.mediaRate)
         retimeMedia(&keystrokeClips, rate: \.mediaRate)
+        var linkedAudio = audioClips.filter { !$0.isConnected }
+        var connectedAudio = audioClips.filter(\.isConnected)
+        retimeMedia(&linkedAudio, rate: \.mediaRate)
+        for index in connectedAudio.indices {
+            let length = connectedAudio[index].end - connectedAudio[index].start
+            connectedAudio[index].start = output(connectedAudio[index].start)
+            connectedAudio[index].end = connectedAudio[index].start + length
+        }
+        audioClips = (linkedAudio + connectedAudio).sorted { $0.start < $1.start }
+        for index in layers.indices {
+            let length = layers[index].end - layers[index].start
+            layers[index].start = output(layers[index].start)
+            layers[index].end = layers[index].start + length
+        }
         retime(&zooms); retime(&layouts); retime(&masks); retime(&texts); retime(&windowShots) // ponytail: caption word offsets keep source seconds, not rescaled by speed
         var time = 0.0
         clips = original.map { clip in
@@ -156,11 +179,11 @@ public extension Project {
         let selected = indices.filter { clips.indices.contains($0) && !clips[$0].isEmpty }
         let ranges = selected.sorted().map { clips[$0].sourceStart...clips[$0].sourceEnd }
         let blockIDs = Set(ids.map(\.uuidString))
-        func selectedBlocks<T: TimedBlock>(_ blocks: [T]) -> [T] {
+        func selectedBlocks<T: TimedBlock>(_ blocks: [T], linkedRanges: [ClosedRange<Double>]? = nil) -> [T] {
             blocks.flatMap { block -> [T] in
                 if blockIDs.contains(block.id) { return [block] }
-                guard linkVideoEdits else { return [] }
-                return ranges.compactMap { range in
+                guard linkedRanges != nil || linkVideoEdits else { return [] }
+                return (linkedRanges ?? ranges).compactMap { range in
                     let lo = max(block.start, range.lowerBound), hi = min(block.end, range.upperBound)
                     guard hi > lo else { return nil }
                     var part = block
@@ -172,6 +195,12 @@ public extension Project {
         }
         var copied = self
         copied.cameraClips = selectedBlocks(cameraClips)
+        copied.audioClips = audioClips.flatMap { audio -> [AudioClip] in
+            if audio.link == .screen { return selectedBlocks([audio], linkedRanges: ranges) }
+            if audio.link == .camera { return selectedBlocks([audio], linkedRanges: copied.cameraClips.map { $0.start...$0.end }) }
+            return blockIDs.contains(audio.id) ? [audio] : []
+        }
+        copied.layers = layers.filter { blockIDs.contains($0.id) }
         copied.zooms = selectedBlocks(zooms)
         copied.keystrokeClips = selectedBlocks(keystrokeClips)
         copied.layouts = selectedBlocks(layouts)
@@ -180,7 +209,7 @@ public extension Project {
         copied.windowShots = selectedBlocks(windowShots)
         copied.useOutputClock()
         copied.clips = copied.clips.enumerated().filter { selected.contains($0.offset) }.map(\.element)
-        let starts = copied.clips.map(\.sourceStart) + copied.cameraClips.map(\.start) + copied.zooms.map(\.start)
+        let starts = copied.clips.map(\.sourceStart) + copied.cameraClips.map(\.start) + copied.zooms.map(\.start) + copied.audioClips.map(\.start) + copied.layers.map(\.start)
             + copied.keystrokeClips.map(\.start) + copied.layouts.map(\.start) + copied.masks.map(\.start) + copied.texts.map(\.start) + copied.windowShots.map(\.start)
         guard let origin = starts.min() else { return nil }
         func offset<T: TimedBlock>(_ blocks: inout [T]) {
@@ -189,6 +218,7 @@ public extension Project {
         for i in copied.clips.indices { copied.clips[i].sourceStart -= origin; copied.clips[i].sourceEnd -= origin }
         offset(&copied.cameraClips); offset(&copied.zooms); offset(&copied.keystrokeClips)
         offset(&copied.layouts); offset(&copied.masks); offset(&copied.texts); offset(&copied.windowShots)
+        offset(&copied.audioClips); offset(&copied.layers)
         return copied
     }
 
@@ -254,6 +284,20 @@ public extension Project {
         paste(copied.masks, into: &result.masks)
         paste(copied.texts, into: &result.texts)
         paste(copied.windowShots, into: &result.windowShots)
+        var audioByTrack: [AudioClip] = []
+        for track in result.audioTracks.indices {
+            var linked = result.audioClips.filter { $0.track == track && !$0.isConnected }
+            paste(copied.audioClips.filter { $0.track == track && !$0.isConnected }, into: &linked)
+            audioByTrack += linked
+        }
+        for var audio in result.audioClips where audio.isConnected {
+            if insertDuration > 0 && audio.start >= replaceEnd { audio.start += insertDuration; audio.end += insertDuration }
+            audioByTrack.append(audio)
+        }
+        result.audioClips = audioByTrack.sorted { $0.start < $1.start }
+        for index in result.layers.indices where insertDuration > 0 && result.layers[index].start >= replaceEnd {
+            result.layers[index].start += insertDuration; result.layers[index].end += insertDuration
+        }
 
         var before: [Clip] = [], after: [Clip] = []
         for clip in result.clips {
@@ -311,9 +355,10 @@ public extension Project {
     /// Move a selection as one unit, retaining the spacing between its clips.
     /// The same collision constraints as a single move apply to the whole selection.
     @discardableResult
-    mutating func moveClips(_ indices: Set<Int>, byOutput requested: Double) -> Set<Int> {
+    mutating func moveClips(_ indices: Set<Int>, byOutput requested: Double, propagate: Bool = true) -> Set<Int> {
         let selected = indices.sorted().filter { clips.indices.contains($0) && !clips[$0].isEmpty }
         guard !selected.isEmpty, requested.isFinite, abs(requested) > 1e-8 else { return Set(selected) }
+        let before = self
         var beforeClockChange: Project?
         if Set(clips.map(\.timeScale)).count > 1 || zip(clips, clips.dropFirst()).contains(where: { abs($0.sourceEnd - $1.sourceStart) > 1e-8 }) {
             beforeClockChange = self
@@ -343,8 +388,9 @@ public extension Project {
             let clip = original[i]
             guard let current = clips.firstIndex(of: clip) else { continue }
             _ = placeClip(current, start: clip.sourceStart + delta * clip.timeScale,
-                          end: clip.sourceEnd + delta * clip.timeScale, moving: true)
+                          end: clip.sourceEnd + delta * clip.timeScale, moving: true, propagate: propagate)
         }
+        guard checkInvariants() == nil else { self = before; return Set(selected) }
         return Set(selected.compactMap { i in
             let old = original[i]
             return clips.firstIndex { !$0.isEmpty && abs($0.sourceStart - old.sourceStart - delta * old.timeScale) < 1e-8 && $0.mediaIn == old.mediaIn }
@@ -367,8 +413,9 @@ public extension Project {
     /// Trim/move only within adjacent free space. Gap pieces retain the clock mapping, so
     /// camera, keys and effects stay at exactly the same output times.
     @discardableResult
-    mutating func placeClip(_ i: Int, start: Double, end: Double, moving: Bool = false) -> Int {
+    mutating func placeClip(_ i: Int, start: Double, end: Double, moving: Bool = false, propagate: Bool = true) -> Int {
         guard clips.indices.contains(i), !clips[i].isEmpty, start.isFinite, end.isFinite else { return i }
+        let before = self
         let old = clips[i]
         var lo = i, hi = i
         while lo > 0, clips[lo - 1].isEmpty, clips[lo - 1].timeScale == old.timeScale,
@@ -407,14 +454,17 @@ public extension Project {
             pieces.append(gap)
         }
         clips.replaceSubrange(lo...hi, with: pieces)
-        if linkVideoEdits {
+        if propagate {
             if moving, abs(a - old.sourceStart) > 1e-8 {
                 editLinkedLayers(in: old.sourceStart...old.sourceEnd, moveBy: a - old.sourceStart)
             } else if !moving {
                 if a > old.sourceStart { editLinkedLayers(in: old.sourceStart...a, moveBy: nil) }
                 if b < old.sourceEnd { editLinkedLayers(in: b...old.sourceEnd, moveBy: nil) }
+                resizeLinkedAudio(.screen, from: old.sourceStart...old.sourceEnd, to: a...b)
+                if linkVideoEdits { resizeLinkedAudio(.camera, from: old.sourceStart...old.sourceEnd, to: a...b) }
             }
         }
+        guard checkInvariants() == nil else { self = before; return i }
         return selected
     }
 
@@ -438,14 +488,25 @@ public extension Project {
         }
     }
 
-    mutating func moveCamera(_ id: UUID, toStart s: Double) { moveBlock(id, in: \.cameraClips, toStart: s) }
-    mutating func resizeCamera(_ id: UUID, edge: Edge, to s: Double) {
-        guard let i = cameraClips.firstIndex(where: { $0.id == id.uuidString }) else { return }
+    mutating func moveCamera(_ id: UUID, toStart s: Double, propagate: Bool = true) {
+        guard s.isFinite, let old = cameraClips.first(where: { $0.id == id.uuidString }) else { return }
+        let before = self
+        cameraClips.moveBlock(id: id.uuidString, toStart: s, duration: timelineSourceDuration)
+        if propagate, let changed = cameraClips.first(where: { $0.id == id.uuidString }) {
+            editAudio(link: .camera, in: old.start...old.end, moveBy: changed.start - old.start)
+        }
+        if checkInvariants() != nil { self = before }
+    }
+    mutating func resizeCamera(_ id: UUID, edge: Edge, to s: Double, propagate: Bool = true) {
+        guard s.isFinite, let i = cameraClips.firstIndex(where: { $0.id == id.uuidString }) else { return }
+        let before = self
         let old = cameraClips[i]
         let lower = old.start - old.mediaStart / (old.mediaRate ?? 1)
         let upper = old.start + (source.duration - old.mediaStart) / (old.mediaRate ?? 1)
         cameraClips.resizeBlock(id: id.uuidString, edge: edge, to: min(upper, max(lower, s)), duration: timelineSourceDuration, minLength: Self.minClipLength)
         cameraClips[i].mediaStart += (cameraClips[i].start - old.start) * (old.mediaRate ?? 1)
+        if propagate { resizeLinkedAudio(.camera, from: old.start...old.end, to: cameraClips[i].start...cameraClips[i].end) }
+        if checkInvariants() != nil { self = before }
     }
     @discardableResult
     mutating func addCamera(atSource s: Double, length: Double = 3) -> UUID? {
@@ -458,7 +519,44 @@ public extension Project {
 
     /// A blade edit changes only its target block, preserving its settings.
     @discardableResult
-    mutating func splitBlock(_ id: UUID, atSource s: Double) -> Bool {
+    mutating func splitBlock(_ id: UUID, atSource s: Double, propagate: Bool = true) -> Bool {
+        guard s.isFinite else { return false }
+        let before = self
+        if let camera = cameraClips.first(where: { $0.id == id.uuidString }) {
+            guard s - camera.start >= Self.minClipLength, camera.end - s >= Self.minClipLength else { return false }
+            if propagate { editCamera(in: s...s, moveBy: 0) }
+            else { applyLinkedEdit(&cameraClips, in: s...s, moveBy: 0) }
+            guard checkInvariants() == nil else { self = before; return false }
+            return true
+        }
+        if let layer = layers.first(where: { $0.id == id.uuidString }), let range = outputRange(layer, connected: true),
+           let output = TimeMap(clips).outputTime(atSource: s) {
+            guard output - range.start >= 0.5, range.end - output >= 0.5 else { return false }
+            editLayer(layer, in: output...output, moveBy: 0, propagate: propagate)
+            guard checkInvariants() == nil else { self = before; return false }
+            return true
+        }
+        if let audio = audioClips.first(where: { $0.id == id.uuidString }),
+           let range = outputRange(audio, connected: audio.isConnected), let output = TimeMap(clips).outputTime(atSource: s) {
+            guard output - range.start >= 0.1, range.end - output >= 0.1 else { return false }
+            if propagate, audio.link == .screen {
+                guard self.split(atOutput: output) else { return false }
+            } else if propagate, audio.link == .camera { editCamera(in: s...s, moveBy: 0) }
+            else if propagate, audio.link == .layer, let layer = layers.first(where: { $0.id == audio.layer }),
+                    let layerRange = outputRange(layer, connected: true) {
+                guard output - layerRange.start >= 0.5, layerRange.end - output >= 0.5 else { return false }
+                editLayer(layer, in: output...output, moveBy: 0, propagate: true)
+            } else {
+                var pieces = [audio.isConnected ? connectedOnOutput(audio)! : audio]
+                let cut = audio.isConnected ? output : s
+                applyLinkedEdit(&pieces, in: cut...cut, moveBy: 0)
+                audioClips.removeAll { $0.id == audio.id }
+                audioClips += audio.isConnected ? pieces.map { connectedFromOutput($0) } : pieces
+                audioClips.sort { $0.start < $1.start }
+            }
+            guard checkInvariants() == nil else { self = before; return false }
+            return true
+        }
         func split<T: TimedBlock>(_ blocks: inout [T], minimum: Double = 0.5) -> Bool {
             guard let i = blocks.firstIndex(where: { $0.id == id.uuidString }),
                   s - blocks[i].start >= minimum, blocks[i].end - s >= minimum else { return false }
@@ -470,7 +568,6 @@ public extension Project {
             blocks.insert(right, at: i + 1)
             return true
         }
-        if split(&cameraClips, minimum: Self.minClipLength) { return true }
         if split(&zooms) { return true }
         if split(&keystrokeClips) { return true }
         if split(&layouts) { return true }
@@ -479,12 +576,344 @@ public extension Project {
         return split(&windowShots)
     }
 
+    private func outputRange<Block: TimedBlock>(_ block: Block, connected: Bool) -> TimeRange? {
+        let map = TimeMap(clips)
+        if connected {
+            guard let start = map.outputTime(atSource: block.start) else { return nil }
+            return TimeRange(start: start, end: start + block.end - block.start)
+        }
+        var output = 0.0, first: Double?, end: Double?
+        for clip in clips {
+            let lower = max(block.start, clip.sourceStart), upper = min(block.end, clip.sourceEnd)
+            if upper > lower {
+                if first == nil { first = output + (lower - clip.sourceStart) / clip.timeScale }
+                end = output + (upper - clip.sourceStart) / clip.timeScale
+            }
+            output += clip.outputDuration
+        }
+        guard let first, let end else { return nil }
+        return TimeRange(start: first, end: end)
+    }
+
+    private func connectedOnOutput<Block: TimedBlock>(_ block: Block) -> Block? {
+        guard let range = outputRange(block, connected: true) else { return nil }
+        var result = block
+        result.start = range.start; result.end = range.end
+        return result
+    }
+
+    private func connectedFromOutput<Block: TimedBlock>(_ block: Block) -> Block {
+        var result = block
+        result.start = TimeMap(clips).sourceTime(atOutput: block.start)
+        result.end = result.start + block.end - block.start
+        return result
+    }
+
+    private mutating func editLayer(_ layer: LayerBlock, in range: ClosedRange<Double>, moveBy delta: Double?, propagate: Bool) {
+        guard let output = connectedOnOutput(layer) else { return }
+        var pieces = [output]
+        applyLinkedEdit(&pieces, in: range, moveBy: delta)
+        let partners = audioClips.filter { $0.link == .layer && $0.layer == layer.id }
+        if propagate {
+            var audio = partners.compactMap { connectedOnOutput($0) }
+            if pieces.isEmpty { audio = [] }
+            else if let delta, delta != 0, range.lowerBound <= output.start, range.upperBound >= output.end {
+                let lower = min(output.start, audio.map(\.start).min() ?? output.start)
+                let upper = max(output.end, audio.map(\.end).max() ?? output.end)
+                applyLinkedEdit(&audio, in: lower...upper, moveBy: delta)
+            } else { applyLinkedEdit(&audio, in: range, moveBy: delta) }
+            audioClips.removeAll { $0.link == .layer && $0.layer == layer.id }
+            for var part in audio {
+                guard let partner = pieces.last(where: { $0.start <= part.start }) ?? pieces.first else { continue }
+                part.layer = partner.id
+                audioClips.append(connectedFromOutput(part))
+            }
+        } else if pieces.isEmpty {
+            for index in audioClips.indices where audioClips[index].layer == layer.id {
+                audioClips[index].link = nil; audioClips[index].layer = nil
+            }
+        }
+        layers.removeAll { $0.id == layer.id }
+        layers += pieces.map { connectedFromOutput($0) }
+        layers.sort { $0.start < $1.start }
+        audioClips.sort { $0.start < $1.start }
+    }
+
+    mutating func moveLayer(_ id: UUID, toStart source: Double, propagate: Bool = true) {
+        guard source.isFinite, let layer = layers.first(where: { $0.id == id.uuidString }),
+              let range = outputRange(layer, connected: true), let requested = TimeMap(clips).outputTime(atSource: source) else { return }
+        let neighbours = layers.filter { $0.track == layer.track && $0.id != layer.id }.compactMap { outputRange($0, connected: true) }
+        let lower = neighbours.filter { $0.end <= range.start + 1e-9 }.map(\.end).max() ?? 0
+        let upper = min(TimeMap(clips).outputDuration,
+                        (neighbours.filter { $0.start >= range.end - 1e-9 }.map(\.start).min() ?? .infinity) - (range.end - range.start))
+        let start = min(max(requested, lower), upper)
+        guard abs(start - range.start) > 1e-9 else { return }
+        let before = self
+        editLayer(layer, in: range.start...range.end, moveBy: start - range.start, propagate: propagate)
+        if checkInvariants() != nil { self = before }
+    }
+
+    mutating func resizeLayer(_ id: UUID, edge: Edge, to source: Double, mediaDuration: Double? = nil, propagate: Bool = true) {
+        guard source.isFinite, let layer = layers.first(where: { $0.id == id.uuidString }),
+              let range = outputRange(layer, connected: true), let requested = TimeMap(clips).outputTime(atSource: source) else { return }
+        let neighbours = layers.filter { $0.track == layer.track && $0.id != layer.id }.compactMap { outputRange($0, connected: true) }
+        let before = self
+        var changed = connectedOnOutput(layer)!
+        switch edge {
+        case .leading:
+            let lower = max(neighbours.filter { $0.end <= range.start + 1e-9 }.map(\.end).max() ?? 0,
+                            layer.kind == .video ? range.start - layer.mediaStart : 0)
+            changed.start = min(max(requested, lower), range.end - 0.5)
+            changed.advanceMedia(by: changed.start - range.start)
+        case .trailing:
+            let upper = min(neighbours.filter { $0.start >= range.end - 1e-9 }.map(\.start).min() ?? .infinity,
+                            layer.kind == .video ? range.start + (mediaDuration ?? .infinity) - layer.mediaStart : .infinity)
+            changed.end = max(min(requested, upper), range.start + 0.5)
+        }
+        if propagate {
+            if changed.start > range.start { editLayer(layer, in: range.start...changed.start, moveBy: nil, propagate: true) }
+            if changed.end < range.end, let current = layers.first(where: { $0.id == layer.id }) {
+                editLayer(current, in: changed.end...range.end, moveBy: nil, propagate: true)
+            }
+            for index in audioClips.indices where audioClips[index].link == .layer && audioClips[index].layer == layer.id {
+                guard var audio = connectedOnOutput(audioClips[index]) else { continue }
+                if changed.start < range.start, abs(audio.start - range.start) < 1e-9 {
+                    audio.advanceMedia(by: changed.start - range.start)
+                    audio.start = changed.start
+                }
+                if changed.end > range.end, abs(audio.end - range.end) < 1e-9 { audio.end = changed.end }
+                audioClips[index] = connectedFromOutput(audio)
+            }
+        }
+        layers[layers.firstIndex(where: { $0.id == layer.id })!] = connectedFromOutput(changed)
+        audioClips.sort { $0.start < $1.start }
+        layers.sort { $0.start < $1.start }
+        if checkInvariants(mediaDurations: mediaDuration.map { [layer.file: $0] } ?? [:]) != nil { self = before }
+    }
+
+    @discardableResult
+    mutating func unlinkAudio(_ id: UUID) -> Bool {
+        guard let original = audioClips.first(where: { $0.id == id.uuidString }), original.link != nil else { return false }
+        let before = self
+        var pieces = [original]
+        if !original.isConnected {
+            for boundary in Set(clips.flatMap { [$0.sourceStart, $0.sourceEnd] }).sorted() {
+                applyLinkedEdit(&pieces, in: boundary...boundary, moveBy: 0)
+            }
+        }
+        var detached: [AudioClip] = []
+        for var piece in pieces {
+            guard let range = outputRange(piece, connected: original.isConnected), range.end > range.start else { self = before; return false }
+            if !original.isConnected {
+                piece.mediaRate = (piece.end - piece.start) * (piece.mediaRate ?? 1) / (range.end - range.start)
+                piece.end = piece.start + range.end - range.start
+            }
+            piece.link = nil; piece.layer = nil
+            detached.append(piece)
+        }
+        audioClips.removeAll { $0.id == original.id }
+        audioClips += detached
+        audioClips.sort { $0.start < $1.start }
+        guard checkInvariants() == nil else { self = before; return false }
+        return true
+    }
+
+    @discardableResult
+    mutating func linkAudio(_ id: UUID, to link: AudioClip.Link) -> Bool {
+        guard audioClips.contains(where: { $0.id == id.uuidString }) else { return false }
+        let before = self
+        let otherIDs = Set(audioClips.filter { $0.id != id.uuidString }.map(\.id))
+        if audioClips.first(where: { $0.id == id.uuidString })?.isConnected == false, !unlinkAudio(id) { return false }
+        let incoming = audioClips.filter { !otherIDs.contains($0.id) }
+        var linked: [AudioClip] = []
+        for audio in incoming {
+            guard let output = connectedOnOutput(audio), link == .layer || output.end <= TimeMap(clips).outputDuration + 1e-9 else { self = before; return false }
+            let targets: [(TimeRange, String?)]
+            switch link {
+            case .screen:
+                targets = clips.filter { !$0.isEmpty }.compactMap {
+                    guard let start = TimeMap(clips).outputTime(atSource: $0.sourceStart) else { return nil }
+                    return (TimeRange(start: start, end: start + $0.outputDuration), nil)
+                }
+            case .camera: targets = cameraClips.compactMap { camera in outputRange(camera, connected: false).map { ($0, nil) } }
+            case .layer: targets = layers.filter { $0.kind == .video && $0.file == audio.file }.compactMap { layer in
+                outputRange(layer, connected: true).map { ($0, layer.id) }
+            }
+            }
+            var pieces = [output]
+            let boundaries = targets.flatMap { [$0.0.start, $0.0.end] }
+                + (link == .layer ? [] : clips.compactMap { TimeMap(clips).outputTime(atSource: $0.sourceStart) })
+            for boundary in Set(boundaries).sorted() { applyLinkedEdit(&pieces, in: boundary...boundary, moveBy: 0) }
+            for var piece in pieces {
+                let partner = targets.first { $0.0.start <= piece.start + 1e-9 && $0.0.end >= piece.end - 1e-9 }
+                piece.link = partner == nil ? nil : link
+                piece.layer = partner?.1
+                if piece.link == .screen || piece.link == .camera {
+                    let start = TimeMap(clips).sourceTime(atOutput: piece.start)
+                    let end = clips.first { clip in
+                        guard let outputStart = TimeMap(clips).outputTime(atSource: clip.sourceStart) else { return false }
+                        return piece.start >= outputStart - 1e-9 && piece.start < outputStart + clip.outputDuration - 1e-9
+                    }.map { start + (piece.end - piece.start) * $0.timeScale }
+                    guard let end, end > start else { self = before; return false }
+                    piece.mediaRate = (piece.mediaRate ?? 1) * (piece.end - piece.start) / (end - start)
+                    piece.start = start; piece.end = end
+                } else { piece = connectedFromOutput(piece) }
+                linked.append(piece)
+            }
+        }
+        guard linked.contains(where: { $0.link == link }) else { self = before; return false }
+        audioClips.removeAll { !otherIDs.contains($0.id) }
+        audioClips += linked
+        audioClips.sort { $0.start < $1.start }
+        guard checkInvariants() == nil else { self = before; return false }
+        return true
+    }
+
+    func syncOffset(_ audio: AudioClip) -> Double? {
+        guard let range = outputRange(audio, connected: audio.isConnected) else {
+            guard audio.link == .camera, let camera = cameraClips.first(where: { $0.start < audio.end && $0.end > audio.start }) else { return nil }
+            let sample = max(audio.start, camera.start)
+            let scale = clips.first(where: { $0.sourceEnd >= sample })?.timeScale ?? clips.last?.timeScale ?? 1
+            let reference = camera.mediaStart + (sample - camera.start) * (camera.mediaRate ?? 1)
+            let media = audio.mediaStart + (sample - audio.start) * (audio.mediaRate ?? 1)
+            let rate = (camera.mediaRate ?? 1) * scale
+            return rate > 0 && rate.isFinite ? (reference - media) / rate : nil
+        }
+        let map = TimeMap(clips)
+        let link = audio.link ?? (audio.file == "mic.m4a" ? (source.hasCamera ? .camera : .screen) : audio.file == "system.m4a" ? .screen : .layer)
+        var sample = range.start
+        let referenceMedia: Double, referenceRate: Double
+        switch link {
+        case .screen:
+            guard let clip = clips.first(where: { clip in
+                guard !clip.isEmpty, let start = map.outputTime(atSource: clip.sourceStart) else { return false }
+                return start < range.end && start + clip.outputDuration > range.start
+            }), let start = map.outputTime(atSource: clip.sourceStart) else { return nil }
+            sample = max(sample, start)
+            referenceMedia = clip.mediaIn + (sample - start) * clip.speed; referenceRate = clip.speed
+        case .camera:
+            guard let camera = cameraClips.first(where: { camera in
+                guard let interval = outputRange(camera, connected: false) else { return false }
+                return interval.start < range.end && interval.end > range.start
+            }), let interval = outputRange(camera, connected: false), let index = clipIndex(atOutput: max(sample, interval.start)) else { return nil }
+            let start = interval.start
+            sample = max(sample, start)
+            referenceMedia = camera.mediaStart + (map.sourceTime(atOutput: sample) - camera.start) * (camera.mediaRate ?? 1)
+            referenceRate = (camera.mediaRate ?? 1) * clips[index].timeScale
+        case .layer:
+            guard let layer = layers.first(where: { layer in
+                guard layer.kind == .video, let interval = outputRange(layer, connected: true) else { return false }
+                return audio.link == .layer ? layer.id == audio.layer : layer.file == audio.file && interval.start < range.end && interval.end > range.start
+            }), let start = map.outputTime(atSource: layer.start) else { return nil }
+            referenceMedia = layer.mediaStart + sample - start; referenceRate = 1
+        }
+        let media = audio.mediaStart + (audio.isConnected ? sample - range.start : map.sourceTime(atOutput: sample) - audio.start) * (audio.mediaRate ?? 1)
+        guard referenceRate.isFinite, referenceRate > 0 else { return nil }
+        return (referenceMedia - media) / referenceRate
+    }
+
+    mutating func moveIntoSync(_ id: UUID) {
+        guard let audio = audioClips.first(where: { $0.id == id.uuidString }), let offset = syncOffset(audio),
+              let range = outputRange(audio, connected: audio.isConnected) else { return }
+        moveAudio(id, toStart: TimeMap(clips).sourceTime(atOutput: range.start - offset), propagate: false)
+    }
+
+    mutating func moveAudio(_ id: UUID, toStart source: Double, propagate: Bool = true) {
+        guard source.isFinite, let audio = audioClips.first(where: { $0.id == id.uuidString }),
+              let range = outputRange(audio, connected: audio.isConnected), let requested = TimeMap(clips).outputTime(atSource: source) else { return }
+        let neighbours = audioClips.filter { $0.track == audio.track && $0.id != audio.id }.compactMap { outputRange($0, connected: $0.isConnected) }
+        let length = range.end - range.start
+        let lower = neighbours.filter { $0.end <= range.start + 1e-9 }.map(\.end).max() ?? 0
+        let upper = min(TimeMap(clips).outputDuration - (audio.isConnected ? 0 : length),
+                        (neighbours.filter { $0.start >= range.end - 1e-9 }.map(\.start).min() ?? .infinity) - length)
+        let start = min(max(requested, lower), upper)
+        guard abs(start - range.start) > 1e-9 else { return }
+        let before = self
+        if propagate, audio.link == .screen {
+            splitClip(atSource: audio.start); splitClip(atSource: audio.end)
+            let indices = Set(clips.indices.filter { !clips[$0].isEmpty && clips[$0].sourceStart >= audio.start && clips[$0].sourceEnd <= audio.end })
+            _ = moveClips(indices, byOutput: start - range.start)
+        } else if propagate, audio.link == .camera {
+            editCamera(in: audio.start...audio.end, moveBy: TimeMap(clips).sourceTime(atOutput: start) - audio.start)
+        } else if propagate, audio.link == .layer, let layer = layers.first(where: { $0.id == audio.layer }),
+                  let layerRange = outputRange(layer, connected: true), let layerID = UUID(uuidString: layer.id) {
+            moveLayer(layerID, toStart: TimeMap(clips).sourceTime(atOutput: layerRange.start + start - range.start))
+        } else if let index = audioClips.firstIndex(where: { $0.id == audio.id }) {
+            var changed = audio
+            changed.start = TimeMap(clips).sourceTime(atOutput: start)
+            if audio.isConnected { changed.end = changed.start + length }
+            else {
+                changed.end = TimeMap(clips).sourceTime(atOutput: start + length)
+                changed.mediaRate = (audio.end - audio.start) * (audio.mediaRate ?? 1) / (changed.end - changed.start)
+            }
+            audioClips[index] = changed
+            audioClips.sort { $0.start < $1.start }
+        }
+        if checkInvariants() != nil { self = before }
+    }
+
+    mutating func resizeAudio(_ id: UUID, edge: Edge, to source: Double, mediaDuration: Double? = nil, propagate: Bool = true) {
+        guard source.isFinite, let audio = audioClips.first(where: { $0.id == id.uuidString }),
+              let range = outputRange(audio, connected: audio.isConnected), let requested = TimeMap(clips).outputTime(atSource: source) else { return }
+        let before = self
+        let neighbours = audioClips.filter { $0.track == audio.track && $0.id != audio.id }.compactMap { outputRange($0, connected: $0.isConnected) }
+        let rate = (audio.end - audio.start) * (audio.mediaRate ?? 1) / (range.end - range.start)
+        let duration = mediaDuration ?? (["mic.m4a", "system.m4a"].contains(audio.file) ? self.source.duration : .infinity)
+        var changed = audio
+        let target: Double
+        switch edge {
+        case .leading:
+            let lower = max(neighbours.filter { $0.end <= range.start + 1e-9 }.map(\.end).max() ?? 0, range.start - audio.mediaStart / rate)
+            target = min(max(requested, lower), range.end - 0.1)
+            changed.start = TimeMap(clips).sourceTime(atOutput: target)
+            changed.mediaStart += audio.isConnected ? (target - range.start) * rate : (changed.start - audio.start) * (audio.mediaRate ?? 1)
+            if audio.isConnected { changed.end = changed.start + range.end - target }
+        case .trailing:
+            let upper = min(neighbours.filter { $0.start >= range.end - 1e-9 }.map(\.start).min() ?? .infinity,
+                            range.start + (duration - audio.mediaStart) / rate)
+            target = max(min(requested, upper), range.start + 0.1)
+            changed.end = audio.isConnected ? changed.start + target - range.start : TimeMap(clips).sourceTime(atOutput: target)
+        }
+        if propagate, audio.link == .screen {
+            splitClip(atSource: audio.start); splitClip(atSource: audio.end)
+            let partners = clips.indices.filter { !clips[$0].isEmpty && clips[$0].sourceStart >= audio.start && clips[$0].sourceEnd <= audio.end }
+            guard !partners.isEmpty else { self = before; return }
+            for index in partners.reversed() {
+                let clip = clips[index]
+                let start = edge == .leading ? max(changed.start, clip.sourceStart == audio.start ? changed.start : clip.sourceStart) : clip.sourceStart
+                let end = edge == .trailing ? min(changed.end, clip.sourceEnd == audio.end ? changed.end : clip.sourceEnd) : clip.sourceEnd
+                if end <= start { liftClip(index) }
+                else { _ = placeClip(index, start: start, end: end) }
+            }
+        } else if propagate, audio.link == .camera {
+            if changed.start > audio.start { editCamera(in: audio.start...changed.start, moveBy: nil) }
+            if changed.end < audio.end { editCamera(in: changed.end...audio.end, moveBy: nil) }
+            if changed.start < audio.start || changed.end > audio.end {
+                let partners = cameraClips.filter { $0.start < audio.end && $0.end > audio.start }
+                for camera in partners {
+                    guard let cameraID = UUID(uuidString: camera.id) else { continue }
+                    if changed.start < audio.start, camera.start >= changed.start { resizeCamera(cameraID, edge: .leading, to: changed.start) }
+                    if changed.end > audio.end, camera.end <= changed.end { resizeCamera(cameraID, edge: .trailing, to: changed.end) }
+                }
+            }
+        } else if propagate, audio.link == .layer, let layer = layers.first(where: { $0.id == audio.layer }), let layerID = UUID(uuidString: layer.id) {
+            resizeLayer(layerID, edge: edge, to: TimeMap(clips).sourceTime(atOutput: target), mediaDuration: mediaDuration)
+            return
+        }
+        if let index = audioClips.firstIndex(where: { $0.id == audio.id }) { audioClips[index] = changed }
+        audioClips.sort { $0.start < $1.start }
+        if checkInvariants(mediaDurations: mediaDuration.map { [audio.file: $0] } ?? [:]) != nil { self = before }
+    }
+
     /// Removes clip `i` entirely (its source range disappears from the output). Returns `false`
     /// if `i` is out of range or it is the last remaining clip.
     @discardableResult
-    mutating func removeClip(_ i: Int) -> Bool {
+    mutating func removeClip(_ i: Int, propagate: Bool = true) -> Bool {
         guard clips.indices.contains(i), clips.count > 1 else { return false }
+        let before = self
+        if propagate { editLinkedLayers(in: clips[i].sourceStart...clips[i].sourceEnd, moveBy: nil) }
         clips.remove(at: i)
+        guard checkInvariants() == nil else { self = before; return false }
         assert(checkInvariants() == nil)
         return true
     }
@@ -492,8 +921,10 @@ public extension Project {
     /// Drags clip `i`'s `edge` to source time `s`. Clamps so it never crosses the neighbouring
     /// clip's source boundary (never overlaps), never leaves `[0, source.duration]`, and never
     /// shrinks the clip below the minimum length.
-    mutating func trimClip(_ i: Int, edge: Edge, toSource s: Double) {
-        guard clips.indices.contains(i) else { return }
+    mutating func trimClip(_ i: Int, edge: Edge, toSource s: Double, propagate: Bool = true) {
+        guard clips.indices.contains(i), s.isFinite else { return }
+        let before = self
+        let old = clips[i]
         switch edge {
         case .leading:
             let lower = i > 0 ? clips[i - 1].sourceEnd : 0
@@ -504,6 +935,14 @@ public extension Project {
             let lower = clips[i].sourceStart + Self.minClipLength
             clips[i].sourceEnd = max(min(s, upper), lower)
         }
+        clips[i].mediaStart = old.mediaTime(atSource: clips[i].sourceStart)
+        if propagate {
+            if clips[i].sourceStart > old.sourceStart { editLinkedLayers(in: old.sourceStart...clips[i].sourceStart, moveBy: nil) }
+            if clips[i].sourceEnd < old.sourceEnd { editLinkedLayers(in: clips[i].sourceEnd...old.sourceEnd, moveBy: nil) }
+            resizeLinkedAudio(.screen, from: old.sourceStart...old.sourceEnd, to: clips[i].sourceStart...clips[i].sourceEnd)
+            if linkVideoEdits { resizeLinkedAudio(.camera, from: old.sourceStart...old.sourceEnd, to: clips[i].sourceStart...clips[i].sourceEnd) }
+        }
+        guard checkInvariants() == nil else { self = before; return }
         assert(checkInvariants() == nil)
     }
 
@@ -587,6 +1026,7 @@ public extension Project {
         guard clips.indices.contains(i), !clips[i].isEmpty, speed.isFinite else { return }
         let old = clips[i], requested = min(16, max(0.25, speed))
         guard abs(requested - old.speed) > 1e-9 else { return }
+        let before = self
         if linkVideoEdits {
             clips[i].clockSpeed = old.timeScale * requested / old.speed
             clips[i].speed = requested
@@ -610,7 +1050,18 @@ public extension Project {
                 replacement.append(gap)
             }
             clips.replaceSubrange(i...hi, with: replacement)
+            editAudio(link: .screen, in: old.sourceStart...old.sourceStart, moveBy: 0)
+            editAudio(link: .screen, in: old.sourceEnd...old.sourceEnd, moveBy: 0)
+            let scale = (changed.sourceEnd - changed.sourceStart) / (old.sourceEnd - old.sourceStart)
+            for index in audioClips.indices where audioClips[index].link == .screen
+                && audioClips[index].start >= old.sourceStart && audioClips[index].end <= old.sourceEnd {
+                audioClips[index].start = old.sourceStart + (audioClips[index].start - old.sourceStart) * scale
+                audioClips[index].end = old.sourceStart + (audioClips[index].end - old.sourceStart) * scale
+                audioClips[index].mediaRate = (audioClips[index].mediaRate ?? 1) / scale
+            }
+            audioClips.sort { $0.start < $1.start }
         }
+        guard checkInvariants() == nil else { self = before; return }
         assert(checkInvariants() == nil)
     }
 
@@ -642,6 +1093,7 @@ public extension Project {
     /// isn't strictly inside a clip (in a gap, or within `minClipLength` of an edge/existing boundary).
     private mutating func splitClip(atSource s: Double) {
         guard let i = clips.firstIndex(where: { !$0.isEmpty && s > $0.sourceStart + Self.minClipLength && s < $0.sourceEnd - Self.minClipLength }) else { return }
+        let before = self
         let clip = clips[i]
         clips[i] = Clip(sourceStart: clip.sourceStart, sourceEnd: s, speed: clip.speed)
         clips[i].mediaStart = clip.mediaStart
@@ -652,7 +1104,8 @@ public extension Project {
         right.clockSpeed = clip.clockSpeed
         right.fadeOut = clip.fadeOut
         clips.insert(right, at: i + 1)
-        if linkVideoEdits { editLinkedLayers(in: s...s, moveBy: 0) }
+        editLinkedLayers(in: s...s, moveBy: 0)
+        if checkInvariants() != nil { self = before }
     }
 
     /// The clip covering output time `t`, clamped to the first/last clip outside `[0, outputDuration]`.
@@ -694,7 +1147,6 @@ public extension Project {
         if let e = masks.blockInvariantError(kind: "mask", duration: timelineSourceDuration) { return e }
         if let e = texts.blockInvariantError(kind: "text", duration: timelineSourceDuration) { return e }
         if let e = windowShots.blockInvariantError(kind: "window shot", duration: timelineSourceDuration) { return e }
-        let map = TimeMap(clips)
         func mediaIsValid(file: String, start: Double, length: Double) -> Bool {
             guard start.isFinite, start >= 0, length.isFinite, length > 0 else { return false }
             let recordedDuration = ["mic.m4a", "system.m4a"].contains(file) ? source.duration : nil
@@ -710,13 +1162,14 @@ public extension Project {
         var audioEnds: [Int: Double] = [:]
         for (index, audioClip) in audioClips.enumerated() {
             guard audioTracks.indices.contains(audioClip.track) else { return "audio \(index) track out of range" }
-            guard audioClip.start.isFinite, audioClip.end.isFinite, audioClip.end > audioClip.start,
-                  let start = map.outputTime(atSource: audioClip.start) else { return "audio \(index) invalid interval" }
-            let linked = audioClip.link == .screen || audioClip.link == .camera
-            let end = linked ? map.outputTime(atSource: audioClip.end) : start + audioClip.end - audioClip.start
-            guard let end, end.isFinite, end - start >= 0.1 - eps else { return "audio \(index) shorter than 0.1s" }
-            if let previous = audioEnds[audioClip.track], start < previous - eps { return "audio \(index) overlaps the previous audio clip" }
-            audioEnds[audioClip.track] = end
+            guard audioClip.start.isFinite, audioClip.start >= 0, audioClip.end.isFinite, audioClip.end > audioClip.start else { return "audio \(index) invalid interval" }
+            let range = outputRange(audioClip, connected: audioClip.isConnected)
+            if audioClip.isConnected && range == nil { return "audio \(index) invalid anchor" }
+            if let range {
+                guard range.end.isFinite, range.end - range.start >= 0.1 - eps else { return "audio \(index) shorter than 0.1s" }
+                if let previous = audioEnds[audioClip.track], range.start < previous - eps { return "audio \(index) overlaps the previous audio clip" }
+                audioEnds[audioClip.track] = range.end
+            }
             if !audioClip.gain.isFinite || !(0...2).contains(audioClip.gain) { return "audio \(index) gain out of range" }
             if !fadesAreValid(audioClip.fadeIn, audioClip.fadeOut) { return "audio \(index) invalid fade" }
             let rate = audioClip.mediaRate ?? 1
@@ -731,6 +1184,7 @@ public extension Project {
             } else if audioClip.layer != nil { return "audio \(index) layer without layer link" }
         }
         var layerEnds: [Int: Double] = [:]
+        let map = TimeMap(clips)
         for (index, layer) in layers.enumerated() {
             guard layer.track >= 0 else { return "layer \(index) track out of range" }
             guard layer.start.isFinite, layer.end.isFinite, layer.end - layer.start >= 0.5 - eps,
@@ -764,6 +1218,43 @@ private protocol TimedBlock {
     mutating func advanceMedia(by delta: Double)
 }
 private extension TimedBlock { mutating func advanceMedia(by delta: Double) {} }
+
+private func applyLinkedEdit<Block: TimedBlock>(_ blocks: inout [Block], in range: ClosedRange<Double>, moveBy delta: Double?, overwrite: Bool = true) {
+    let epsilon = 1e-9
+    func slice(_ block: Block, _ start: Double, _ end: Double, newID: Bool) -> Block {
+        var part = block
+        part.advanceMedia(by: start - block.start)
+        part.start = start; part.end = end
+        if newID { part.id = UUID().uuidString }
+        return part
+    }
+    var stationary: [Block] = [], moved: [Block] = []
+    for block in blocks {
+        let lower = max(block.start, range.lowerBound), upper = min(block.end, range.upperBound)
+        guard lower <= upper + epsilon, block.end > range.lowerBound + epsilon, block.start < range.upperBound - epsilon else {
+            stationary.append(block); continue
+        }
+        if block.start < lower - epsilon { stationary.append(slice(block, block.start, lower, newID: false)) }
+        if upper < block.end - epsilon {
+            stationary.append(slice(block, upper, block.end, newID: block.start < lower - epsilon || (upper > lower + epsilon && delta != nil)))
+        }
+        if upper > lower + epsilon, let delta {
+            var part = slice(block, lower, upper, newID: block.start < lower - epsilon)
+            part.start += delta; part.end += delta
+            moved.append(part)
+        }
+    }
+    for part in moved where overwrite && delta != 0 {
+        stationary = stationary.flatMap { block -> [Block] in
+            guard block.start < part.end - epsilon, block.end > part.start + epsilon else { return [block] }
+            var pieces: [Block] = []
+            if block.start < part.start - epsilon { pieces.append(slice(block, block.start, part.start, newID: false)) }
+            if block.end > part.end + epsilon { pieces.append(slice(block, part.end, block.end, newID: block.start < part.start - epsilon)) }
+            return pieces
+        }
+    }
+    blocks = (stationary + moved).sorted { $0.start < $1.start }
+}
 extension Zoom: TimedBlock {}
 extension Layout: TimedBlock {
     mutating func advanceMedia(by delta: Double) { if keys != nil { mediaStart = (mediaStart ?? start) + delta * (mediaRate ?? 1) } }
@@ -773,6 +1264,7 @@ extension CameraClip: TimedBlock {
 }
 extension AudioClip: TimedBlock {
     mutating func advanceMedia(by delta: Double) { mediaStart += delta * (mediaRate ?? 1) }
+    fileprivate var isConnected: Bool { link != .screen && link != .camera }
 }
 extension LayerBlock: TimedBlock {
     mutating func advanceMedia(by delta: Double) { if kind == .video { mediaStart += delta } }
@@ -1008,8 +1500,31 @@ public extension Project {
     mutating func resizeText(_ id: UUID, edge: Edge, to s: Double) { resizeBlock(id, in: \.texts, edge: edge, to: s) }
 
     /// Removes the zoom, layout, mask or text block with `id`, whichever track it's in.
-    mutating func removeBlock(_ id: UUID) {
+    mutating func removeBlock(_ id: UUID, propagate: Bool = true) {
         let key = id.uuidString
+        let before = self
+        if let audio = audioClips.first(where: { $0.id == key }) {
+            if propagate, audio.link == .screen {
+                splitClip(atSource: audio.start); splitClip(atSource: audio.end)
+                deleteClips(Set(clips.indices.filter { !clips[$0].isEmpty && clips[$0].sourceStart >= audio.start && clips[$0].sourceEnd <= audio.end }))
+            } else if propagate, audio.link == .camera { editCamera(in: audio.start...audio.end, moveBy: nil) }
+            else if propagate, audio.link == .layer, let layer = layers.first(where: { $0.id == audio.layer }),
+                    let range = outputRange(audio, connected: true) {
+                editLayer(layer, in: range.start...range.end, moveBy: nil, propagate: true)
+            } else { audioClips.removeAll { $0.id == key } }
+            if audioClips.contains(where: { $0.id == key }) || checkInvariants() != nil { self = before }
+            return
+        }
+        if let layer = layers.first(where: { $0.id == key }), let range = outputRange(layer, connected: true) {
+            editLayer(layer, in: range.start...range.end, moveBy: nil, propagate: propagate)
+            if checkInvariants() != nil { self = before }
+            return
+        }
+        if let camera = cameraClips.first(where: { $0.id == key }), propagate {
+            editCamera(in: camera.start...camera.end, moveBy: nil)
+            if checkInvariants() != nil { self = before }
+            return
+        }
         if !keystrokeClips.removeBlock(id: key), !cameraClips.removeBlock(id: key), !zooms.removeBlock(id: key), !layouts.removeBlock(id: key), !masks.removeBlock(id: key) {
             if !texts.removeBlock(id: key) { windowShots.removeBlock(id: key) }
         }

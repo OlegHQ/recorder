@@ -131,13 +131,13 @@ Lanes: **A** T-640→T-645 · **L** T-646→T-649 (after T-640 merges; T-648 nee
 
 | Scope | Tasks | Done |
 |---|---|---|
-| Core model + links | T-640…T-642 | 1/3 |
+| Core model + links | T-640…T-642 | 2/3 |
 | Audio lanes + voiceover | T-643…T-645 | 0/3 |
 | Media layers + import | T-646…T-649 | 0/4 |
 | Docs | T-650 | 0/1 |
 
 - [x] **T-640 Audio/layer model + legacy derivation (Core)** — AUDIO-LAYERS §6
-- [ ] **T-641 Linked audio edits (Core)** — AUDIO-LAYERS §6
+- [x] **T-641 Linked audio edits (Core)** — AUDIO-LAYERS §6
 - [ ] **T-642 Connected blocks settle (Core)** — AUDIO-LAYERS §6
 - [ ] **T-643 Composition + mix for N audio tracks** — AUDIO-LAYERS §6
 - [ ] **T-644 Audio lanes UI** — AUDIO-LAYERS §6
@@ -900,3 +900,5 @@ T-633 · 2026-10-15 · live (Screen Recording granted, LaunchServices): first `r
 T-622 · 2026-10-15 · live (Screen Recording + Accessibility granted): new `events 3 keys` posts Shift-alone and F13 through the real tap → captured as `key` 56/105. First run FOUND A BUG: F13 also logged `.typing` (hand-kept non-printing keycode list lacked F13–F20) → root fix: `.typing` only when the key produced a printable character (`ch != nil`); list deleted. Re-run: `events 3 keys` OK (key ×2, no typing), `key-capture` OK, `make test` 86/86, parity M6 maxDelta=0.
 
 T-640 · 2026-10-16 · Added AudioTrack/AudioClip/LayerBlock, additive version-3 project keys, legacy Mic/System derivation and TimedBlock media advancement. Verified `make test FILTER=audioModel` 4/4 and `make test` 90/90 (including AC-PRJ-1/2), both with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`: the selected Xcode 6.4 compiler otherwise loads the Makefile's incompatible CLT 6.3 Testing framework. Tests cover populated JSON/disk round trips, explicit disabled fades, legacy cuts/2×/gaps/media in-points/link defaults, empty clip preservation, output-time overlaps, track/link/gain/rect checks and known media bounds. `checkInvariants(mediaDurations:)` accepts known imported-file durations; recorded audio uses source.duration. App composition/UI wiring remains T-641…T-649. Existing agentpack.toml/pack.lock conflicts preserved; task commit uses a separate index.
+
+T-641 · 2026-10-16 · Extracted shared applyLinkedEdit; screen audio follows video with Link layers off, camera/layer audio edits propagate both ways, layer splits repoint sound, and propagate:false preserves partners. Added unlinkAudio/linkAudio, syncOffset/moveIntoSync, output-clock conversion and linked-audio video clipboard handling. Verified with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`: `make test FILTER=linkedAudio` 12/12 (500 fixed-seed video/camera/layer edits, sync, split/delete/move/speed, unlink/relink, partial partners, Option overrides, mixed clocks and clipboard); `make test` 102/102; `make app CONFIG=debug`; `--selftest timeline-ops` OK. The expanded random sequence caught floating-point slivers and hidden camera references; fixed in the shared slicer and sync lookup. Clarification: Option-delete of a video layer preserves and detaches its audio rather than leaving an invalid dangling link (AUDIO-LAYERS §4.1). Connected settling, composition and UI remain T-642 onward. Existing config conflicts preserved; task commit uses a separate index.
