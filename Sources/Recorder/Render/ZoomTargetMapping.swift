@@ -235,8 +235,8 @@ extension ZoomTargetMapping {
         let sourceTime = (zoom.start + zoom.end) / 2
         let outputTime = model.timeMap.outputTime(atSource: sourceTime) ?? sourceTime
 
-        let (composition, audioMix, _) = try await makeComposition(package: packageURL, project: project)
-        let item = AVPlayerItem(asset: composition)
+        let (composition, audioMix, _, _, layerTracks, layerTransforms) = try await makeComposition(package: packageURL, project: project)
+        let item = AVPlayerItem(asset: screenPlaybackComposition(composition))
         item.audioMix = audioMix
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -271,7 +271,14 @@ extension ZoomTargetMapping {
               let queue = device.makeCommandQueue(), let commandBuffer = queue.makeCommandBuffer() else {
             throw SelfTestArgError.usage("failed to set up Metal resources")
         }
-        var state = makeFrameState(model: model, outputTime: outputTime, screen: screenTexture, camera: nil, size: outputSize)
+        var layers: [Int: FrameState.Texture] = [:]
+        let players = layerTracks.mapValues { isolatedVideoPlayer($0, duration: composition.duration) }
+        for (lane, decoder) in players {
+            while decoder.player.currentItem?.status == .unknown { try await Task.sleep(for: .milliseconds(10)) }
+            _ = await decoder.player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+            if let buffer = decoder.output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) { layers[lane] = textureCache.texture(from: buffer) }
+        }
+        var state = makeFrameState(model: model, outputTime: outputTime, screen: screenTexture, camera: nil, size: outputSize, layerTextures: layers, layerTransforms: layerTransforms)
         state.view = .identity   // T-415: the un-zoomed frame, same override `PreviewView.draw` applies
         state.prevView = .identity
         compositor.render(state, to: target, commandBuffer: commandBuffer)

@@ -35,6 +35,10 @@ final class PreviewView: MTKView {
     private var cameraPlayer: AVPlayer?
     private var cameraOutput: AVPlayerItemVideoOutput?
     private var lastCameraPixelBuffer: CVPixelBuffer?
+    private var layerPlayers: [Int: (player: AVPlayer, output: AVPlayerItemVideoOutput, last: CVPixelBuffer?, block: String?)] = [:]
+    private var layerObservations: [NSKeyValueObservation] = []
+    private var layerTransforms: [String: CGAffineTransform] = [:]
+    private var lastVideoLayers: [LayerBlock] = []
 
     private var isSeeking = false
     private var pendingSeekTime: Double?
@@ -106,6 +110,7 @@ final class PreviewView: MTKView {
         self.model = model
         self.lastClips = model.project.clips
         self.lastCameraClips = model.project.cameraClips
+        self.lastVideoLayers = model.project.layers.filter { $0.kind == .video }
         self.lastWindowShots = model.project.windowShots
         self.lastAudioClips = model.project.audioClips
         self.lastAudioTracks = model.project.audioTracks
@@ -190,6 +195,7 @@ final class PreviewView: MTKView {
     override var acceptsFirstResponder: Bool { true }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { pause() }
         if newWindow == nil, model.voiceover.preview === self { model.voiceover.discard() }
         super.viewWillMove(toWindow: newWindow)
     }
@@ -259,6 +265,7 @@ final class PreviewView: MTKView {
         let finished = await player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         guard finished else { throw CancellationError() }
         _ = await cameraPlayer?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        for decoder in layerPlayers.values { _ = await decoder.player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) }
         model.playhead = time
         needsDisplay = true
     }
@@ -270,6 +277,10 @@ final class PreviewView: MTKView {
         cameraPlayer?.automaticallyWaitsToMinimizeStalling = false
         player.setRate(1, time: CMTime(seconds: time, preferredTimescale: 600), atHostTime: host)
         cameraPlayer?.setRate(1, time: CMTime(seconds: time, preferredTimescale: 600), atHostTime: host)
+        for decoder in layerPlayers.values {
+            decoder.player.automaticallyWaitsToMinimizeStalling = false
+            decoder.player.setRate(1, time: CMTime(seconds: time, preferredTimescale: 600), atHostTime: host)
+        }
         lastClickCheckSourceTime = model.timeMap.sourceTime(atOutput: time)
         model.isPlaying = true
         startDisplayLink()
@@ -284,6 +295,7 @@ final class PreviewView: MTKView {
         player?.isMuted = false
         player?.automaticallyWaitsToMinimizeStalling = true
         cameraPlayer?.automaticallyWaitsToMinimizeStalling = true
+        for decoder in layerPlayers.values { decoder.player.automaticallyWaitsToMinimizeStalling = true }
     }
     var voiceoverMonitoringMuted: Bool { player?.isMuted == true }
 
@@ -318,19 +330,26 @@ final class PreviewView: MTKView {
 
     private func performPendingSeek() {
         guard let t = pendingSeekTime, let player else { pendingSeekTime = nil; return }
+        guard let item = player.currentItem, item.status == .readyToPlay else { return }
         pendingSeekTime = nil
         isSeeking = true
         let time = CMTime(seconds: t, preferredTimescale: 600)
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            guard let self else { return }
-            self.isSeeking = false
-            self.needsDisplay = true
-            if self.pendingSeekTime != nil { self.performPendingSeek() }
+            DispatchQueue.main.async {
+                guard let self, self.player?.currentItem === item else { return }
+                self.isSeeking = false
+                self.needsDisplay = true
+                if self.pendingSeekTime != nil { self.performPendingSeek() }
+            }
         }
         // Best-effort: the camera bubble only needs to be roughly in sync, not gate the main seek's
         // completion callback (AC-ED-2 parity is graded on the screen path; export reads camera
         // frame-accurately off its own reader, T-505).
         cameraPlayer?.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        for lane in layerPlayers.keys {
+            layerPlayers[lane]?.last = nil
+            layerPlayers[lane]?.player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in self?.needsDisplay = true }
+        }
     }
 
     private func setRate(_ rate: Float) {
@@ -343,12 +362,14 @@ final class PreviewView: MTKView {
         model.isPlaying = true
         player.rate = rate
         cameraPlayer?.rate = rate
+        for decoder in layerPlayers.values { decoder.player.rate = rate }
         startDisplayLink()
     }
 
     private func pause() {
         player?.pause()
         cameraPlayer?.pause()
+        for decoder in layerPlayers.values { decoder.player.pause() }
         model.isPlaying = false
         stopDisplayLink()
         needsDisplay = true
@@ -463,8 +484,13 @@ final class PreviewView: MTKView {
                     return timing != previous
                 }
                 let mixChanged = audio != self.lastAudioClips || tracks != self.lastAudioTracks
+                let videos = self.model.project.layers.filter { $0.kind == .video }
+                let videoChanged = videos.count != self.lastVideoLayers.count || zip(videos, self.lastVideoLayers).contains {
+                    $0.id != $1.id || $0.file != $1.file || $0.start != $1.start || $0.end != $1.end || $0.mediaStart != $1.mediaStart || $0.track != $1.track
+                }
+                self.lastVideoLayers = videos
                 let rebuild = clips != self.lastClips || self.model.project.cameraClips != self.lastCameraClips
-                    || self.model.project.windowShots != self.lastWindowShots || timingChanged
+                    || self.model.project.windowShots != self.lastWindowShots || timingChanged || videoChanged
                     || tracks.map(\.id) != self.lastAudioTracks.map(\.id) || self.playbackDuration != self.lastDuration
                 self.lastAudioClips = audio; self.lastAudioTracks = tracks; self.lastDuration = self.playbackDuration
                 if rebuild {
@@ -550,6 +576,7 @@ final class PreviewView: MTKView {
         player = nil
         liveAudioTracks = []
         cameraPlayer = nil
+        layerPlayers.removeAll(); layerObservations.removeAll(); layerTransforms.removeAll()
         screenOutput = nil
         cameraOutput = nil
         lastScreenPixelBuffer = nil
@@ -578,11 +605,11 @@ final class PreviewView: MTKView {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let (composition, _, tracks) = try await makeComposition(package: packageURL, project: project)
+                let (composition, _, tracks, cameraTrack, layerTracks, transforms) = try await makeComposition(package: packageURL, project: project)
                 await MainActor.run {
                     guard self.compositionRevision == revision else { return }
                     self.liveAudioTracks = tracks
-                    self.attach(composition: composition, audioMix: makeAudioMix(project: self.model.project, audioTracks: tracks), resumeSeconds: resumeSeconds)
+                    self.attach(composition: composition, audioMix: makeAudioMix(project: self.model.project, audioTracks: tracks), resumeSeconds: resumeSeconds, cameraTrack: cameraTrack, layerTracks: layerTracks, transforms: transforms)
                 }
             } catch {
                 await MainActor.run {
@@ -600,8 +627,8 @@ final class PreviewView: MTKView {
         item.audioMix = makeAudioMix(project: model.project, audioTracks: liveAudioTracks)
     }
 
-    private func attach(composition: AVMutableComposition, audioMix: AVAudioMix, resumeSeconds: Double) {
-        let item = AVPlayerItem(asset: composition)
+    private func attach(composition: AVMutableComposition, audioMix: AVAudioMix, resumeSeconds: Double, cameraTrack: AVAssetTrack?, layerTracks: [Int: AVMutableCompositionTrack], transforms: [String: CGAffineTransform]) {
+        let item = AVPlayerItem(asset: screenPlaybackComposition(composition))
         item.audioMix = audioMix
         item.audioTimePitchAlgorithm = .spectral
 
@@ -614,7 +641,27 @@ final class PreviewView: MTKView {
         lastScreenPixelBuffer = nil
         pendingFrameRetries = 0
 
-        attachCamera(from: composition)
+        attachCamera(track: cameraTrack, duration: composition.duration)
+        layerObservations.removeAll()
+        for decoder in layerPlayers.values { decoder.player.pause() }
+        layerPlayers = layerTracks.mapValues { track in
+            let decoder = isolatedVideoPlayer(track, duration: composition.duration)
+            return (decoder.player, decoder.output, nil, nil)
+        }
+        layerTransforms = transforms
+        lastVideoLayers = model.project.layers.filter { $0.kind == .video }
+        for (lane, decoder) in layerPlayers {
+            if let item = decoder.player.currentItem {
+                layerObservations.append(item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+                    DispatchQueue.main.async {
+                        guard let self, self.layerPlayers[lane]?.player.currentItem === item, item.status == .readyToPlay else { return }
+                        let time = CMTime(seconds: self.model.playhead, preferredTimescale: 600)
+                        self.layerPlayers[lane]?.player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in self?.needsDisplay = true }
+                        if self.model.isPlaying { self.layerPlayers[lane]?.player.rate = self.player?.rate ?? 1 }
+                    }
+                })
+            }
+        }
 
         // A freshly attached item has no decoded frame yet — `copyPixelBuffer` returns nil until
         // one exists, so drawing right away (or on a bare `readyToPlay`, which doesn't guarantee the
@@ -629,7 +676,9 @@ final class PreviewView: MTKView {
             }
         }
 
+        isSeeking = false; pendingSeekTime = nil
         if let player {
+            player.currentItem?.cancelPendingSeeks()
             player.replaceCurrentItem(with: item)
         } else {
             let newPlayer = AVPlayer(playerItem: item)
@@ -642,24 +691,18 @@ final class PreviewView: MTKView {
 
     private func seekToShowCurrentFrame(resumeSeconds: Double) {
         guard !model.voiceover.isActive else { return }
-        guard let player else { return }
-        let time = CMTime(seconds: model.isPlaying ? resumeSeconds : model.playhead, preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            self?.needsDisplay = true
-        }
-        cameraPlayer?.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        performSeek(to: model.isPlaying ? resumeSeconds : model.playhead)
     }
 
     /// T-502: `composition`'s video track[1] (camera), isolated into its own single-track
     /// composition/player since `AVPlayerItemVideoOutput` can't select a track out of a shared item
     /// (`FrameSource.isolateTrack`). No-op when the project has no second video track.
-    private func attachCamera(from composition: AVMutableComposition) {
-        let videoTracks = composition.tracks(withMediaType: .video)
-        guard videoTracks.count > 1 else {
+    private func attachCamera(track: AVAssetTrack?, duration: CMTime) {
+        guard let track else {
             cameraPlayer = nil; cameraOutput = nil; lastCameraPixelBuffer = nil
             return
         }
-        let cameraComposition = isolateTrack(videoTracks[1], duration: composition.duration)
+        let cameraComposition = isolateTrack(track, duration: duration)
         let item = AVPlayerItem(asset: cameraComposition)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -710,7 +753,7 @@ final class PreviewView: MTKView {
         // AC-TL-7: while paused, a non-nil `hoverTime` overrides what's DISPLAYED (`FrameState` is
         // still a pure function of this one output time — `model.playhead` itself is untouched).
         let displayTime = (!model.isPlaying ? hoverTime : nil) ?? model.playhead
-        var state = makeFrameState(model: model, outputTime: displayTime, screen: screenTexture, camera: cameraTexture, size: viewportRect.size)
+        var state = makeFrameState(model: model, outputTime: displayTime, screen: screenTexture, camera: cameraTexture, size: viewportRect.size, layerTextures: currentLayerTextures(at: displayTime), layerTransforms: layerTransforms)
 
         // T-415/T-601: a `.manual` zoom OR a mask selected ⇒ show the UN-zoomed frame (SPEC §6.6) so
         // whichever overlay is live (`zoomTargetView`/`maskOverlayView`) is drawn against the same
@@ -747,6 +790,14 @@ final class PreviewView: MTKView {
             guard Date() < deadline else {
                 throw NSError(domain: "Recorder.PreviewSnapshot", code: 1, userInfo: [NSLocalizedDescriptionKey: "Preview did not settle: seeking=\(isSeeking), screen time=\(player?.currentTime().seconds ?? -1), camera time=\(cameraPlayer?.currentTime().seconds ?? -1), screen buffer=\(lastScreenPixelBuffer != nil), camera buffer=\(lastCameraPixelBuffer != nil)"])
             }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let activeLanes = Set(model.project.layerStates(atOutput: time).filter { $0.block.kind == .video && layerTransforms[$0.block.file] != nil }.map { $0.block.track })
+        while !activeLanes.allSatisfy({ lane in
+            guard let decoder = layerPlayers[lane] else { return false }
+            return decoder.player.currentItem?.status == .readyToPlay && abs(decoder.player.currentTime().seconds - time) <= 0.002
+        }) || !activeLanes.isSubset(of: Set(currentLayerTextures(at: time).keys)) {
+            guard Date() < deadline else { throw CocoaError(.fileReadUnknown) }
             try await Task.sleep(for: .milliseconds(20))
         }
         return try await captureRenderedFrame()
@@ -815,6 +866,19 @@ final class PreviewView: MTKView {
             lastCameraPixelBuffer = buffer
         }
         return lastCameraPixelBuffer
+    }
+
+    private func currentLayerTextures(at time: Double) -> [Int: FrameState.Texture] {
+        var textures: [Int: FrameState.Texture] = [:]
+        for layer in model.project.layerStates(atOutput: time) where layer.block.kind == .video {
+            let lane = layer.block.track
+            guard var decoder = layerPlayers[lane] else { continue }
+            if decoder.block != layer.block.id { decoder.last = nil; decoder.block = layer.block.id }
+            if let buffer = decoder.output.copyPixelBuffer(forItemTime: CMTime(seconds: time, preferredTimescale: 600), itemTimeForDisplay: nil) { decoder.last = buffer }
+            if let buffer = decoder.last { textures[lane] = textureCache.texture(from: buffer) }
+            layerPlayers[lane] = decoder
+        }
+        return textures
     }
 
     // MARK: - Manual zoom target (SPEC §6.6, T-415)
@@ -1007,6 +1071,125 @@ final class PreviewView: MTKView {
 // MARK: - Selftest `hover-preview <package>` (AC-TL-7)
 
 extension PreviewView {
+    @MainActor static func runVideoLayersSelfTest(package: URL) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent("video-layers-" + UUID().uuidString + ".recorder")
+        try FileManager.default.copyItem(at: package, to: copy)
+        var models: [EditorModel] = []
+        defer { models.forEach { $0.saveNow() }; try? FileManager.default.removeItem(at: copy) }
+        let model = try loadEditorModel(package: copy)
+        models.append(model)
+        let media = try await makeComposition(package: copy, project: model.project)
+        try check(Set(media.layerTracks.keys) == [2, 3] && media.cameraTrack != nil, "Explicit camera/layer track mapping")
+        let segments = media.layerTracks[2]!.segments.filter { !$0.isEmpty }
+        try check(segments.count == 2 && abs(segments[0].timeMapping.source.start.seconds - 1) < 0.002 && abs(segments[0].timeMapping.target.start.seconds - 0.5) < 0.002 && abs(segments[0].timeMapping.target.duration.seconds - 4) < 0.002, "Layer composition in-point / 1x timing / lane gaps")
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 640, height: 360), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let view = PreviewView(model: model)
+        window.contentView = view; window.orderFront(nil)
+        defer { window.close() }
+        func color(_ image: CGImage, x: Double = 0.22, y: Double = 0.2) throws -> [UInt8] {
+            guard let pixel = image.cropping(to: CGRect(x: Int(Double(image.width) * x), y: Int(Double(image.height) * y), width: 1, height: 1)),
+                  let context = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw Fail(description: "Video layer pixel") }
+            context.draw(pixel, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            return Array(UnsafeBufferPointer(start: context.data!.assumingMemoryBound(to: UInt8.self), count: 4))
+        }
+        func wait(_ predicate: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(8)
+            while !predicate() {
+                guard Date() < deadline else { throw Fail(description: "Video layer state timed out") }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        var pixel = try color(await view.captureRenderedFrame(atOutput: 0.75))
+        try check(pixel[1] > 220 && pixel[0] < 30 && pixel[2] < 30, "Native video in-point frame: \(pixel)")
+        pixel = try color(await view.captureRenderedFrame(atOutput: 2.25))
+        try check(pixel[2] > 220 && pixel[0] < 30 && pixel[1] < 30, "Native video advances at 1x: \(pixel)")
+        _ = try await view.captureRenderedFrame(atOutput: 0.75)
+        view.hoverTime = 2.25
+        try await wait { !view.isSeeking && abs((view.layerPlayers[2]?.player.currentTime().seconds ?? -1) - 2.25) < 0.002 }
+        pixel = try color(await view.captureRenderedFrame())
+        try check(pixel[2] > 220 && model.playhead == 0.75, "Layer hover must not move the playhead")
+        view.hoverTime = nil
+        pixel = try color(await view.captureRenderedFrame(atOutput: 0.75))
+        try check(pixel[1] > 220, "Backward seek retained a future layer frame")
+        view.player?.isMuted = true
+        view.togglePlayPause()
+        try await Task.sleep(for: .milliseconds(1150))
+        pixel = try color(await view.captureRenderedFrame())
+        try check(model.playhead > 1.6 && pixel[2] > 220, "Live video playback did not advance")
+        view.togglePlayPause()
+        let rotated = try await view.captureRenderedFrame(atOutput: 5)
+        let marker = try color(rotated, x: 0.86, y: 0.1985), body = try color(rotated, x: 0.74, y: 0.1985)
+        try check(marker[0] > 220 && marker[1] > 220 && marker[2] > 220 && body[2] > 220 && body[0] < 30, "Rotated video marker/orientation: \(marker), \(body)")
+        let item = view.currentItemForTest
+        model.edit("Layer rect") { project in
+            if let index = project.layers.firstIndex(where: { $0.kind == .video }) { project.layers[index].rect.x += 0.01; project.layers[index].fadeIn = 0.2 }
+        }
+        try await Task.sleep(for: .milliseconds(80))
+        try check(view.currentItemForTest === item, "Layer styling rebuilt the player item")
+        model.edit("Layer in-point") { project in
+            if let index = project.layers.firstIndex(where: { $0.kind == .video && $0.start == 0.5 }) { project.layers[index].mediaStart = 2 }
+        }
+        try await wait { view.currentItemForTest !== item }
+        pixel = try color(await view.captureRenderedFrame(atOutput: 0.75))
+        try check(pixel[2] > 220, "Video media in-point edit did not rebuild playback")
+        var withoutCamera = try Project.load(from: package.appendingPathComponent("project.json"))
+        withoutCamera.source.hasCamera = false; withoutCamera.cameraClips = []
+        let noCameraModel = EditorModel(packageURL: copy, project: withoutCamera, events: model.events)
+        models.append(noCameraModel)
+        let noCamera = PreviewView(model: noCameraModel)
+        window.contentView = noCamera
+        pixel = try color(await noCamera.captureRenderedFrame(atOutput: 0.75))
+        try check(noCamera.cameraPlayer == nil && noCamera.layerPlayers.count == 2 && pixel[1] > 220, "A layer video was mistaken for the missing camera")
+        let twoLanes = noCameraModel.project
+        noCameraModel.edit("Four decoder lanes") { project in
+            project.source.hasCamera = true; project.cameraClips = model.project.cameraClips
+            if let index = project.layers.firstIndex(where: { $0.kind == .video && $0.track == 3 }) {
+                project.layers[index].start = 0.5; project.layers[index].end = 4.5; project.layers[index].mediaStart = 1
+            }
+            let original = project.layers.first { $0.kind == .video }!
+            for lane in [4, 5] {
+                var extra = original; extra.id = UUID().uuidString; extra.track = lane
+                extra.rect = NormRect(x: lane == 4 ? 0.02 : 0.22, y: 0.72, w: 0.15, h: 0.16)
+                project.layers.append(extra)
+            }
+            project.layers.sort { $0.start < $1.start }
+        }
+        _ = try await noCamera.captureRenderedFrame(atOutput: 0.75)
+        try check(noCamera.cameraPlayer != nil && noCamera.layerPlayers.count == 4 && noCamera.currentLayerTextures(at: 0.75).count == 4, "Four simultaneous video lanes plus camera did not decode")
+        let fourLanes = noCameraModel.project, steps = noCameraModel.undoStepCount
+        let fileCount = try FileManager.default.contentsOfDirectory(atPath: copy.appendingPathComponent("media").path).count
+        var refused = false
+        do { _ = try await noCameraModel.importMedia(copy.appendingPathComponent("media/video.mov"), atOutput: 0.75, track: 9) }
+        catch { refused = error.localizedDescription.contains("four layer lanes") }
+        try check(refused && noCameraModel.project == fourLanes && noCameraModel.undoStepCount == steps && (try FileManager.default.contentsOfDirectory(atPath: copy.appendingPathComponent("media").path)).count == fileCount, "Fifth video lane import must refuse without changing project/files/undo")
+        noCameraModel.edit("Restore two lanes") { $0 = twoLanes }
+        _ = try await noCamera.captureRenderedFrame(atOutput: 0.75)
+        let previous = noCamera.currentItemForTest
+        noCameraModel.edit("Missing later video") { project in
+            if let index = project.layers.firstIndex(where: { $0.kind == .video && $0.start == 6 }) { project.layers[index].file = "media/missing-video.mov" }
+        }
+        try await wait { noCamera.currentItemForTest !== previous }
+        _ = try await noCamera.captureRenderedFrame(atOutput: 6.75)
+        let state = makeFrameState(model: noCameraModel, outputTime: 6.75, screen: nil, camera: nil, size: CGSize(width: 640, height: 360), layerTextures: noCamera.currentLayerTextures(at: 6.75), layerTransforms: noCamera.layerTransforms)
+        try check(state.layers.first { $0.block.file == "media/missing-video.mov" }?.texture == nil, "Missing video reused an earlier lane frame")
+        let protected = copy.appendingPathComponent("existing-video.mp4"), existing = Data("preserve existing video".utf8)
+        try existing.write(to: protected)
+        var invalid = noCameraModel.project
+        invalid.layers[invalid.layers.firstIndex { $0.kind == .video }!].file = "../outside.mov"
+        let invalidModel = EditorModel(packageURL: copy, project: invalid, events: model.events)
+        var rejected = false
+        do { try await Exporter(model: invalidModel, settings: ExportSettings(shortEdge: 180, fps: 30), destination: protected).run() }
+        catch FrameSourceError.invalidMediaPath { rejected = true }
+        try check(rejected && (try Data(contentsOf: protected)) == existing, "Invalid layer path replaced an existing export")
+        noCamera.player?.isMuted = true; noCamera.togglePlayPause()
+        window.contentView = nil
+        try check(!noCameraModel.isPlaying && noCamera.layerPlayers.values.allSatisfy { $0.player.rate == 0 }, "Detached preview left video decoders playing")
+        print("video-layers: explicit tracks, in-point/gaps/1x, native playback/hover/backward seeks, rotation, style-vs-timing rebuilds and camera-less/missing media verified")
+    }
+
     /// Drives the real `AVPlayer` seek path (not a mock) over a package with real media: `hoverTime`
     /// shows a different frame than `model.playhead` without moving it, and `nil` seeks back.
     @MainActor

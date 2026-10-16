@@ -324,13 +324,15 @@ T-640 merges; T-648 needs T-643). T-650 last.
 - [x] **T-647 Image layer render pass**
   - Do: §4.6 for images: texture cache, Card/Full/Corner/Free rect, motion, backdrop dim/blur, aboveCamera ordering;
     FrameState gains `layers` (active blocks + progress + texture).
-  - Verify: `--selftest make-layers-fixture` (images only for now) + `parity` maxDelta=0; `editor-png` mid-fade inspected;
+  - Verify: `--selftest make-layers-fixture` + `parity` maxDelta=0; `editor-png` mid-fade inspected;
     `export`; `make test FILTER=layerRendering` (connected timing, fade/motion and lane order).
-- [ ] **T-648 Video layer playback**
+- [x] **T-648 Video layer playback**
   - Do: §4.6 video: one composition track per layer lane, preview via `isolateTrack` players, export via per-lane reader
     + `FrameHold`; 4-lane ceiling.
   - Verify: `make-layers-fixture` gains a video layer with in-point > 0; `parity` maxDelta=0 (AC-LY-1); `export` decodes
-    the layer frames at the right times; `audio-lanes` with the layer's sound detached and moved.
+    the layer frames at the right times; `audio-lanes` with the layer's sound detached and moved;
+    `make test FILTER=layerBlocks` covers four-lane reuse/refusal. The fixture also checks native scrubbing/playback,
+    rotation, four simultaneous layer decoders plus camera, fifth-lane import refusal and existing-export preservation.
 - [ ] **T-649 Layer inspector + direct manipulation**
   - Do: LayerPanel; `SelectionRectView` on the selected layer in `PreviewView`; layer context menu incl. Detach Audio.
   - Verify: `inspector-panels`; new selftest `layer-rect` (drag, resize, Esc reverts, one undo); HUMAN: judge Card + Dim

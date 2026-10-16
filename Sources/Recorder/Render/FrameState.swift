@@ -14,6 +14,7 @@ struct FrameState {
         var luma: MTLTexture
         var chroma: MTLTexture?
         var pixelBuffer: CVPixelBuffer?
+        var preferredTransform: CGAffineTransform = .identity
         init(luma: MTLTexture, chroma: MTLTexture? = nil, pixelBuffer: CVPixelBuffer? = nil) {
             self.luma = luma; self.chroma = chroma; self.pixelBuffer = pixelBuffer
         }
@@ -65,7 +66,7 @@ struct FrameState {
 /// `FrameState(t_out)` formula: `prevView` samples the camera path `timeScale/60` source seconds (1/60 s of output) earlier
 /// (for motion blur, T-501), not through `TimeMap` a second time.
 @MainActor
-func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.Texture?, camera: FrameState.Texture?, size: CGSize) -> FrameState {
+func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.Texture?, camera: FrameState.Texture?, size: CGSize, layerTextures: [Int: FrameState.Texture] = [:], layerTransforms: [String: CGAffineTransform] = [:]) -> FrameState {
     let sourceTime = model.timeMap.sourceTime(atOutput: outputTime)
     let view = model.cameraPath.sample(atSource: sourceTime)
     let clip = model.project.clipIndex(atOutput: outputTime).map { model.project.clips[$0] }
@@ -89,7 +90,14 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
     return FrameState(outputSize: size, screen: videoVisible ? screen : nil, camera: cameraVisible ? camera : nil, view: view, prevView: prevView, cursor: cursor,
                        layoutKind: layoutKind, layoutAmount: layoutAmount, videoOpacity: model.project.videoOpacity(atOutput: outputTime), sourceTime: sourceTime,
                        keyChip: inTimeline ? keyChip : nil, texts: inTimeline ? texts : [],
-                       layers: model.project.layerStates(atOutput: outputTime).map { FrameState.Layer(block: $0.block, opacity: $0.opacity, progress: $0.progress, rect: $0.rect) },
+                       layers: model.project.layerStates(atOutput: outputTime).map { sample in
+                           var layer = FrameState.Layer(block: sample.block, opacity: sample.opacity, progress: sample.progress, rect: sample.rect)
+                           if layer.block.kind == .video, let transform = layerTransforms[layer.block.file] {
+                               layer.texture = layerTextures[layer.block.track]
+                               layer.texture?.preferredTransform = transform
+                           }
+                           return layer
+                       },
                        project: model.project)
 }
 

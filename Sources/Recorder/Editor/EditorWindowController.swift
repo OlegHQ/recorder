@@ -399,7 +399,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let outputSize = compositor.outputSize(for: project, longEdge: longEdge)
         let width = Int(outputSize.width), height = Int(outputSize.height)
 
-        let (composition, _, _) = try await makeComposition(package: packageURL, project: project)
+        let (composition, _, _, cameraTrack, layerTracks, layerTransforms) = try await makeComposition(package: packageURL, project: project)
         guard let screenTrack = composition.tracks(withMediaType: .video).first else {
             throw RenderFail(description: "no video track")
         }
@@ -409,6 +409,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
             kCVPixelBufferMetalCompatibilityKey as String: true,
         ])
         reader.add(readerOutput)
+        let cameraOutput = cameraTrack.map { AVAssetReaderTrackOutput(track: $0, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelBufferMetalCompatibilityKey as String: true]) }
+        if let cameraOutput { reader.add(cameraOutput) }
+        let layerOutputs = try layerVideoReaderOutputs(reader: reader, tracks: layerTracks, settings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelBufferMetalCompatibilityKey as String: true])
         guard reader.startReading() else {
             throw RenderFail(description: "reader failed to start: \(String(describing: reader.error))")
         }
@@ -416,15 +419,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         // Sequential decode up to `outputTime` (`AVAssetReader` has no random access) — the same
         // "hold the last sample at/before the target, peek one ahead" scan `FrameHold` in
         // `Render/Exporter.swift` uses for the export loop.
-        var current: CVPixelBuffer?
-        while let sample = readerOutput.copyNextSampleBuffer() {
-            let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
-            guard pts <= outputTime else { break }
-            current = CMSampleBufferGetImageBuffer(sample)
-        }
+        let current = FrameHold(output: readerOutput).imageBuffer(upTo: outputTime)
         let screenTexture = current.flatMap { textureCache.texture(from: $0) }
-
-        let state = makeFrameState(model: model, outputTime: outputTime, screen: screenTexture, camera: nil, size: outputSize)
+        let cameraTexture = cameraOutput.flatMap { FrameHold(output: $0).imageBuffer(upTo: outputTime) }.flatMap { textureCache.texture(from: $0) }
+        let layers = layerOutputs.compactMapValues { FrameHold(output: $0).imageBuffer(upTo: outputTime).flatMap { textureCache.texture(from: $0) } }
+        let state = makeFrameState(model: model, outputTime: outputTime, screen: screenTexture, camera: cameraTexture, size: outputSize, layerTextures: layers, layerTransforms: layerTransforms)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared

@@ -10,6 +10,7 @@ public enum Edge: Sendable {
 /// `assert`. The x-axis callers work in is *output* time; conversion to *source* time (where
 /// clips live) goes only through `TimeMap`. See docs/SPEC.md §7.4.
 public extension Project {
+    var videoLayerLanes: [Int] { Set(layers.filter { $0.kind == .video }.map(\.track)).sorted() }
     private func importedAudioTrack(start: Double, end: Double) -> Int {
         for track in audioTracks.indices where audioTracks[track].name.hasPrefix("Audio ") {
             if !audioClips.contains(where: { audio in
@@ -55,6 +56,15 @@ public extension Project {
             guard layer.track == track, let range = outputRange(layer, connected: true) else { return false }
             return range.start < time + length - 1e-9 && range.end > time + 1e-9
         }) { track += 1 }
+        if kind == .video, videoLayerLanes.count >= 4, !videoLayerLanes.contains(track) {
+            guard let available = videoLayerLanes.first(where: { lane in
+                !layers.contains { layer in
+                    guard layer.track == lane, let range = outputRange(layer, connected: true) else { return false }
+                    return range.start < time + length - 1e-9 && range.end > time + 1e-9
+                }
+            }) else { self = before; return nil }
+            track = available
+        }
         let start = TimeMap(clips).sourceTime(atOutput: time)
         let id = UUID()
         layers.append(LayerBlock(id: id.uuidString, kind: kind, start: start, end: start + length, file: file, track: track, rect: rect))
@@ -1516,6 +1526,8 @@ public extension Project {
                 }
             } else if audioClip.layer != nil { return "audio \(index) layer without layer link" }
         }
+        // shortcut: four video decoder lanes, merge non-overlapping lanes into fewer tracks to raise the limit.
+        guard videoLayerLanes.count <= 4 else { return "Only four layer lanes with video are supported" }
         var layerEnds: [Int: Double] = [:]
         let map = TimeMap(clips)
         for (index, layer) in layers.enumerated() {

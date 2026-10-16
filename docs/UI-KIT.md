@@ -338,7 +338,15 @@ Dim and screen/cursor-only blur sit below layer lanes; camera, above-camera imag
 ImageIO decodes bounded, orientation-correct sRGB textures per file/resolution; transparent PNGs retain their alpha,
 and missing/out-of-package files render neither an image nor a backdrop. `make-layers-fixture` covers these states;
 `editor-png <package> <png> [width height] --time <seconds>` captures the actual settled native drawable at a chosen
-output time. Video-layer playback and the detailed layer inspector remain T-648/T-649.
+output time.
+
+Video layers use one isolated player/output per occupied video lane and share the editor's output-time seeks,
+playback and voiceover stop/start. Each file's in-point and orientation survive composition; video sound remains
+on its linked audio lane, never duplicated through the muted layer players. Styling redraws the current item;
+file/timing/lane changes rebuild it. A missing file cannot reuse an earlier clip's frame from the same lane.
+Four video lanes are supported alongside screen/camera. Imports reuse free video lanes at that limit or show
+an alert without committing a file/undo entry. MP4, GIF, frame copy and native preview use the same layer samples.
+The detailed layer inspector/direct manipulation remains T-649; Intel decoder performance is not measured here.
 
 Project opening preserves the editor’s layout from the first frame: top bar, preview status, inspector and timeline. Preparation happens off the UI thread, with no artificial minimum wait. Ready controls reveal over 160 ms; Reduce Motion switches immediately. Preview loading remains labelled until the first video frame arrives.
 

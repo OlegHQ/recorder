@@ -72,3 +72,21 @@ import Testing
     project.moveLayer(id, toOutput: 12)
     #expect(project.exportDuration == 21 && project.checkInvariants() == nil)
 }
+
+@Test func layerBlocksVideoDecoderBudgetReusesLanesOrRefuses() throws {
+    var project = Project(source: Source(duration: 10), clips: [Clip(sourceStart: 0, sourceEnd: 10)])
+    for track in 0..<4 {
+        let added = project.addLayer(kind: .video, file: "media/video-\(track).mov", atOutput: 0, duration: 2, rect: NormRect(), track: track)
+        #expect(added != nil)
+    }
+    let original = project
+    let refused = project.addLayer(kind: .video, file: "media/fifth.mov", atOutput: 0, duration: 2, rect: NormRect())
+    #expect(refused == nil && project == original)
+    let reused = project.addLayer(kind: .video, file: "media/later.mov", atOutput: 3, duration: 2, rect: NormRect(), track: 9)
+    #expect(reused != nil && project.layers.last?.track == 0 && project.videoLayerLanes == [0, 1, 2, 3])
+    let beforeMove = project
+    project.moveLayer(UUID(uuidString: project.layers[0].id)!, toOutput: 0, track: 7)
+    #expect(project == beforeMove)
+    let image = project.addLayer(kind: .image, file: "media/image.png", atOutput: 0, duration: 2, rect: NormRect())
+    #expect(image != nil && project.layers.first { $0.id == image?.uuidString }?.track == 4 && project.checkInvariants() == nil)
+}

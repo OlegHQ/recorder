@@ -261,9 +261,11 @@ final class Compositor {
         guard let texture, let pixelBuffer = texture.pixelBuffer else { return texture }
         let source = CIImage(cvPixelBuffer: pixelBuffer)
         // Core Image renders bottom-up; our Metal UVs address the top-left row.
-        let image = source.transformed(by: CGAffineTransform(translationX: 0, y: source.extent.height).scaledBy(x: 1, y: -1))
+        var image = source.transformed(by: CGAffineTransform(translationX: 0, y: source.extent.height).scaledBy(x: 1, y: -1))
+        image = image.transformed(by: texture.preferredTransform)
+        image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
-            width: texture.luma.width, height: texture.luma.height, mipmapped: false)
+            width: Int(image.extent.width.rounded()), height: Int(image.extent.height.rounded()), mipmapped: false)
         descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
         guard let output = device.makeTexture(descriptor: descriptor) else { return nil }
         colorContext.render(image, to: output, commandBuffer: commandBuffer,
@@ -1040,8 +1042,8 @@ extension Compositor {
         let model = try loadEditorModel(package: packageURL)
         let project = model.project
 
-        let (composition, audioMix, _) = try await makeComposition(package: packageURL, project: project)
-        let item = AVPlayerItem(asset: composition)
+        let (composition, audioMix, _, cameraTrack, layerTracks, layerTransforms) = try await makeComposition(package: packageURL, project: project)
+        let item = AVPlayerItem(asset: screenPlaybackComposition(composition))
         item.audioMix = audioMix
         item.audioTimePitchAlgorithm = .spectral
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
@@ -1074,9 +1076,8 @@ extension Compositor {
         // T-502: camera, decoded the same way `PreviewView.attachCamera` does — `isolateTrack` since
         // `AVPlayerItemVideoOutput` can't select a track out of the shared composition.
         var cameraTexture: FrameState.Texture?
-        let videoTracks = composition.tracks(withMediaType: .video)
-        if videoTracks.count > 1 {
-            let cameraComposition = isolateTrack(videoTracks[1], duration: composition.duration)
+        if let cameraTrack {
+            let cameraComposition = isolateTrack(cameraTrack, duration: composition.duration)
             let cameraItem = AVPlayerItem(asset: cameraComposition)
             let cameraOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -1106,7 +1107,14 @@ extension Compositor {
             throw SelfTestArgError.usage("failed to set up Metal resources")
         }
 
-        let state = makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
+        var layers: [Int: FrameState.Texture] = [:]
+        let players = layerTracks.mapValues { isolatedVideoPlayer($0, duration: composition.duration) }
+        for (lane, decoder) in players {
+            while decoder.player.currentItem?.status == .unknown { try await Task.sleep(for: .milliseconds(10)) }
+            _ = await decoder.player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+            if let buffer = decoder.output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) { layers[lane] = textureCache.texture(from: buffer) }
+        }
+        let state = makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize, layerTextures: layers, layerTransforms: layerTransforms)
         compositor.render(state, to: target, commandBuffer: commandBuffer)
         try await commandBuffer.commitAndWait()
 

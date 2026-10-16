@@ -21,7 +21,7 @@ enum VideoColor {
 /// Shared preview/export composition; audio track indices match `Project.audioTracks`.
 /// `micURL` overrides only `mic.m4a` for export cleanup. Assets stay alive through all insertions.
 func makeComposition(package: URL, project: Project, micURL: URL? = nil) async throws
-    -> (composition: AVMutableComposition, audioMix: AVMutableAudioMix, audioTracks: [AVMutableCompositionTrack]) {
+    -> (composition: AVMutableComposition, audioMix: AVMutableAudioMix, audioTracks: [AVMutableCompositionTrack], cameraTrack: AVMutableCompositionTrack?, layerTracks: [Int: AVMutableCompositionTrack], layerTransforms: [String: CGAffineTransform]) {
     guard project.clips.allSatisfy({ $0.timeScale.isFinite && $0.timeScale > 0 && $0.outputDuration.isFinite && $0.outputDuration > 0 }),
           project.audioTracks.allSatisfy({ $0.volume.isFinite && (0...2).contains($0.volume) }) else {
         throw FrameSourceError.invalidProject("Invalid video clock or track volume")
@@ -38,7 +38,7 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
     // alive in an outer scope, fails when it's only reachable via its already-extracted track).
     var screenAssetKeepAlive: AVURLAsset?
     var cameraAssetKeepAlive: AVURLAsset?
-    var audioAssets: [String: AVURLAsset] = [:]
+    var mediaAssets: [String: AVURLAsset] = [:]
     var audioSources: [String: AVAssetTrack] = [:]
 
     let screenAsset = AVURLAsset(url: package.appendingPathComponent("screen.mov"))
@@ -131,6 +131,36 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
     }
 
     let packageRoot = package.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+    guard project.videoLayerLanes.count <= 4 else { throw FrameSourceError.invalidProject("Only four layer lanes with video are supported") }
+    var layerTracks: [Int: AVMutableCompositionTrack] = [:]
+    var layerTransforms: [String: CGAffineTransform] = [:]
+    let map = TimeMap(project.clips)
+    for lane in project.videoLayerLanes {
+        var previousEnd = 0.0
+        for layer in project.layers.filter({ $0.kind == .video && $0.track == lane }).sorted(by: { $0.start < $1.start }) {
+            guard lane >= 0, layer.start.isFinite, layer.end.isFinite, layer.end - layer.start >= 0.5 - 1e-9,
+                  layer.mediaStart.isFinite, layer.mediaStart >= 0, let output = map.outputTime(atSource: layer.start), output >= previousEnd - 1e-9 else {
+                throw FrameSourceError.invalidProject("Invalid video layer \(layer.id)")
+            }
+            previousEnd = output + layer.end - layer.start
+            let url = package.appendingPathComponent(layer.file).standardizedFileURL.resolvingSymlinksInPath()
+            guard layer.file.hasPrefix("media/"), !layer.file.split(separator: "/").contains(".."), url.path.hasPrefix(packageRoot) else { throw FrameSourceError.invalidMediaPath(layer.file) }
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let asset = mediaAssets[layer.file] ?? AVURLAsset(url: url)
+            mediaAssets[layer.file] = asset
+            guard let source = try await asset.loadTracks(withMediaType: .video).first,
+                  layer.mediaStart + layer.end - layer.start <= (try await asset.load(.duration).seconds) + 1.0 / 600 else {
+                throw FrameSourceError.invalidProject("Video layer exceeds its media: \(layer.file)")
+            }
+            if layerTracks[lane] == nil {
+                guard let track = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { throw FrameSourceError.trackCreationFailed }
+                layerTracks[lane] = track
+            }
+            let range = CMTimeRange(start: CMTime(seconds: layer.mediaStart, preferredTimescale: timescale), duration: CMTime(seconds: layer.end - layer.start, preferredTimescale: timescale))
+            try layerTracks[lane]!.insertTimeRange(range, of: source, at: CMTime(seconds: output, preferredTimescale: timescale))
+            layerTransforms[layer.file] = try await source.load(.preferredTransform)
+        }
+    }
     for audio in project.audioClips {
         guard audioTracks.indices.contains(audio.track), audio.start.isFinite, audio.start >= 0,
               audio.end.isFinite, audio.end > audio.start, audio.mediaStart.isFinite, audio.mediaStart >= 0,
@@ -143,8 +173,8 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
         let url = audio.file == "mic.m4a" ? micURL ?? fileURL : fileURL
         guard FileManager.default.fileExists(atPath: url.path) else { continue }
         if audioSources[audio.file] == nil {
-            let asset = AVURLAsset(url: url)
-            audioAssets[audio.file] = asset
+            let asset = mediaAssets[audio.file] ?? AVURLAsset(url: url)
+            mediaAssets[audio.file] = asset
             guard let source = try await asset.loadTracks(withMediaType: .audio).first else {
                 throw FrameSourceError.missingAudioTrack(audio.file)
             }
@@ -168,8 +198,8 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
     if duration > composition.duration {
         composition.insertEmptyTimeRange(CMTimeRange(start: composition.duration, end: duration))
     }
-    withExtendedLifetime((screenAssetKeepAlive, cameraAssetKeepAlive, audioAssets, windowAssetsKeepAlive)) {}
-    return (composition, makeAudioMix(project: project, audioTracks: audioTracks), audioTracks)
+    withExtendedLifetime((screenAssetKeepAlive, cameraAssetKeepAlive, mediaAssets, windowAssetsKeepAlive)) {}
+    return (composition, makeAudioMix(project: project, audioTracks: audioTracks), audioTracks, cameraTrack, layerTracks, layerTransforms)
 }
 
 /// Gain, fades and track mixing can refresh on the existing player's tracks without rebuilding media.
@@ -209,6 +239,32 @@ func isolateTrack(_ track: AVAssetTrack, duration: CMTime) -> AVMutableCompositi
         try? newTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: track, at: .zero)
     }
     return isolated
+}
+
+func screenPlaybackComposition(_ composition: AVMutableComposition) -> AVMutableComposition {
+    let playback = composition.mutableCopy() as! AVMutableComposition
+    for track in playback.tracks(withMediaType: .video).dropFirst() { playback.removeTrack(track) }
+    if playback.duration < composition.duration { playback.insertEmptyTimeRange(CMTimeRange(start: playback.duration, end: composition.duration)) }
+    return playback
+}
+
+func isolatedVideoPlayer(_ track: AVAssetTrack, duration: CMTime) -> (player: AVPlayer, output: AVPlayerItemVideoOutput) {
+    let item = AVPlayerItem(asset: isolateTrack(track, duration: duration))
+    let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelBufferMetalCompatibilityKey as String: true])
+    item.add(output)
+    let player = AVPlayer(playerItem: item)
+    player.volume = 0; player.actionAtItemEnd = .pause
+    return (player, output)
+}
+
+func layerVideoReaderOutputs(reader: AVAssetReader, tracks: [Int: AVMutableCompositionTrack], settings: [String: Any]) throws -> [Int: AVAssetReaderTrackOutput] {
+    try tracks.mapValues { track in
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { throw FrameSourceError.trackCreationFailed }
+        reader.add(output)
+        return output
+    }
 }
 
 /// Zero-copy `CVPixelBuffer` → `MTLTexture`, cached per-buffer generation by `CVMetalTextureCache`.
@@ -252,7 +308,7 @@ func runCompositionSelfTest(_ args: [String]) async throws {
     guard let packagePath = args.first else { throw SelfTestArgError.usage("composition <package>") }
     let package = URL(fileURLWithPath: packagePath)
     let project = try Project.load(from: package.appendingPathComponent("project.json"))
-    let (composition, _, _) = try await makeComposition(package: package, project: project)
+    let (composition, _, _, _, _, _) = try await makeComposition(package: package, project: project)
 
     let actual = composition.duration.seconds
     let expected = max(TimeMap(project.clips).outputDuration, project.exportDuration)

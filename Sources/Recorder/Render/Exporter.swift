@@ -88,7 +88,7 @@ final class Exporter {
         }
         defer { if let denoiseTempDir { try? FileManager.default.removeItem(at: denoiseTempDir) } }
 
-        let (composition, audioMix, _) = try await makeComposition(package: packageURL, project: project, micURL: micOverrideURL)
+        let (composition, audioMix, _, cameraTrack, layerTracks, layerTransforms) = try await makeComposition(package: packageURL, project: project, micURL: micOverrideURL)
 
         // T-504: "Mouse click sound" — mixed into the export audio at each left `.down` event that
         // survives the clip cuts (export only; the preview plays it live via `NSSound`,
@@ -128,12 +128,13 @@ final class Exporter {
         screenOutput.alwaysCopiesSampleData = false
         reader.add(screenOutput)
         var cameraOutput: AVAssetReaderTrackOutput?
-        if videoTracks.count > 1 {
-            let o = AVAssetReaderTrackOutput(track: videoTracks[1], outputSettings: decodeSettings)
+        if let cameraTrack {
+            let o = AVAssetReaderTrackOutput(track: cameraTrack, outputSettings: decodeSettings)
             o.alwaysCopiesSampleData = false
             reader.add(o)
             cameraOutput = o
         }
+        let layerOutputs = try layerVideoReaderOutputs(reader: reader, tracks: layerTracks, settings: decodeSettings)
         let audioTracks = composition.tracks(withMediaType: .audio).filter { $0.segments.contains { !$0.isEmpty } }
         var audioOutput: AVAssetReaderAudioMixOutput?
         if !audioTracks.isEmpty {
@@ -193,6 +194,7 @@ final class Exporter {
 
         let screenHold = FrameHold(output: screenOutput)
         let cameraHold = cameraOutput.map(FrameHold.init)
+        let layerHolds = layerOutputs.mapValues(FrameHold.init)
         let totalFrames = max(1, Int((outputDuration * Double(settings.fps)).rounded()))
 
         let clock = ContinuousClock()
@@ -239,7 +241,8 @@ final class Exporter {
             let t = Double(n) / Double(settings.fps)
             let screenTexture = screenHold.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) }
             let cameraTexture = cameraHold?.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) }
-            let state = await makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
+            let layers = layerHolds.compactMapValues { $0.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) } }
+            let state = await makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize, layerTextures: layers, layerTransforms: layerTransforms)
 
             guard let pool = adaptor.pixelBufferPool else { throw ExportError.failed("no pixel buffer pool") }
             var pixelBuffer: CVPixelBuffer?
@@ -392,7 +395,7 @@ extension Exporter {
             print("warning: GIF export duration is \(Int(outputDuration))s — SPEC §6.8 recommends keeping GIFs under 60s")
         }
 
-        let (composition, _, _) = try await makeComposition(package: packageURL, project: project)
+        let (composition, _, _, cameraTrack, layerTracks, layerTransforms) = try await makeComposition(package: packageURL, project: project)
 
         guard let device = MTLCreateSystemDefaultDevice(), let commandQueue = device.makeCommandQueue() else {
             throw ExportError.failed("no Metal device")
@@ -419,12 +422,13 @@ extension Exporter {
         screenOutput.alwaysCopiesSampleData = false
         reader.add(screenOutput)
         var cameraOutput: AVAssetReaderTrackOutput?
-        if videoTracks.count > 1 {
-            let o = AVAssetReaderTrackOutput(track: videoTracks[1], outputSettings: decodeSettings)
+        if let cameraTrack {
+            let o = AVAssetReaderTrackOutput(track: cameraTrack, outputSettings: decodeSettings)
             o.alwaysCopiesSampleData = false
             reader.add(o)
             cameraOutput = o
         }
+        let layerOutputs = try layerVideoReaderOutputs(reader: reader, tracks: layerTracks, settings: decodeSettings)
         guard reader.startReading() else {
             throw ExportError.failed("reader failed to start: \(reader.error?.localizedDescription ?? "?")")
         }
@@ -439,6 +443,7 @@ extension Exporter {
 
         let screenHold = FrameHold(output: screenOutput)
         let cameraHold = cameraOutput.map(FrameHold.init)
+        let layerHolds = layerOutputs.mapValues(FrameHold.init)
         let delay = 1.0 / Double(fps)
 
         for n in 0..<totalFrames {
@@ -450,7 +455,8 @@ extension Exporter {
             let t = Double(n) / Double(fps)
             let screenTexture = screenHold.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) }
             let cameraTexture = cameraHold?.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) }
-            let state = await makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize)
+            let layers = layerHolds.compactMapValues { $0.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) } }
+            let state = await makeFrameState(model: model, outputTime: t, screen: screenTexture, camera: cameraTexture, size: outputSize, layerTextures: layers, layerTransforms: layerTransforms)
 
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
             descriptor.usage = [.renderTarget, .shaderRead]
@@ -498,7 +504,7 @@ extension Exporter {
 /// before fixing. copyNextSampleBuffer() has no peek, so a one-sample lookahead buffer is needed:
 /// only "commit" a freshly read sample as current once its own PTS ≤ t; otherwise hold it for a
 /// later call (t only moves forward — export/parity always sample it in increasing order).`
-private final class FrameHold {
+final class FrameHold {
     private let output: AVAssetReaderTrackOutput
     private var current: CMSampleBuffer?
     private var lookahead: CMSampleBuffer?
@@ -646,6 +652,10 @@ enum ExporterSelfTest {
             times.insert(start + length / 2)
             times.insert(start + min(layer.fadeIn ?? 0, length) / 2)
             times.insert(start + length - min(layer.fadeOut ?? 0, length) / 2)
+            if layer.kind == .video, length > 1.1 {
+                times.insert(start + 1 - 1.0 / 60)
+                times.insert(start + 1 + 1.0 / 60)
+            }
         }
         let orderedTimes = times.filter { $0 >= 0 && $0 < duration }.sorted()
 
@@ -655,12 +665,12 @@ enum ExporterSelfTest {
         let outputSize = compositor.outputSize(for: project, longEdge: 960)
         let width = Int(outputSize.width), height = Int(outputSize.height)
 
-        let (composition, audioMix, _) = try await makeComposition(package: packageURL, project: project)
+        let (composition, audioMix, _, cameraTrack, layerTracks, layerTransforms) = try await makeComposition(package: packageURL, project: project)
         let videoTracks = composition.tracks(withMediaType: .video)
-        let hasCamera = videoTracks.count > 1
+        let hasCamera = cameraTrack != nil
 
         // Preview path: AVPlayerItemVideoOutput, seek + copyPixelBuffer (same as PreviewView.draw).
-        let item = AVPlayerItem(asset: composition)
+        let item = AVPlayerItem(asset: screenPlaybackComposition(composition))
         item.audioMix = audioMix
         let previewOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -675,8 +685,8 @@ enum ExporterSelfTest {
         // `PreviewView.attachCamera` — `AVPlayerItemVideoOutput` has no per-track selection.
         var cameraPlayer: AVPlayer?
         var cameraPreviewOutput: AVPlayerItemVideoOutput?
-        if hasCamera {
-            let cameraItem = AVPlayerItem(asset: isolateTrack(videoTracks[1], duration: composition.duration))
+        if let cameraTrack {
+            let cameraItem = AVPlayerItem(asset: isolateTrack(cameraTrack, duration: composition.duration))
             let cOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                 kCVPixelBufferMetalCompatibilityKey as String: true,
@@ -698,20 +708,27 @@ enum ExporterSelfTest {
         ])
         reader.add(exportOutput)
         var cameraExportOutput: AVAssetReaderTrackOutput?
-        if hasCamera {
-            let o = AVAssetReaderTrackOutput(track: videoTracks[1], outputSettings: [
+        if let cameraTrack {
+            let o = AVAssetReaderTrackOutput(track: cameraTrack, outputSettings: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                 kCVPixelBufferMetalCompatibilityKey as String: true,
             ])
             reader.add(o)
             cameraExportOutput = o
         }
+        let layerOutputs = try layerVideoReaderOutputs(reader: reader, tracks: layerTracks, settings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelBufferMetalCompatibilityKey as String: true])
+        let layerPlayers = layerTracks.mapValues { isolatedVideoPlayer($0, duration: composition.duration) }
+        for decoder in layerPlayers.values {
+            while decoder.player.currentItem?.status == .unknown { try await Task.sleep(for: .milliseconds(10)) }
+            guard decoder.player.currentItem?.status == .readyToPlay else { throw SelfTestArgError.usage("Layer preview did not become ready") }
+        }
         guard reader.startReading() else { throw SelfTestArgError.usage("reader failed to start") }
         let hold = FrameHold(output: exportOutput)
         let cameraHold = cameraExportOutput.map(FrameHold.init)
+        let layerHolds = layerOutputs.mapValues(FrameHold.init)
 
-        func render(_ texture: FrameState.Texture?, camera: FrameState.Texture?, outputTime: Double) async throws -> [UInt8] {
-            let state = makeFrameState(model: model, outputTime: outputTime, screen: texture, camera: camera, size: outputSize)
+        func render(_ texture: FrameState.Texture?, camera: FrameState.Texture?, outputTime: Double, layers: [Int: FrameState.Texture] = [:]) async throws -> [UInt8] {
+            let state = makeFrameState(model: model, outputTime: outputTime, screen: texture, camera: camera, size: outputSize, layerTextures: layers, layerTransforms: layerTransforms)
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .shared
@@ -765,8 +782,16 @@ enum ExporterSelfTest {
             }
 
             // (3) both call `makeFrameState` with the identical outputTime/size (see `render` above).
-            let previewBytes = try await render(previewTex, camera: previewCameraTex, outputTime: t)
-            let exportBytes = try await render(exportTex, camera: exportCameraTex, outputTime: t)
+            var previewLayers: [Int: FrameState.Texture] = [:]
+            let activeLanes = Set(project.layerStates(atOutput: t).filter { $0.block.kind == .video }.map { $0.block.track })
+            for (lane, decoder) in layerPlayers where activeLanes.contains(lane) {
+                _ = await decoder.player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+                guard let buffer = decoder.output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil), let texture = textureCache.texture(from: buffer) else { throw SelfTestArgError.usage("No layer preview frame on lane \(lane) at \(t)") }
+                previewLayers[lane] = texture
+            }
+            let exportLayers = layerHolds.compactMapValues { $0.imageBuffer(upTo: t).flatMap { textureCache.texture(from: $0) } }
+            let previewBytes = try await render(previewTex, camera: previewCameraTex, outputTime: t, layers: previewLayers)
+            let exportBytes = try await render(exportTex, camera: exportCameraTex, outputTime: t, layers: exportLayers)
             var tMaxDelta = 0
             for i in 0..<previewBytes.count {
                 let delta = abs(Int(previewBytes[i]) - Int(exportBytes[i]))

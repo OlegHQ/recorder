@@ -164,7 +164,10 @@ extension EditorModel {
             id = trial.addLayer(kind: kind, file: copied.file, atOutput: start, duration: length,
                                 rect: NormRect(x: (1 - width) / 2, y: (1 - height) / 2, w: width, h: height), hasAudio: copied.audio, track: track)
         } else { id = trial.addImportedAudio(file: copied.file, atOutput: time, duration: copied.duration) }
-        guard let id else { throw fail("There is not enough timeline or media duration at this position.") }
+        guard let id else {
+            if copied.kind == .video, project.videoLayerLanes.count >= 4 { throw fail("Only four layer lanes with video are supported. Choose a free range on an existing video lane.") }
+            throw fail("There is not enough timeline or media duration at this position.")
+        }
         edit("Add Media") { $0 = trial }
         committed = true
         isPlaying = false; selectedClips = []; selection = [id]

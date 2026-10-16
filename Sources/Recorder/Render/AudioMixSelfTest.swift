@@ -178,7 +178,7 @@ enum AudioMixSelfTest {
         """
         try Data(legacyJSON.utf8).write(to: package.appendingPathComponent("project.json"))
         let legacy = try Project.load(from: package.appendingPathComponent("project.json"))
-        let (composition, _, tracks) = try await makeComposition(package: package, project: legacy)
+        let (composition, _, tracks, _, _, _) = try await makeComposition(package: package, project: legacy)
         func compare(_ actual: [AVCompositionTrack], _ expected: [AVCompositionTrack]) throws {
             guard actual.count == expected.count else { throw Fail(description: "audio track count \(actual.count), expected \(expected.count)") }
             for (actualTrack, expectedTrack) in zip(actual, expected) {
@@ -219,13 +219,13 @@ enum AudioMixSelfTest {
         guard abs(composition.duration.seconds - 6) < 0.002 else { throw Fail(description: "legacy duration") }
         print("audio-lanes: legacy cuts, 2x and gap match the original Mic/System segment lists")
         let shortLegacy = Project(source: legacy.source, clips: [Clip(sourceStart: 0, sourceEnd: 0.1, speed: 2)])
-        let (shortComposition, _, _) = try await makeComposition(package: package, project: shortLegacy)
+        let (shortComposition, _, _, _, _, _) = try await makeComposition(package: package, project: shortLegacy)
         guard abs(shortComposition.duration.seconds - 0.05) < 0.002 else { throw Fail(description: "short legacy cut lost audio") }
         let fractionalClips = (0..<53).map { index in
             Clip(sourceStart: Double(index) * 0.15, sourceEnd: Double(index + 1) * 0.15, speed: 1.3)
         }
         let fractional = Project(source: legacy.source, clips: fractionalClips)
-        let (fractionalComposition, _, fractionalAudio) = try await makeComposition(package: package, project: fractional)
+        let (fractionalComposition, _, fractionalAudio, _, _, _) = try await makeComposition(package: package, project: fractional)
         guard let video = fractionalComposition.tracks(withMediaType: .video).first else { throw Fail(description: "fractional video") }
         let videoSegments = video.segments.filter { !$0.isEmpty }, audioSegments = fractionalAudio[0].segments.filter { !$0.isEmpty }
         guard videoSegments.count == audioSegments.count else {
@@ -280,7 +280,7 @@ enum AudioMixSelfTest {
             try await waitUntil("\(name) did not refresh mix", { preview.currentItemForTest?.audioMix !== oldMix })
             guard preview.currentItemForTest === live else { throw Fail(description: "\(name) replaced the player item") }
         }
-        let (exportComposition, _, exportTracks) = try await makeComposition(package: package, project: model.project)
+        let (exportComposition, _, exportTracks, _, _, _) = try await makeComposition(package: package, project: model.project)
         guard let previewComposition = live.asset as? AVComposition, exportTracks.count == 4 else { throw Fail(description: "four-track composition") }
         try compare(previewComposition.tracks(withMediaType: .audio), exportTracks)
         guard abs(exportComposition.duration.seconds - 7) < 0.002, model.project.exportDuration == 7 else { throw Fail(description: "audio tail missing") }
@@ -294,7 +294,7 @@ enum AudioMixSelfTest {
 
         let destination = package.appendingPathComponent("multi-track.mp4")
         try await runExport(model: model, destination: destination)
-        let samples = try await decodePCM(url: destination)
+        var samples = try await decodePCM(url: destination)
         func amplitude(_ frequency: Double, at time: Double, radius: Double = 0.06) -> Double {
             let lower = max(0, Int((time - radius) * 44_100)), upper = min(samples.count, Int((time + radius) * 44_100))
             guard upper > lower else { return 0 }
@@ -314,6 +314,19 @@ enum AudioMixSelfTest {
             throw Fail(description: "decoded tones do not match clip timing, gain, fades or mute")
         }
         guard samples.count > Int(6.8 * 44_100) else { throw Fail(description: "export truncated audio tail") }
+        let videoBeforeDetach = model.project.layers
+        guard let sound = model.project.audioClips.first(where: { $0.layer == layer.id }), let soundID = UUID(uuidString: sound.id) else { throw Fail(description: "missing linked layer sound") }
+        model.edit("Detach and move layer sound") { project in
+            _ = project.unlinkAudio(soundID)
+            project.moveAudio(soundID, toOutput: 4.5, propagate: false)
+        }
+        guard model.project.layers == videoBeforeDetach, model.project.audioClips.first(where: { $0.id == sound.id })?.link == nil else { throw Fail(description: "detached sound moved the video") }
+        let detachedMovie = package.appendingPathComponent("detached-layer-sound.mp4")
+        try await runExport(model: model, destination: detachedMovie)
+        samples = try await decodePCM(url: detachedMovie)
+        let oldSound = amplitude(660, at: 0.25), movedSound = amplitude(660, at: 4.75)
+        guard oldSound < 0.004, movedSound > 0.32, movedSound < 0.48 else { throw Fail(description: "detached video sound played at the wrong output time: \(oldSound), \(movedSound)") }
+        print("audio-lanes: detached layer sound moved independently; decoded old=\(oldSound), moved=\(movedSound)")
         var invalid = model.project
         invalid.audioClips[0].file = "../outside.m4a"
         let protected = package.appendingPathComponent("existing.mp4")

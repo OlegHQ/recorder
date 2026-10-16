@@ -3206,7 +3206,7 @@ enum SelfTest {
                     model.undo()
                     guard model.project == fixture else { throw Fail(message: "undo changed original") }
                     model.saveNow()
-                    let (composition, _, _) = try await makeComposition(package: package, project: result)
+                    let (composition, _, _, _, _, _) = try await makeComposition(package: package, project: result)
                     guard abs(composition.duration.seconds - TimeMap(fixture.clips).outputDuration) < 0.02 else {
                         throw Fail(message: "move changed playback duration")
                     }
@@ -3451,7 +3451,7 @@ enum SelfTest {
                 guard model.project == moved else { throw Fail.undo }
                 return moved
             }
-            let (movedComposition, _, _) = try await makeComposition(package: tmp, project: linked)
+            let (movedComposition, _, _, _, _, _) = try await makeComposition(package: tmp, project: linked)
             guard abs(movedComposition.duration.seconds - 15) < 0.01,
                   let movedCamera = movedComposition.tracks(withMediaType: .video).last?.segments.last,
                   abs(movedCamera.timeMapping.source.start.seconds - 6) < 0.01,
@@ -3460,7 +3460,7 @@ enum SelfTest {
                 var sped = project
                 sped.linkVideoEdits = isLinked
                 sped.setSpeed(0, 2)
-                let (composition, _, _) = try await makeComposition(package: tmp, project: sped)
+                let (composition, _, _, _, _, _) = try await makeComposition(package: tmp, project: sped)
                 guard abs(composition.duration.seconds - (isLinked ? 6 : 12)) < 0.01,
                       let camera = composition.tracks(withMediaType: .video).last,
                       abs(camera.timeRange.duration.seconds - (isLinked ? 6 : 12)) < 0.01 else { throw Fail.composition }
@@ -3474,7 +3474,7 @@ enum SelfTest {
                 mixed.clips[1].isGap = true
                 mixed.linkVideoEdits = isLinked
                 _ = mixed.moveClips([2, 3], byOutput: -2)
-                let (composition, _, _) = try await makeComposition(package: tmp, project: mixed)
+                let (composition, _, _, _, _, _) = try await makeComposition(package: tmp, project: mixed)
                 guard abs(composition.duration.seconds - 13) < 0.01,
                       let camera = composition.tracks(withMediaType: .video).last,
                       let segment = camera.segments.first(where: { abs($0.timeMapping.source.start.seconds - 6) < 0.01 }),
@@ -3482,7 +3482,7 @@ enum SelfTest {
                       abs(segment.timeMapping.source.duration.seconds - 6) < 0.01,
                       abs(segment.timeMapping.target.duration.seconds - 4) < 0.01 else { throw Fail.composition }
             }
-            let (composition, _, _) = try await makeComposition(package: tmp, project: edited)
+            let (composition, _, _, _, _, _) = try await makeComposition(package: tmp, project: edited)
             let tracks = composition.tracks(withMediaType: .video)
             guard tracks.count == 2, abs(composition.duration.seconds - 12) < 0.01,
                   let camera = tracks[1].segments.first(where: { !$0.isEmpty }),
@@ -3581,6 +3581,16 @@ enum SelfTest {
             try "Recorder layers fixture".write(to: marker, atomically: true, encoding: .utf8)
             try await synthesizeGradientMovie(at: package.appendingPathComponent("screen.mov"), width: 640, height: 360, fps: 5, frameCount: 45)
             try await synthesizeMovie(at: package.appendingPathComponent("camera.mov"), width: 160, height: 160, fps: 5, frameCount: 45)
+            let raw = package.appendingPathComponent("layer-source.mov"), tone = package.appendingPathComponent("layer-tone.m4a")
+            try await synthesizeLayerMovie(at: raw)
+            try await synthesizeLayerMovie(at: package.appendingPathComponent("media/rotated.mov"), rotated: true)
+            try synthesizeSineM4A(at: tone, duration: 6)
+            let film = AVURLAsset(url: raw), sound = AVURLAsset(url: tone)
+            let media = AVMutableComposition()
+            let range = CMTimeRange(start: .zero, duration: CMTime(seconds: 6, preferredTimescale: 600))
+            try media.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)!.insertTimeRange(range, of: try await film.loadTracks(withMediaType: .video)[0], at: .zero)
+            try media.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)!.insertTimeRange(range, of: try await sound.loadTracks(withMediaType: .audio)[0], at: .zero)
+            try await AVAssetExportSession(asset: media, presetName: AVAssetExportPresetPassthrough)!.export(to: package.appendingPathComponent("media/video.mov"), as: .mov)
             func image(_ file: String, width: Int = 1280, height: Int = 720, draw: (CGContext) -> Void) throws {
                 guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: VideoColor.space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
                       let destination = CGImageDestinationCreateWithURL(package.appendingPathComponent(file) as CFURL, UTType.png.identifier as CFString, 1, nil) else { throw Fail(description: "Image fixture context") }
@@ -3619,6 +3629,11 @@ enum SelfTest {
                 LayerBlock(kind: .image, start: 7.5, end: 9, file: "media/missing.png", rect: NormRect(), backdrop: .dim),
                 LayerBlock(kind: .image, start: 7.5, end: 9, file: "media/alpha.png", track: 1, rect: NormRect(x: 0.2, y: 0.15, w: 0.6, h: 0.6), backdrop: .none),
             ]
+            let firstVideo = LayerBlock(kind: .video, start: 0.5, end: 4.5, file: "media/video.mov", mediaStart: 1, track: 2, rect: NormRect(x: 0.08, y: 0.05, w: 0.28, h: 0.3), backdrop: .none)
+            let secondVideo = LayerBlock(kind: .video, start: 6, end: 7.5, file: "media/video.mov", mediaStart: 3, track: 2, rect: NormRect(x: 0.6, y: 0.62, w: 0.36, h: 0.36), backdrop: .none, aboveCamera: true)
+            project.layers += [firstVideo, secondVideo, LayerBlock(kind: .video, start: 4.5, end: 6, file: "media/rotated.mov", mediaStart: 2, track: 3, rect: NormRect(x: 0.7, y: 0.08, w: 0.2, h: 0.5926), backdrop: .none)]
+            project.audioTracks = [AudioTrack(name: "Audio 1")]
+            project.audioClips = [firstVideo, secondVideo].map { AudioClip(start: $0.start, end: $0.end, mediaStart: $0.mediaStart, file: $0.file, track: 0, link: .layer, layer: $0.id) }
             project.layers.sort { $0.start < $1.start }
             project.keys.show = true
             project.texts = [TextBlock(start: 6, end: 7.5, text: "Image above camera", style: .label, position: NormPoint(x: 0.5, y: 0.88), size: 42)]
@@ -3626,6 +3641,7 @@ enum SelfTest {
             try project.save(to: package.appendingPathComponent("project.json"))
             try JSONEncoder().encode(EventLog(events: [InputEvent(t: 0, k: .move, x: 0.5, y: 0.5), InputEvent(t: 6.3, k: .key, keyCode: 8, mods: 1 << 20)])).write(to: package.appendingPathComponent("events.json"))
             try await Compositor.runLayersSelfTest(package: package)
+            try await PreviewView.runVideoLayersSelfTest(package: package)
             print("wrote \(package.path)")
         },
         "make-windows-fixture": { _ in
@@ -3745,6 +3761,37 @@ enum SelfTest {
 
     /// Synthesizes a small, playable `.mov` with no capture/TCC involved. Shared by the `recover` and
     /// `import` cases so the `AVAssetWriter` boilerplate lives in one place.
+    private static func synthesizeLayerMovie(at url: URL, rotated: Bool = false) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let width = 160, height = 96
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: width, AVVideoHeightKey: height, AVVideoColorPropertiesKey: VideoColor.properties])
+        if rotated { input.transform = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: CGFloat(height), ty: 0) }
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB, kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height])
+        writer.add(input)
+        guard writer.startWriting() else { throw Fail(description: "Layer fixture writer") }
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<60 {
+            while !input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(5)) }
+            var buffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32ARGB, nil, &buffer)
+            guard let buffer else { throw Fail(description: "Layer fixture buffer") }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            let bytes = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self), rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+            for row in 0..<height {
+                for column in 0..<width {
+                    let index = row * rowBytes + column * 4, marker = row < height / 4 && column < width / 4
+                    bytes[index] = 255
+                    for channel in 0..<3 { bytes[index + channel + 1] = marker || channel == (frame / 10) % 3 ? 255 : 0 }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            guard adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 10)) else { throw Fail(description: "Layer fixture append") }
+        }
+        input.markAsFinished(); await writer.finishWriting()
+        guard writer.status == .completed else { throw Fail(description: "Layer fixture did not finish") }
+    }
+
     private static func synthesizeMovie(at url: URL, width: Int, height: Int, fps: Int32 = 30, frameCount: Int = 30) async throws {
         struct Fail: Error, CustomStringConvertible { let description: String }
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
