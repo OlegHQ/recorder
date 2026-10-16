@@ -500,20 +500,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         coreTimelineView.menuSplitAtPlayhead()
     }
 
-    /// `⌫`: the selected clip, or every selected zoom/layout/mask block. Mirrors
-    /// `TimelineView.removeSelection` (private there — this file can't call it, see T-311's file
-    /// boundary — so the same few lines are reimplemented here for the menu/responder-chain path).
     @objc func removeSelected(_ sender: Any?) {
-        if !model.selectedClips.isEmpty {
-            let indices = model.selectedClips
-            model.edit("Remove Clips") { $0.deleteClips(indices) }
-            model.selectedClip = nil
-        } else if !model.selection.isEmpty {
-            let ids = model.selection
-            model.edit("Remove") { project in for id in ids { project.removeBlock(id) } }
-            model.selection = []
-        }
+        coreTimelineView.removeSelection(ignoringLinks: NSApp.currentEvent?.modifierFlags.contains(.option) == true)
     }
+
+    @objc func toggleAudioLink(_ sender: Any?) { coreTimelineView.toggleAudioLink() }
+    @objc func toggleCompactTrackHeaders(_ sender: Any?) { coreTimelineView.toggleCompactTrackHeaders() }
 
     /// `Z`: adds and selects a zoom at the playhead’s source time.
     @objc func addZoomAtPlayhead(_ sender: Any?) {
@@ -616,6 +608,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
             return !isTextEditing
         case #selector(removeSelected):
             return !isTextEditing && (model.selectedClip != nil || !model.selection.isEmpty)
+        case #selector(toggleAudioLink):
+            return !isTextEditing && model.selection.count == 1 && model.project.audioClips.contains { UUID(uuidString: $0.id).map(model.selection.contains) ?? false }
+        case #selector(toggleCompactTrackHeaders):
+            item.state = coreTimelineView.compactTrackHeaders ? .on : .off
+            return true
         case #selector(hideCursorInSelectedClip):
             return model.selectedClip != nil
         case #selector(cropTapped):
@@ -696,13 +693,19 @@ final class TimelineContainerView: NSView {
 
     let toolbar: TimelineToolbar
     let timeline: TimelineView
+    private let scroll = NSScrollView()
 
     init(toolbar: TimelineToolbar, timeline: TimelineView) {
         self.toolbar = toolbar
         self.timeline = timeline
         super.init(frame: .zero)
         addSubview(toolbar)
-        addSubview(timeline)
+        scroll.documentView = timeline
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = false
+        addSubview(scroll)
     }
 
     @available(*, unavailable)
@@ -717,7 +720,8 @@ final class TimelineContainerView: NSView {
         super.layout()
         let toolbarHeight = min(Self.toolbarHeight, bounds.height)
         toolbar.frame = NSRect(x: 0, y: bounds.height - toolbarHeight, width: bounds.width, height: toolbarHeight)
-        timeline.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - toolbarHeight))
+        scroll.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - toolbarHeight))
+        timeline.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: max(scroll.contentSize.height, timeline.contentHeight + 26))
     }
 }
 

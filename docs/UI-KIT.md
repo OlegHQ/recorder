@@ -301,8 +301,17 @@ media offsets. Video paste fills available gaps and inserts extra time where nee
 existing content; layer paste replaces only overlaps on its own lane, keeping outside pieces.
 Cut follows the saved Link/Ripple Delete modes; Cut and Paste each undo independently. Clipboard
 media references currently work within the source project while Recorder remains open. C and
-blade clicks still split. `Recorder --selftest timeline-clipboard` exercises all six tracks using
+blade clicks still split. `Recorder --selftest timeline-clipboard` exercises the effect and audio tracks using
 a private pasteboard, plus selection, undo/redo and stale-clipboard handling.
+
+Audio lanes (October 2026): 36-point strips below effects; pale blue `#D3DEE8`, voiceover `#E9D8CF`.
+Video stays 32 points tall; each audio clip owns its waveform, silent hatching, gain and fades.
+Headers are 132 points with name/volume, mute and a 3-point playback meter; View → Compact Track Headers uses 16 points.
+Overflow scrolls vertically, keeping every track reachable in a small editor. Command–L toggles audio links;
+Option-drag/trim/delete preserves partners. Chain badges and half-opacity partner outlines explain linked edits;
+red offsets and Move into Sync repair slip. The selection inspector edits gain in dB, fades, mute and link target.
+Record/re-record controls stay disabled until T-645. Clipboard copies linked partners with audio so Cut cannot lose video.
+`timeline-png` supports `--selected-audio`, `--compact`, `--minimum --bottom`, and `--playing` for these states.
 
 Project opening preserves the editor’s layout from the first frame: top bar, preview status, inspector and timeline. Preparation happens off the UI thread, with no artificial minimum wait. Ready controls reveal over 160 ms; Reduce Motion switches immediately. Preview loading remains labelled until the first video frame arrives.
 

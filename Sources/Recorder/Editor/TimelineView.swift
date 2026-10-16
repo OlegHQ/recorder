@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Observation
 import QuartzCore
 import RecorderCore
@@ -7,8 +8,11 @@ import SwiftUI
 /// Which timed-block track a point/x-coordinate belongs to. Top-to-bottom draw/hit-test order
 /// matches this declaration order (SPEC §7.1): clip, zoom, layout (only if `source.hasCamera`),
 /// mask.
-enum Lane: CaseIterable, Sendable {
+enum Lane: CaseIterable, Hashable, Sendable {
     case clip, camera, zoom, keys, layout, mask, text, window
+    case audio(Int)
+
+    static let allCases: [Lane] = [.clip, .camera, .zoom, .keys, .layout, .mask, .text, .window]
 }
 
 /// What a point in `TimelineView` is over (SPEC §7.2 hit-testing table). `hitTest(at:)` checks in
@@ -25,9 +29,9 @@ enum TimelineHit: Equatable {
     case none
 }
 
-/// The single custom-drawn timeline: ruler + clip/zoom/layout/mask lanes + playhead (SPEC §7.1).
+/// The custom-drawn video, effect and audio timeline (SPEC §7.1).
 /// Renders from `EditorModel.project`; it never owns project data. A flipped, layer-backed
-/// `NSView` that manages its own virtual horizontal scroll/zoom via `geometry` (no `NSScrollView`).
+/// `NSView` with virtual horizontal navigation and native enclosing vertical scrolling.
 /// Navigation (T-405) and hit-testing/selection (T-406) are added on top of this file.
 final class TimelineView: NSView {
     weak var model: EditorModel? {
@@ -73,7 +77,7 @@ final class TimelineView: NSView {
 
     // ponytail: keep media references in-process and paste only into the source project;
     // cross-project paste needs an asset import path before those references can travel safely.
-    private static var clipboard: (token: String, package: URL, content: Project)?
+    private static var clipboard: (token: String, package: URL, content: Project, lane: Lane?)?
     private static let clipboardType = NSPasteboard.PasteboardType("app.recorder.timeline-selection")
     var clipboardPasteboard: NSPasteboard = .general
 
@@ -92,7 +96,8 @@ final class TimelineView: NSView {
         let token = UUID().uuidString
         clipboardPasteboard.clearContents()
         guard clipboardPasteboard.setString(token, forType: Self.clipboardType) else { return false }
-        Self.clipboard = (token, model.packageURL.standardizedFileURL, content)
+        let preferredLane = model.selectedClips.isEmpty ? model.selection.first.flatMap { lane(ofBlock: $0) } : nil
+        Self.clipboard = (token, model.packageURL.standardizedFileURL, content, preferredLane)
         return true
     }
 
@@ -106,7 +111,7 @@ final class TimelineView: NSView {
             for id in blocks { project.removeBlock(id) }
         }
         deselect()
-        model.playhead = min(model.playhead, model.timeMap.outputDuration)
+        model.playhead = min(model.playhead, timelineDuration)
     }
 
     @objc func paste(_ sender: Any?) {
@@ -116,12 +121,40 @@ final class TimelineView: NSView {
         model.edit("Paste") { $0 = trial }
         model.selectedClips = selection.clips
         model.selection = selection.clips.isEmpty ? selection.blocks : []
+        var preferredLane = clipboard.lane
+        if case .audio(let track)? = preferredLane,
+           let current = model.project.audioTracks.firstIndex(where: { $0.id == clipboard.content.audioTracks[track].id }) {
+            preferredLane = .audio(current)
+        }
+        if let preferredLane {
+            model.selectedClips = []
+            model.selection = selection.blocks.filter { lane(ofBlock: $0) == preferredLane }
+        }
         needsDisplay = true
     }
 
     func selectTool() { exitSplitMode() }
 
-    static let gutter: CGFloat = 104
+    static let gutter: CGFloat = 132
+    private(set) var compactTrackHeaders = false
+    var gutterWidth: CGFloat { compactTrackHeaders ? 16 : Self.gutter }
+    var lanes: [Lane] {
+        Lane.allCases + (model.map { model in
+            model.project.audioTracks.indices.filter { track in
+                model.project.audioClips.contains { $0.track == track } ||
+                    (dragKind != nil && dragProject?.audioClips.contains { $0.track == track } == true)
+            }.map(Lane.audio)
+        } ?? [])
+    }
+    private var timelineDuration: Double { model.map { max($0.timeMap.outputDuration, $0.project.exportDuration) } ?? 0 }
+
+    func toggleCompactTrackHeaders() {
+        compactTrackHeaders.toggle()
+        geometry.width = max(0, bounds.width - gutterWidth)
+        geometry.scrollX = clampScrollX(geometry.scrollX)
+        needsLayout = true
+        needsDisplay = true
+    }
     static let rulerHeight: CGFloat = 22
     static let clipHeight: CGFloat = 32
     static let zoomHeight: CGFloat = 24
@@ -163,7 +196,12 @@ final class TimelineView: NSView {
         // resize) `updateMoveBlock`/`updateResizeBlock` calls — one generic drag, not copied per lane.
         case moveBlock(id: UUID, lane: Lane, grabOffset: Double) // grabOffset = (source under the mouse) − block.start, at mouseDown
         case resizeBlock(id: UUID, lane: Lane, edge: RecorderCore.Edge)
+        case audio(id: UUID, edge: RecorderCore.Edge?, grabOffset: Double)
+        case audioFade(id: UUID, edge: RecorderCore.Edge)
     }
+    private var dragIgnoresLinks = false
+    private var audioHeaderButtons: [Int: (volume: NSButton, mute: NSButton, record: NSButton)] = [:]
+    private var volumePopover: NSPopover?
     private var hoverX: CGFloat?
     private var hoverY: CGFloat?
     private var trackingArea: NSTrackingArea?
@@ -172,12 +210,14 @@ final class TimelineView: NSView {
 
     /// Loaded off the main thread once per open (`Waveform.peaks(for:)` itself also caches by
     /// URL, but this avoids re-dispatching the load / racing a second `model` assignment).
-    private var waveformPeaks: [Float]?
+    private var waveformPeaks: [String: [Float]] = [:]
+    private var waveformFiles: Set<String> = []
+    private var mediaDurations: [String: Double] = [:]
     private var waveformLoadedForPackage: URL?
     /// For selftests: whether the async load (`loadWaveformIfNeeded`) has landed.
-    var hasWaveform: Bool { waveformPeaks != nil }
+    var hasWaveform: Bool { !waveformFiles.isEmpty && waveformFiles.allSatisfy { waveformPeaks[$0] != nil } }
     /// Silent mic spans (source time), hatched in the clip lane; same function Split at Pauses uses.
-    private var silentSpans: [TimeRange] = []
+    private var silentSpans: [String: [TimeRange]] = [:]
 
     // MARK: - Trim (T-408)
 
@@ -201,7 +241,12 @@ final class TimelineView: NSView {
     /// `isSplitMode` true (SPEC §7.2 "Split").
     private var splitModeSticky = false
     private var splitOptionHeld = false
-    private var isSplitMode: Bool { splitModeSticky || splitOptionHeld }
+    private var isSplitMode: Bool {
+        splitModeSticky || (splitOptionHeld && !lanes.contains { lane in
+            if case .audio = lane, let hoverY { return laneRow(lane).contains(CGPoint(x: gutterWidth + 1, y: hoverY)) }
+            return false
+        })
+    }
 
     /// AC-TL-7: while in split mode, the preview shows the blade's (hover) frame instead of the
     /// playhead. `PreviewView`/`EditorModel` aren't merged into this lane yet — a coordinator wires
@@ -238,12 +283,14 @@ final class TimelineView: NSView {
         case .trimClip: return "trimClip"
         case .moveBlock: return "moveBlock"
         case .resizeBlock: return "resizeBlock"
+        case .audio: return "audio"
+        case .audioFade: return "audioFade"
         }
     }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        geometry.width = max(0, frameRect.width - Self.gutter)
+        geometry.width = max(0, frameRect.width - gutterWidth)
         wantsLayer = true
         layer?.backgroundColor = Theme.bgPanel.cgColor
         for (button, name) in [(fullZoomButton, "Zoom"), (fullKeysButton, "Keys")] {
@@ -263,11 +310,12 @@ final class TimelineView: NSView {
 
     override func layout() {
         super.layout()
+        layoutAudioHeaders()
         for (button, lane) in [(fullZoomButton, Lane.zoom), (fullKeysButton, Lane.keys)] {
             let row = laneRow(lane)
             button.frame = CGRect(x: 78, y: row.minY, width: 24, height: row.height)
             let empty = lane == .zoom ? model?.project.zooms.isEmpty == true : model?.project.keystrokeClips.isEmpty == true
-            button.isHidden = !empty || model?.project.clips.isEmpty != false
+            button.isHidden = compactTrackHeaders || !empty || model?.project.clips.isEmpty != false
             button.isEnabled = (model?.project.clips.last?.sourceEnd ?? 0) - (model?.project.clips.first?.sourceStart ?? 0) >= 0.5
         }
     }
@@ -285,7 +333,7 @@ final class TimelineView: NSView {
     override func setFrameSize(_ newSize: NSSize) {
         if newSize != frame.size, dragKind != nil { cancelActiveDrag(); dragOrigin = nil }
         super.setFrameSize(newSize)
-        geometry.width = max(0, newSize.width - Self.gutter)
+        geometry.width = max(0, newSize.width - gutterWidth)
         maybeFitOnFirstLayout()
         geometry.scrollX = clampScrollX(geometry.scrollX)
         needsDisplay = true
@@ -357,6 +405,9 @@ final class TimelineView: NSView {
                 self.onNavigationChange?()
                 if self.contentHeight != previousContentHeight { self.superview?.superview?.needsLayout = true }
                 self.lastClips = model.project.clips
+                self.loadWaveformIfNeeded()
+                self.enclosingScrollView?.superview?.needsLayout = true
+                if self.contentHeight != previousContentHeight { self.enclosingScrollView?.superview?.superview?.needsLayout = true }
                 self.needsDisplay = true
                 self.observeModel()
             }
@@ -377,13 +428,14 @@ final class TimelineView: NSView {
 
     private func baseLaneHeight(_ lane: Lane) -> CGFloat {
         switch lane {
-        case .clip: return model?.project.source.hasMic == true ? Self.clipHeight + 16 : Self.clipHeight
+        case .clip: return Self.clipHeight
         case .camera: return model?.project.source.hasCamera == true ? 24 : 0
         case .zoom: return Self.zoomHeight
         case .keys: return Self.layoutHeight
         case .layout: return hasLayoutLane ? Self.layoutHeight : 0
         case .mask, .text: return Self.maskHeight
         case .window: return model?.project.windowCount ?? 1 > 1 ? Self.maskHeight : 0
+        case .audio: return 36
         }
     }
 
@@ -393,7 +445,7 @@ final class TimelineView: NSView {
     /// Full-width row (spans the icon gutter too), in view-local (flipped) coordinates.
     private func laneRow(_ lane: Lane) -> CGRect {
         var y = Self.rulerHeight
-        for l in Lane.allCases {
+        for l in lanes {
             let h = laneHeight(l)
             if l == lane { return CGRect(x: 0, y: y, width: bounds.width, height: h) }
             y += h
@@ -404,10 +456,10 @@ final class TimelineView: NSView {
     private var rulerRow: CGRect { CGRect(x: 0, y: 0, width: bounds.width, height: Self.rulerHeight) }
 
     /// Total content height (ruler + every visible lane).
-    var contentHeight: CGFloat { Lane.allCases.reduce(Self.rulerHeight) { $0 + laneHeight($1) } }
+    var contentHeight: CGFloat { lanes.reduce(Self.rulerHeight) { $0 + laneHeight($1) } }
 
     /// View-local x for output time `t`, past the icon gutter.
-    private func x(forOutput t: Double) -> CGFloat { Self.gutter + CGFloat(geometry.x(forOutput: t)) }
+    private func x(forOutput t: Double) -> CGFloat { gutterWidth + CGFloat(geometry.x(forOutput: t)) }
 
     // MARK: - Draw
 
@@ -420,11 +472,11 @@ final class TimelineView: NSView {
         let timeMap = model.timeMap
 
         NSGraphicsContext.saveGraphicsState()
-        CGRect(x: Self.gutter, y: 0, width: max(0, bounds.width - Self.gutter), height: contentHeight + 2).clip()
+        CGRect(x: gutterWidth, y: 0, width: max(0, bounds.width - gutterWidth), height: contentHeight + 2).clip()
         drawTrackBeds()
         if project.clips.isEmpty {
             ("No video clips" as NSString).draw(
-                at: CGPoint(x: Self.gutter + 12, y: laneRow(.clip).midY - 7),
+                at: CGPoint(x: gutterWidth + 12, y: laneRow(.clip).midY - 7),
                 withAttributes: [.font: Theme.labelFont, .foregroundColor: Theme.textSecondary])
         }
         drawRuler()
@@ -438,6 +490,8 @@ final class TimelineView: NSView {
         drawMaskLane(project, timeMap)
         drawTextLane(project, timeMap)
         drawWindowLane(project, timeMap)
+        drawAudioLanes(project)
+        drawLinkedPartners(project)
         drawPlayhead(model.playhead)
         // Drawn after the playhead/its timecode chip so a cut near the playhead is never hidden
         // behind them — the ✂ bubble is an actionable affordance, the chip is informational.
@@ -473,7 +527,7 @@ final class TimelineView: NSView {
     private func drawLaneDividers() {
         Theme.stroke.setStroke()
         var y = Self.rulerHeight
-        for lane in Lane.allCases {
+        for lane in lanes {
             let h = laneHeight(lane)
             guard h > 0 else { continue }
             let line = NSBezierPath()
@@ -490,15 +544,15 @@ final class TimelineView: NSView {
         bottom.stroke()
 
         let gutterLine = NSBezierPath()
-        gutterLine.move(to: CGPoint(x: Self.gutter, y: 0))
-        gutterLine.line(to: CGPoint(x: Self.gutter, y: contentHeight))
+        gutterLine.move(to: CGPoint(x: gutterWidth, y: 0))
+        gutterLine.line(to: CGPoint(x: gutterWidth, y: contentHeight))
         gutterLine.lineWidth = 1
         gutterLine.stroke()
     }
 
     private func drawLaneLabels() {
         Theme.bgPanel.setFill()
-        CGRect(x: 0, y: 0, width: Self.gutter, height: contentHeight).fill()
+        CGRect(x: 0, y: 0, width: gutterWidth, height: contentHeight).fill()
         let labels: [Lane: String] = [.clip: "Video", .camera: "Camera", .zoom: "Zoom", .layout: "Layout", .keys: "Keys", .mask: "Mask", .text: "Text", .window: "Window"]
         let colors: [Lane: NSColor] = [.clip: Theme.clip, .camera: Theme.layout, .keys: Theme.layout, .zoom: Theme.zoom, .layout: Theme.layout, .mask: Theme.mask, .text: Theme.text, .window: Theme.clip]
         // Lane.allCases order. Typed per element: one long `?? 0` array literal times out CI's type checker.
@@ -507,11 +561,13 @@ final class TimelineView: NSView {
             let clipCount: Int = p.clips.filter { !$0.isEmpty }.count
             return [clipCount, p.cameraClips.count, p.zooms.count, p.keystrokeClips.count, p.layouts.count, p.masks.count, p.texts.count, p.windowShots.count]
         } ?? [Int](repeating: 0, count: Lane.allCases.count)
-        for (i, lane) in Lane.allCases.enumerated() {
+        for (i, lane) in lanes.enumerated() {
             let row = laneRow(lane)
             guard row.height > 0 else { continue }
+            if case .audio(let track) = lane { drawAudioHeader(track, row: row); continue }
             colors[lane]?.setFill()
-            CGRect(x: 10, y: row.midY - 5, width: 3, height: 10).fill()
+            CGRect(x: compactTrackHeaders ? 6 : 10, y: row.midY - 5, width: 3, height: 10).fill()
+            if compactTrackHeaders { continue }
             (labels[lane]! as NSString).draw(at: CGPoint(x: 22, y: row.midY - 7),
                 withAttributes: [.font: Theme.labelFont, .foregroundColor: Theme.textPrimary])
             if !((lane == .zoom || lane == .keys) && counts[i] == 0) {
@@ -519,7 +575,7 @@ final class TimelineView: NSView {
                     withAttributes: [.font: Theme.captionFont, .foregroundColor: Theme.textTertiary])
             }
         }
-        ("Tracks" as NSString).draw(at: CGPoint(x: 10, y: 4),
+        ((compactTrackHeaders ? "" : "Tracks") as NSString).draw(at: CGPoint(x: 10, y: 4),
             withAttributes: [.font: Theme.captionFont, .foregroundColor: Theme.textTertiary])
         drawLaneDividers()
         if window?.firstResponder === self {
@@ -529,11 +585,11 @@ final class TimelineView: NSView {
     }
 
     private func drawTrackBeds() {
-        for lane in Lane.allCases {
+        for lane in lanes {
             let row = laneRow(lane)
             guard row.height > 0 else { continue }
             Theme.bgControl.setFill()
-            CGRect(x: Self.gutter, y: row.minY + 3, width: max(0, bounds.width - Self.gutter), height: row.height - 6).fill()
+            CGRect(x: gutterWidth, y: row.minY + 3, width: max(0, bounds.width - gutterWidth), height: row.height - 6).fill()
         }
         let interval = geometry.tickInterval()
         var t = max(0, floor(geometry.output(forX: 0) / interval) * interval)
@@ -546,8 +602,8 @@ final class TimelineView: NSView {
 
     // A stable feedback rail, with a whole-project overview on its right.
     var overviewRect: CGRect {
-        CGRect(x: max(Self.gutter, bounds.width * 0.67), y: bounds.height - 25,
-               width: max(0, bounds.width - max(Self.gutter, bounds.width * 0.67) - 12), height: 20)
+        CGRect(x: max(gutterWidth, bounds.width * 0.67), y: bounds.height - 25,
+               width: max(0, bounds.width - max(gutterWidth, bounds.width * 0.67) - 12), height: 20)
     }
 
     private var selectedOutputRange: ClosedRange<Double>? {
@@ -565,8 +621,11 @@ final class TimelineView: NSView {
             + model.project.masks.map { ($0.id, $0.start, $0.end) }
             + model.project.texts.map { ($0.id, $0.start, $0.end) }
             + model.project.windowShots.map { ($0.id, $0.start, $0.end) }
-        let segments = blocks.filter { UUID(uuidString: $0.0).map(model.selection.contains) ?? false }
+        var segments = blocks.filter { UUID(uuidString: $0.0).map(model.selection.contains) ?? false }
             .flatMap { visibleSegments(start: $0.1, end: $0.2, project: model.project, timeMap: model.timeMap) }
+        for audio in model.project.audioClips where UUID(uuidString: audio.id).map(model.selection.contains) ?? false {
+            segments += model.project.audioSegments(audio).map { (outStart: $0.output.start, outEnd: $0.output.end, tornLeft: false, tornRight: false) }
+        }
         guard let start = segments.map(\.outStart).min(), let end = segments.map(\.outEnd).max() else { return nil }
         return start...end
     }
@@ -589,7 +648,7 @@ final class TimelineView: NSView {
             withAttributes: [.font: Theme.captionFont, .foregroundColor: Theme.textSecondary.withAlphaComponent(0.5 + 0.5 * reveal), .paragraphStyle: paragraph])
         let rect = overviewRect
         Theme.bgControl.setFill(); rect.fill()
-        let duration = model.timeMap.outputDuration
+        let duration = timelineDuration
         guard duration > 0, rect.width > 0 else { return }
         var start = 0.0
         for clip in model.project.clips {
@@ -659,69 +718,30 @@ final class TimelineView: NSView {
             guard rect.width > 0.5, !clip.isEmpty else { continue }
             let label = "Clip \(i + 1)  ·  \(formatSpeed(clip.speed))×"
             drawBlock(rect, fill: Theme.clip, tornLeft: false, tornRight: false, label: label, selected: model?.selectedClips.contains(i) == true)
-            drawWaveform(in: rect.height > 40 ? CGRect(x: rect.minX, y: rect.minY + 14, width: rect.width, height: 29) : CGRect(x: rect.minX, y: rect.midY + 4, width: rect.width, height: 12), outStart: outStart, outEnd: outEnd, timeMap: timeMap, clip: clip)
         }
     }
 
-    /// SPEC §7.1 clip lane: "waveform" peaks drawn inside each clip block, mapped through
-    /// `TimeMap` — `px`'s fraction across `rect` maps to output time `[outStart, outEnd)`, so the
-    /// waveform tracks the block exactly, including mid-ripple.
-    private func drawWaveform(in rect: CGRect, outStart: Double, outEnd: Double, timeMap: TimeMap, clip: Clip) {
-        guard let waveformPeaks, !waveformPeaks.isEmpty, outEnd > outStart else { return }
-        let inset = rect.insetBy(dx: 5, dy: 1)
-        guard inset.width > 1 else { return }
-        let midY = inset.midY
-        let outSpan = outEnd - outStart
-        // Silent spans: 1 px diagonal hatch over the strip (source time -> fraction of the clip block).
-        let srcSpan = clip.sourceEnd - clip.sourceStart
-        Theme.bgWindow.withAlphaComponent(0.3).setStroke()
-        for span in silentSpans where span.end > clip.sourceStart && span.start < clip.sourceEnd && srcSpan > 0 {
-            let a = inset.minX + inset.width * CGFloat((max(span.start, clip.sourceStart) - clip.sourceStart) / srcSpan)
-            let b = inset.minX + inset.width * CGFloat((min(span.end, clip.sourceEnd) - clip.sourceStart) / srcSpan)
-            NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(rect: CGRect(x: a, y: inset.minY, width: b - a, height: inset.height)).addClip()
-            let hatch = NSBezierPath()
-            var hx = a - inset.height
-            while hx < b { hatch.move(to: CGPoint(x: hx, y: inset.maxY)); hatch.line(to: CGPoint(x: hx + inset.height, y: inset.minY)); hx += 5 }
-            hatch.lineWidth = 1
-            hatch.stroke()
-            NSGraphicsContext.restoreGraphicsState()
-        }
-        // 2 px bars, 1 px gap, sqrt-scaled so quiet speech stays visible.
-        // ponytail: samples one 5 ms bucket per bar (no max over the bar's span), fine until zoomed far out.
-        Theme.bgWindow.withAlphaComponent(0.45).setFill()
-        var px = max(inset.minX, Self.gutter)
-        while px < min(inset.maxX, bounds.width) {
-            let fraction = (px - inset.minX) / inset.width
-            let outputT = outStart + fraction * outSpan
-            let sourceT = clip.mediaTime(atSource: timeMap.sourceTime(atOutput: outputT))
-            let index = Int(sourceT * Double(Waveform.peaksPerSecond))
-            if waveformPeaks.indices.contains(index) {
-                let amplitude = max(1, CGFloat(min(1, waveformPeaks[index]).squareRoot()) * inset.height / 2)
-                NSRect(x: px, y: midY - amplitude, width: 2, height: amplitude * 2).fill()
-            }
-            px += 3
-        }
-    }
-
-    // MARK: - Waveform loading (T-416)
-
-    /// `AVAssetReader`-backed, so off the main thread; `Waveform.peaks(for:)` also caches by URL
-    /// (`// ponytail: computed on open, not cached on disk`, per `Waveform.swift`).
     private func loadWaveformIfNeeded() {
-        guard let model, waveformLoadedForPackage != model.packageURL else { return }
-        let packageURL = model.packageURL
-        let hasMic = model.project.source.hasMic
-        waveformLoadedForPackage = packageURL
-        guard let audioURL = Waveform.audioURL(in: packageURL) else { return }
-        Task.detached { [weak self] in
-            let peaks = try? await Waveform.peaks(for: audioURL)
-            let silent = hasMic ? await Waveform.silent(in: audioURL) : []
-            await MainActor.run { [weak self] in
-                guard let self, self.waveformLoadedForPackage == packageURL else { return } // superseded by a later `model`
-                self.waveformPeaks = peaks
-                self.silentSpans = silent
-                self.needsDisplay = true
+        guard let model else { return }
+        let package = model.packageURL
+        if waveformLoadedForPackage != package {
+            waveformLoadedForPackage = package
+            waveformPeaks = [:]; silentSpans = [:]; mediaDurations = [:]; waveformFiles = []
+        }
+        for file in Set(model.project.audioClips.map(\.file)).subtracting(waveformFiles) {
+            waveformFiles.insert(file)
+            guard let url = Waveform.audioURL(in: package, file: file) else { continue }
+            Task.detached { [weak self] in
+                let peaks = try? await Waveform.peaks(for: url)
+                let silent = file == "mic.m4a" ? await Waveform.silent(in: url) : []
+                let duration = try? await AVURLAsset(url: url).load(.duration).seconds
+                await MainActor.run { [weak self] in
+                    guard let self, self.waveformLoadedForPackage == package else { return }
+                    self.waveformPeaks[file] = peaks
+                    self.silentSpans[file] = silent
+                    self.mediaDurations[file] = duration
+                    self.needsDisplay = true
+                }
             }
         }
     }
@@ -927,7 +947,7 @@ final class TimelineView: NSView {
                                                   .paragraphStyle: paragraph]
         let text = label as NSString
         let size = text.size(withAttributes: attrs)
-        let textRect = CGRect(x: max(rect.minX + 10, Self.gutter + 10), y: rect.minY + (rect.height > 35 ? 4 : (rect.height - size.height) / 2), width: max(0, rect.maxX - max(rect.minX + 10, Self.gutter + 10) - 10), height: size.height)
+        let textRect = CGRect(x: max(rect.minX + 10, gutterWidth + 10), y: rect.minY + (rect.height > 35 ? 4 : (rect.height - size.height) / 2), width: max(0, rect.maxX - max(rect.minX + 10, gutterWidth + 10) - 10), height: size.height)
         text.draw(in: textRect, withAttributes: attrs)
     }
 
@@ -935,7 +955,7 @@ final class TimelineView: NSView {
 
     private func drawPlayhead(_ t: Double) {
         let px = x(forOutput: t)
-        guard px >= Self.gutter, px <= bounds.width else { return }
+        guard px >= gutterWidth, px <= bounds.width else { return }
         let line = NSBezierPath()
         line.move(to: CGPoint(x: px, y: 0))
         line.line(to: CGPoint(x: px, y: contentHeight))
@@ -965,7 +985,7 @@ final class TimelineView: NSView {
 
     /// 1 px white @ 30% line following the mouse, with a timecode tooltip (SPEC §7.1 "hover line").
     private func drawHover() {
-        guard let hoverX, hoverX > Self.gutter, (hoverY ?? 0) < contentHeight, dragKind == nil else { return }
+        guard let hoverX, hoverX > gutterWidth, (hoverY ?? 0) < contentHeight, dragKind == nil else { return }
         let line = NSBezierPath()
         line.move(to: CGPoint(x: hoverX, y: 0))
         line.line(to: CGPoint(x: hoverX, y: contentHeight))
@@ -973,7 +993,7 @@ final class TimelineView: NSView {
         Theme.textPrimary.withAlphaComponent(0.3).setStroke()
         line.stroke()
 
-        let t = min(model?.timeMap.outputDuration ?? 0, max(0, geometry.output(forX: Double(hoverX) - Double(Self.gutter))))
+        let t = min(timelineDuration, max(0, geometry.output(forX: Double(hoverX) - Double(gutterWidth))))
         let attrs: [NSAttributedString.Key: Any] = [.font: Theme.timecodeFont(10), .foregroundColor: Theme.textSecondary]
         let label = playheadLabel(t) as NSString
         let size = label.size(withAttributes: attrs)
@@ -990,7 +1010,7 @@ final class TimelineView: NSView {
     private func drawSplitBlade() {
         guard let t = bladeOutputTime() else { return }
         let px = x(forOutput: t) + bladeShakeOffset()
-        let row = laneRow(Lane.allCases.first { laneRow($0).contains(CGPoint(x: Self.gutter + 1, y: hoverY ?? 0)) } ?? .clip)
+        let row = laneRow(lanes.first { laneRow($0).contains(CGPoint(x: gutterWidth + 1, y: hoverY ?? 0)) } ?? .clip)
 
         let line = NSBezierPath()
         line.move(to: CGPoint(x: px, y: row.minY))
@@ -1047,11 +1067,11 @@ final class TimelineView: NSView {
     /// The blade's current (snapped) output time, from the last hover position. `nil` before the
     /// mouse has ever entered the view.
     private func bladeOutputTime() -> Double? {
-        guard let hoverX, hoverX > Self.gutter, let model else { return nil }
+        guard let hoverX, hoverX > gutterWidth, model != nil else { return nil }
         let raw = geometry.output(forX: geometryX(NSPoint(x: hoverX, y: 0)))
         let (value, snapped) = snappedOutput(raw, disabled: NSEvent.modifierFlags.contains(.command))
         snapGuideX = snapped ? x(forOutput: value) : nil
-        return min(max(0, value), model.timeMap.outputDuration)
+        return min(max(0, value), timelineDuration)
     }
 
     /// `Esc` exits split mode; the ✂ toolbar button and `S` toggle the sticky half of it.
@@ -1084,7 +1104,8 @@ final class TimelineView: NSView {
         default: return
         }
         let changed: Bool
-        if let block { changed = trial.splitBlock(block, atSource: model.timeMap.sourceTime(atOutput: t)) }
+        if let block, trial.audioClips.contains(where: { $0.id == block.uuidString }) { changed = trial.splitAudio(block, atOutput: t) }
+        else if let block { changed = trial.splitBlock(block, atSource: model.timeMap.sourceTime(atOutput: t)) }
         else {
             if !clipOnly, target == nil, let selected = model.selectedClip, trial.clipIndex(atOutput: t) != selected { return }
             changed = trial.split(atOutput: t)
@@ -1145,6 +1166,12 @@ final class TimelineView: NSView {
         for click in model.events.clicks() {
             if let out = timeMap.outputTime(atSource: click.t) { candidates.append(out) }
         }
+        for audio in project.audioClips where UUID(uuidString: audio.id) != excludingBlock {
+            for segment in project.audioSegments(audio) { candidates += [segment.output.start, segment.output.end] }
+        }
+        for layer in project.layers {
+            if let start = timeMap.outputTime(atSource: layer.start) { candidates += [start, start + layer.end - layer.start] }
+        }
         return candidates
     }
 
@@ -1183,7 +1210,7 @@ final class TimelineView: NSView {
     private func edgeZone(width: CGFloat) -> CGFloat { width < 24 ? 3 : 6 }
 
     func hitTest(at p: CGPoint) -> TimelineHit {
-        guard let model, p.x >= Self.gutter, p.y >= 0, p.y <= contentHeight else { return .none }
+        guard let model, p.x >= gutterWidth, p.y >= 0, p.y <= contentHeight else { return .none }
 
         let playheadX = x(forOutput: model.playhead)
         if p.y <= Self.rulerHeight, abs(p.x - playheadX) <= 6 { return .playhead }
@@ -1198,6 +1225,17 @@ final class TimelineView: NSView {
         if let hit = hitBlockLane(p, model, lane: .mask, blocks: model.project.masks.map { ($0.id, $0.start, $0.end) }) { return hit }
         if let hit = hitBlockLane(p, model, lane: .text, blocks: model.project.texts.map { ($0.id, $0.start, $0.end) }) { return hit }
         if laneHeight(.window) > 0, let hit = hitBlockLane(p, model, lane: .window, blocks: model.project.windowShots.map { ($0.id, $0.start, $0.end) }) { return hit }
+        for audio in model.project.audioClips {
+            guard let id = UUID(uuidString: audio.id) else { continue }
+            for segment in model.project.audioSegments(audio) {
+                let rect = audioRect(audio, output: segment.output)
+                guard p.x >= rect.minX, p.x <= rect.maxX, p.y >= rect.minY - 3, p.y <= rect.maxY + 3 else { continue }
+                let zone = edgeZone(width: rect.width)
+                if p.x <= rect.minX + zone { return .blockEdge(id, .leading) }
+                if p.x >= rect.maxX - zone { return .blockEdge(id, .trailing) }
+                return .blockBody(id)
+            }
+        }
         if let hit = hitCutBubble(p, model) { return hit }
         if let hit = hitEmptyLane(p, model) { return hit }
         if p.y <= Self.rulerHeight { return .ruler }
@@ -1291,7 +1329,7 @@ final class TimelineView: NSView {
         for lane: Lane in [.camera, .zoom, .keys, .layout, .mask, .text, .window] {
             guard laneHeight(lane) > 0 else { continue }
             let row = laneRow(lane)
-            guard p.y >= row.minY, p.y <= row.maxY, p.x >= Self.gutter else { continue }
+            guard p.y >= row.minY, p.y <= row.maxY, p.x >= gutterWidth else { continue }
             let t = geometry.output(forX: geometryX(p))
             return .emptyLane(lane, source: model.timeMap.sourceTime(atOutput: t))
         }
@@ -1322,6 +1360,7 @@ final class TimelineView: NSView {
         if model.project.masks.contains(where: { $0.id == key }) { return .mask }
         if model.project.texts.contains(where: { $0.id == key }) { return .text }
         if model.project.windowShots.contains(where: { $0.id == key }) { return .window }
+        if let audio = model.project.audioClips.first(where: { $0.id == key }) { return .audio(audio.track) }
         return nil
     }
 
@@ -1346,15 +1385,15 @@ final class TimelineView: NSView {
     }
 
     /// `⌫` removes the selection: the selected clip, or every selected zoom/layout/mask block.
-    private func removeSelection() {
+    func removeSelection(ignoringLinks: Bool = false) {
         guard let model else { return }
         if !model.selectedClips.isEmpty {
             let indices = model.selectedClips
-            model.edit("Remove Clips") { $0.deleteClips(indices) }
+            model.edit("Remove Clips") { $0.deleteClips(indices, propagate: !ignoringLinks) }
             model.selectedClip = nil
         } else if !model.selection.isEmpty {
             let ids = model.selection
-            model.edit("Remove") { project in for id in ids { project.removeBlock(id) } }
+            model.edit("Remove") { project in for id in ids { project.removeBlock(id, propagate: !ignoringLinks) } }
             model.selection = []
         }
     }
@@ -1372,6 +1411,7 @@ final class TimelineView: NSView {
         case .clipBody(let i), .clipEdge(let i, _):
             return clipContextMenu(index: i)
         case .blockBody(let id), .blockEdge(let id, _):
+            if model?.project.audioClips.contains(where: { $0.id == id.uuidString }) == true { return audioContextMenu(id: id) }
             if lane(ofBlock: id) == .zoom { return zoomContextMenu(id: id) }
             selectBlock(id, addToSelection: false)
             let menu = NSMenu()
@@ -1521,13 +1561,13 @@ final class TimelineView: NSView {
     /// The px/s that fits the whole project's output duration in the current view width — the
     /// low end of the zoom range ("whole project ↔ 1 frame = 8 pt").
     private func minPxPerSecond() -> Double {
-        guard let model else { return 8 }
-        let duration = model.timeMap.outputDuration
+        guard model != nil else { return 8 }
+        let duration = timelineDuration
         return duration > 0 ? geometry.width / duration : 8
     }
 
     private func clampScrollX(_ x: Double) -> Double {
-        let maxX = max(0, (model?.timeMap.outputDuration ?? 0) * geometry.pxPerSecond - geometry.width)
+        let maxX = max(0, timelineDuration * geometry.pxPerSecond - geometry.width)
         return min(max(0, x), maxX)
     }
 
@@ -1550,7 +1590,7 @@ final class TimelineView: NSView {
     /// happens last — first non-zero width *and* a known duration), and never once the user has
     /// manually zoomed.
     private func maybeFitOnFirstLayout() {
-        guard !didFitOnFirstLayout, !userDidZoom, geometry.width > 0, let model, model.timeMap.outputDuration > 0 else { return }
+        guard !didFitOnFirstLayout, !userDidZoom, geometry.width > 0, model != nil, timelineDuration > 0 else { return }
         fit()
         didFitOnFirstLayout = true
     }
@@ -1572,11 +1612,16 @@ final class TimelineView: NSView {
 
     /// View-local x (past the gutter, as `geometry` expects) for a point already converted to
     /// this view's coordinate space.
-    private func geometryX(_ p: NSPoint) -> Double { Double(p.x) - Double(Self.gutter) }
+    private func geometryX(_ p: NSPoint) -> Double { Double(p.x) - Double(gutterWidth) }
 
     // MARK: - Scroll / pinch (SPEC §7.2 "Navigation")
 
     override func scrollWheel(with event: NSEvent) {
+        if let scroll = enclosingScrollView, frame.height > scroll.contentSize.height,
+           abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX), !event.modifierFlags.contains(.shift), !event.modifierFlags.contains(.command) {
+            super.scrollWheel(with: event)
+            return
+        }
         let p = convert(event.locationInWindow, from: nil)
         if event.modifierFlags.contains(.command) {
             zoom(by: exp(Double(event.scrollingDeltaY) * 0.01), anchorX: geometryX(p))
@@ -1606,6 +1651,7 @@ final class TimelineView: NSView {
         if cmd, chars?.lowercased() == "x" { cut(nil); return }
         if cmd, chars?.lowercased() == "c" { copy(nil); return }
         if cmd, chars?.lowercased() == "v" { paste(nil); return }
+        if cmd, chars?.lowercased() == "l" { toggleAudioLink(); return }
         if !cmd, chars?.lowercased() == "n" { toggleSnapping(); return }
         if !cmd, chars?.lowercased() == "f" { menuZoomToSelection(); return }
         if cmd, chars == "=" || chars == "+", let model {
@@ -1615,7 +1661,7 @@ final class TimelineView: NSView {
         } else if shift, chars?.lowercased() == "z" {
             fit()
         } else if event.keyCode == 51 || event.keyCode == 117 { // delete / forward-delete: ⌫ removes the selection
-            removeSelection()
+            removeSelection(ignoringLinks: event.modifierFlags.contains(.option))
         } else if !cmd, chars?.lowercased() == "c", let model { // `C` = split at the playhead, immediately
             performSplit(atOutput: model.playhead)
         } else if !cmd, chars?.lowercased() == "s" { // `S` = sticky split mode
@@ -1670,8 +1716,8 @@ final class TimelineView: NSView {
     }
 
     private func panOverview(to x: CGFloat, centered: Bool) {
-        guard let model, let drag = overviewDrag, overviewRect.width > 0 else { return }
-        let scale = model.timeMap.outputDuration * geometry.pxPerSecond / overviewRect.width
+        guard model != nil, let drag = overviewDrag, overviewRect.width > 0 else { return }
+        let scale = timelineDuration * geometry.pxPerSecond / overviewRect.width
         geometry.scrollX = clampScrollX(centered
             ? (x - overviewRect.minX) * scale - geometry.width / 2
             : drag.scroll + (x - drag.x) * scale)
@@ -1682,10 +1728,11 @@ final class TimelineView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let p = convert(event.locationInWindow, from: nil)
+        dragIgnoresLinks = event.modifierFlags.contains(.option)
         if bounds.height >= contentHeight + 26, overviewRect.contains(p) {
             let original = geometry.scrollX
             overviewDrag = (p.x, original, original)
-            let duration = model?.timeMap.outputDuration ?? 0
+            let duration = timelineDuration
             let time = (p.x - overviewRect.minX) / overviewRect.width * duration
             if time < geometry.output(forX: 0) || time > geometry.output(forX: geometry.width) {
                 panOverview(to: p.x, centered: true)
@@ -1693,7 +1740,8 @@ final class TimelineView: NSView {
             overviewDrag = (p.x, geometry.scrollX, original)
             return
         }
-        guard p.x >= Self.gutter, p.y <= bounds.height - 26 else { return }
+        guard p.x >= gutterWidth, p.y <= bounds.height - 26 else { return }
+        if beginAudioDrag(at: p, event: event) { return }
         if case .blockBody = hitTest(at: p) {
             dragOrigin = blockRect(at: p)
         } else if case .blockEdge = hitTest(at: p) {
@@ -1756,7 +1804,7 @@ final class TimelineView: NSView {
                     case .mask: id = project.addMask(atSource: source, kind: .blur, opacity: 1)
                     case .text: id = project.addText(atSource: source)
                     case .window: id = project.addWindowShot(atSource: source, window: (project.windowIndex(atSource: source) + 1) % project.windowCount)
-                    case .clip: break
+                    case .clip, .audio: break
                     }
                 }
                 guard let id else { model.cancelGesture(); return }
@@ -1809,7 +1857,7 @@ final class TimelineView: NSView {
             }
             model.update { project in
                 if let dragProject { project = dragProject }
-                model.selectedClips = project.moveClips(dragSelection, byOutput: delta)
+                model.selectedClips = project.moveClips(dragSelection, byOutput: delta, propagate: !dragIgnoresLinks)
             }
         case .createBlock(let id, let lane, let anchor):
             guard let model else { return }
@@ -1848,7 +1896,7 @@ final class TimelineView: NSView {
                     project.resizeLayout(id, edge: .leading, to: min(anchor, source))
                     project.resizeLayout(id, edge: .trailing, to: max(anchor, source))
                     project.resizeLayout(id, edge: .leading, to: min(anchor, source))
-                case .clip: break
+                case .clip, .audio: break
                 }
             }
             needsDisplay = true
@@ -1861,6 +1909,10 @@ final class TimelineView: NSView {
             updateMoveBlock(id: id, lane: lane, grabOffset: grabOffset, viewX: p.x, snapDisabled: snapDisabled)
         case .resizeBlock(let id, let lane, let edge):
             updateResizeBlock(id: id, lane: lane, edge: edge, viewX: p.x, snapDisabled: snapDisabled)
+        case .audio(let id, let edge, let offset):
+            updateAudioDrag(id: id, edge: edge, grabOffset: offset, point: p, snapDisabled: snapDisabled)
+        case .audioFade(let id, let edge):
+            updateAudioFade(id: id, edge: edge, point: p)
         case nil:
             break
         }
@@ -1891,6 +1943,10 @@ final class TimelineView: NSView {
             model?.commitGesture("Move \(laneName(lane))")
         case .resizeBlock(_, let lane, _):
             model?.commitGesture("Resize \(laneName(lane))")
+        case .audio(_, let edge, _):
+            model?.commitGesture(edge == nil ? "Move Audio" : "Trim Audio")
+        case .audioFade:
+            model?.commitGesture("Audio Fade")
         case .scrub, nil:
             dragKind = nil
             return
@@ -1931,7 +1987,7 @@ final class TimelineView: NSView {
         default: break
         }
         switch dragKind {
-        case .moveClip, .trimClip, .moveBlock, .resizeBlock, .createBlock:
+        case .moveClip, .trimClip, .moveBlock, .resizeBlock, .createBlock, .audio, .audioFade:
             model?.cancelGesture()
         case .scrub, nil:
             dragKind = nil
@@ -1975,7 +2031,7 @@ final class TimelineView: NSView {
         model.update { project in
             if let dragProject { project = dragProject }
             model.selectedClip = project.placeClip(index, start: edge == .leading ? target : beginSourceStart,
-                                                   end: edge == .trailing ? target : beginSourceEnd)
+                                                   end: edge == .trailing ? target : beginSourceEnd, propagate: !dragIgnoresLinks)
         }
         let index = model.selectedClip ?? index
 
@@ -2014,6 +2070,7 @@ final class TimelineView: NSView {
         case .mask: return "Mask"
         case .text: return "Text"
         case .window: return "Window"
+        case .audio(let track): return model?.project.audioTracks[track].name ?? "Audio"
         }
     }
 
@@ -2030,7 +2087,7 @@ final class TimelineView: NSView {
         case .mask: model.edit("Add Mask") { newID = $0.addMask(atSource: s, kind: .mask) }
         case .text: newID = model.addText(atSource: s)
         case .window: model.edit("Add Window Shot") { newID = $0.addWindowShot(atSource: s, window: ($0.windowIndex(atSource: s) + 1) % $0.windowCount) }
-        case .clip: break // clips are never added this way (SPEC's hit-test table only lists zoom/layout/mask)
+        case .clip, .audio: break
         }
         if let newID { selectBlock(newID, addToSelection: false) }
     }
@@ -2071,6 +2128,7 @@ final class TimelineView: NSView {
         case .mask: return model.project.masks.first { $0.id == id.uuidString }?.start
         case .text: return model.project.texts.first { $0.id == id.uuidString }?.start
         case .window: return model.project.windowShots.first { $0.id == id.uuidString }?.start
+        case .audio: return model.project.audioClips.first { $0.id == id.uuidString }?.start
         case .clip: return nil
         }
     }
@@ -2096,12 +2154,12 @@ final class TimelineView: NSView {
             switch lane {
             case .zoom: project.moveZoom(id, toStart: toStart)
             case .keys: project.moveKeys(id, toStart: toStart)
-            case .camera: project.moveCamera(id, toStart: toStart)
+            case .camera: project.moveCamera(id, toStart: toStart, propagate: !dragIgnoresLinks)
             case .layout: project.moveLayout(id, toStart: toStart)
             case .mask: project.moveMask(id, toStart: toStart)
             case .text: project.moveText(id, toStart: toStart)
             case .window: project.moveWindowShot(id, toStart: toStart)
-            case .clip: break
+            case .clip, .audio: break
             }
         }
         needsDisplay = true
@@ -2124,12 +2182,12 @@ final class TimelineView: NSView {
             switch lane {
             case .zoom: project.resizeZoom(id, edge: edge, to: source)
             case .keys: project.resizeKeys(id, edge: edge, to: source)
-            case .camera: project.resizeCamera(id, edge: edge, to: source)
+            case .camera: project.resizeCamera(id, edge: edge, to: source, propagate: !dragIgnoresLinks)
             case .layout: project.resizeLayout(id, edge: edge, to: source)
             case .mask: project.resizeMask(id, edge: edge, to: source)
             case .text: project.resizeText(id, edge: edge, to: source)
             case .window: project.resizeWindowShot(id, edge: edge, to: source)
-            case .clip: break
+            case .clip, .audio: break
             }
         }
         needsDisplay = true
@@ -2156,7 +2214,7 @@ final class TimelineView: NSView {
                   let block = trial.texts.first(where: { $0.id == id.uuidString }) else { return nil }
             return (block.start, block.end)
         case .window: return model?.project.previewWindowShotPlacement(atSource: s)
-        case .clip: return nil
+        case .clip, .audio: return nil
         }
     }
 
@@ -2170,6 +2228,7 @@ final class TimelineView: NSView {
         case .mask: return Theme.mask
         case .text: return Theme.text
         case .window: return Theme.clip
+        case .audio: return Theme.audio
         }
     }
 
@@ -2184,12 +2243,13 @@ final class TimelineView: NSView {
         case .mask: return "+ Mask"
         case .text: return "+ Text"
         case .window: return "+ Window"
+        case .audio: return ""
         }
     }
 
     /// "Empty zoom/layout/mask lane: ghost block under pointer" (SPEC §7.1/§7.2).
     private func drawEmptyLaneGhost() {
-        guard dragKind == nil, !isSplitMode, let model, let hoverX, let hoverY, hoverX > Self.gutter else { return }
+        guard dragKind == nil, !isSplitMode, let model, let hoverX, let hoverY, hoverX > gutterWidth else { return }
         guard let lane = [Lane.camera, .zoom, .keys, .layout, .mask, .text, .window].first(where: { laneHeight($0) > 0 && hoverY >= laneRow($0).minY && hoverY <= laneRow($0).maxY }) else { return }
         let row = laneRow(lane)
         let s = model.timeMap.sourceTime(atOutput: geometry.output(forX: geometryX(NSPoint(x: hoverX, y: 0))))
@@ -2311,7 +2371,7 @@ final class TimelineView: NSView {
     private func scrub(toViewX viewX: CGFloat) {
         guard let model else { return }
         let t = geometry.output(forX: geometryX(NSPoint(x: viewX, y: 0)))
-        model.playhead = min(max(0, t), model.timeMap.outputDuration)
+        model.playhead = min(max(0, t), timelineDuration)
     }
 
     // MARK: - Hover line + timecode tooltip (`NSTrackingArea`, `mouseMoved`)
@@ -2398,6 +2458,23 @@ final class TimelineView: NSView {
                                          label: { "Window \($0.window + 1)" },
                                          nudge: { [weak self] id, frames in self?.nudgeWindowShot(id, frames: frames) })
         }
+        for audio in model.project.audioClips {
+            let segments = model.project.audioSegments(audio)
+            guard let first = segments.first, let last = segments.last, let id = UUID(uuidString: audio.id) else { continue }
+            let link: String
+            switch audio.link {
+            case .screen: link = "linked to screen"
+            case .camera: link = "linked to camera"
+            case .layer: link = "linked to its video"
+            case nil: link = "unlinked"
+            }
+            let label = "\(model.project.audioTracks[audio.track].name) audio, \(link), \(axTime(first.output.start)) to \(axTime(last.output.end)) seconds"
+            elements.append(axElement(frame: audioRect(audio, output: TimeRange(start: first.output.start, end: last.output.end)), label: label) { [weak self] frames in
+                guard let self, let model = self.model else { return }
+                let source = model.timeMap.sourceTime(atOutput: first.output.start + Double(frames) / 60)
+                model.edit("Move Audio") { $0.moveAudio(id, toStart: source) }
+            })
+        }
         if bounds.height >= contentHeight + 26 {
             let overview = axElement(frame: overviewRect, label: "Timeline overview", nudge: { [weak self] direction in
                 guard let self else { return }
@@ -2406,10 +2483,11 @@ final class TimelineView: NSView {
                 self.needsDisplay = true
             })
             overview.setAccessibilityRole(.slider)
-            overview.setAccessibilityValue("Visible \(playheadLabel(geometry.output(forX: 0))) to \(playheadLabel(min(model.timeMap.outputDuration, geometry.output(forX: geometry.width))))")
+            overview.setAccessibilityValue("Visible \(playheadLabel(geometry.output(forX: 0))) to \(playheadLabel(min(timelineDuration, geometry.output(forX: geometry.width))))")
             elements.append(overview)
         }
-        return elements + [fullZoomButton, fullKeysButton].filter { !$0.isHidden }
+        let audioControls = audioHeaderButtons.values.flatMap { [$0.volume, $0.mute, $0.record] }
+        return elements + ([fullZoomButton, fullKeysButton] + audioControls).filter { !$0.isHidden }
     }
 
     /// Clip blocks: label per AC-TL-8's own shape, plus a speed suffix when sped up. A clip has no
@@ -2498,6 +2576,470 @@ final class TimelineView: NSView {
         let clip = model.project.clips[i]
         let delta = Double(frames) * Self.axFrameSeconds * clip.timeScale // OUTPUT-frame nudge -> SOURCE delta
         model.edit("Trim Clip") { model.selectedClip = $0.placeClip(i, start: clip.sourceStart, end: clip.sourceEnd + delta) }
+    }
+}
+
+extension TimelineView {
+    @MainActor static func runAudioUISelfTest() throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }
+        _ = NSApplication.shared
+        let package = FileManager.default.temporaryDirectory.appendingPathComponent("audio-ui-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: package) }
+        var project = Project(source: Source(duration: 12, hasCamera: true, hasMic: true), clips: [Clip(sourceStart: 0, sourceEnd: 12)])
+        project.cameraClips = [CameraClip(start: 2, end: 6)]
+        project.audioTracks = [AudioTrack(name: "Mic"), AudioTrack(name: "System"), AudioTrack(name: "Voiceover 1"), AudioTrack(name: "Audio 1")]
+        project.audioClips = [AudioClip(start: 2, end: 6, mediaStart: 2, file: "mic.m4a", track: 0, link: .camera),
+                              AudioClip(start: 0, end: 12, file: "system.m4a", track: 1, link: .screen),
+                              AudioClip(start: 8, end: 10, file: "voice.m4a", track: 2),
+                              AudioClip(start: 9, end: 11, file: "music.m4a", track: 3)]
+        let model = EditorModel(packageURL: package, project: project, events: EventLog())
+        defer { model.saveNow() }
+        let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 1000, height: 400))
+        view.model = model
+        view.mediaDurations = ["mic.m4a": 12, "system.m4a": 12, "voice.m4a": 12, "music.m4a": 12]
+        let toolbar = TimelineToolbar(frame: .zero)
+        toolbar.timelineView = view
+        let container = TimelineContainerView(toolbar: toolbar, timeline: view)
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1000, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = container
+        container.layoutSubtreeIfNeeded()
+        view.geometry.pxPerSecond = 60
+        let id = UUID(uuidString: project.audioClips[0].id)!
+        func point(_ time: Double, track: Int = 0) -> CGPoint { CGPoint(x: view.x(forOutput: time), y: view.laneMidY(.audio(track)) + 5) }
+        func event(_ type: NSEvent.EventType, _ point: CGPoint, _ modifiers: NSEvent.ModifierFlags = [.command]) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: modifiers,
+                               timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        func drag(_ start: CGPoint, _ end: CGPoint, modifiers: NSEvent.ModifierFlags = [.command]) {
+            view.mouseDown(with: event(.leftMouseDown, start, modifiers))
+            view.mouseDragged(with: event(.leftMouseDragged, end, modifiers))
+            view.mouseUp(with: event(.leftMouseUp, end, modifiers))
+        }
+        try check(view.lanes.suffix(4) == [.audio(0), .audio(1), .audio(2), .audio(3)], "Audio lane order")
+        drag(point(3), point(4), modifiers: [.command, .option])
+        let shifted = model.project.audioClips.first { $0.id == id.uuidString }!
+        try check(model.project.cameraClips == project.cameraClips && shifted.start == 3, "Option drag moved camera or ignored audio")
+        try check(model.undoStepCount == 1 && abs(model.project.syncOffset(shifted)! - 1) < 1e-8, "Option drag sync/undo")
+        view.menuAudioSync()
+        try check(abs(model.project.syncOffset(model.project.audioClips.first { $0.id == id.uuidString }!)!) < 1e-8, "Move into Sync left offset")
+        model.undo(); model.undo()
+        try check(model.project == project && model.undoStepCount == 0, "Sync/drag undo")
+        model.selection = [id]
+        view.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "l", charactersIgnoringModifiers: "l", isARepeat: false, keyCode: 37)!)
+        let detached = model.project
+        drag(point(3), point(4))
+        try check(model.project.cameraClips == project.cameraClips && model.project.audioClips.first { $0.id == id.uuidString }?.start == 3, "Detached audio move")
+        try check(model.undoStepCount == 2, "Detached move was not one undo step")
+        model.undo(); try check(model.project == detached, "Detached move undo")
+        model.undo(); try check(model.project == project, "Unlink undo")
+        drag(point(3), point(4))
+        try check(model.project.cameraClips[0].start == 3 && model.undoStepCount == 1, "Linked audio did not carry camera")
+        model.undo()
+        drag(point(6), point(5), modifiers: [.command, .option])
+        try check(model.project.audioClips.first { $0.id == id.uuidString }?.end == 5 && model.project.cameraClips == project.cameraClips, "Option trim")
+        model.undo()
+        let targetY = view.laneMidY(.audio(2))
+        view.mouseDown(with: event(.leftMouseDown, point(3), [.command, .option]))
+        view.mouseDragged(with: event(.leftMouseDragged, point(3, track: 2), [.command, .option]))
+        container.layoutSubtreeIfNeeded()
+        try check(view.laneMidY(.audio(2)) == targetY && view.lanes.contains(.audio(0)) && view.debugDragKind == "audio", "Audio lane shifted during drag")
+        view.mouseUp(with: event(.leftMouseUp, point(3, track: 2), [.command, .option]))
+        try check(model.project.audioClips.first { $0.id == id.uuidString }?.track == 2 && model.undoStepCount == 1, "Vertical lane move")
+        model.undo()
+        drag(point(3), point(3, track: 1), modifiers: [.command, .option])
+        try check(model.project == project && model.undoStepCount == 0, "Occupied audio lane accepted overlap")
+        let handle = view.fadeHandle(project.audioClips[0], edge: .leading, project: project)!
+        drag(CGPoint(x: handle.midX, y: handle.midY), CGPoint(x: view.x(forOutput: 2.76), y: handle.midY))
+        try check(model.project.audioClips.first { $0.id == id.uuidString }?.fadeIn == 0.8 && model.undoStepCount == 1, "Fade handle quantization/undo")
+        model.undo()
+        view.mouseDown(with: event(.leftMouseDown, point(3), [.command, .option]))
+        view.mouseDragged(with: event(.leftMouseDragged, point(4), [.command, .option]))
+        view.cancelOperation(nil)
+        try check(model.project == project && model.undoStepCount == 0, "Escape did not roll audio drag back")
+        view.layoutSubtreeIfNeeded()
+        guard let mute = view.audioHeaderButtons[0]?.mute else { throw Fail(description: "Missing mute header") }
+        mute.performClick(nil)
+        try check(model.project.audioTracks[0].muted && model.undoStepCount == 1, "Track mute")
+        model.undo()
+        model.beginGesture()
+        for value in [0.4, 0.8, 1.5] { view.trackVolumeBinding(0).wrappedValue = value }
+        model.commitGesture("Track Volume")
+        try check(model.project.audioTracks[0].volume == 1.5 && model.undoStepCount == 1, "Track volume gesture")
+        model.undo()
+        model.selection = [id]
+        let menu = view.audioContextMenu(id: id)
+        try check(menu.items.contains { $0.title.hasPrefix("Unlink") } && menu.items.contains { $0.title == "Move into Sync" }, "Audio context menu")
+        let labels = (view.accessibilityChildren() ?? []).compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
+        try check(labels.contains("Mic audio, linked to camera, 2.0 to 6.0 seconds"), "Audio accessibility label")
+        let panel = AudioPanel(model: model, audioID: id)
+        model.beginGesture(); panel.gainBinding.wrappedValue = -6; model.commitGesture("Audio Gain")
+        try check(abs(model.project.audioClips[0].gain - pow(10, -6 / 20.0)) < 1e-8 && model.undoStepCount == 1, "Audio inspector dB gain")
+        model.undo()
+        model.beginGesture(); panel.fadeBinding(incoming: false).wrappedValue = 0.44; model.commitGesture("Audio Fade")
+        try check(model.project.audioClips[0].fadeOut == 0.4 && model.undoStepCount == 1, "Audio inspector fade")
+        model.undo()
+        let hosting = NSHostingView(rootView: InspectorView(model: model))
+        hosting.frame = CGRect(x: 0, y: 0, width: 320, height: 600)
+        guard let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { throw Fail(description: "Audio panel bitmap") }
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/recorder-audio-inspector.png"))
+        view.toggleCompactTrackHeaders(); view.layoutSubtreeIfNeeded()
+        try check(view.gutterWidth == 16 && view.audioHeaderButtons.values.allSatisfy { $0.volume.isHidden && $0.mute.isHidden }, "Compact headers")
+        view.toggleCompactTrackHeaders()
+        container.setFrameSize(CGSize(width: 640, height: 220)); container.layoutSubtreeIfNeeded()
+        try check(view.frame.height >= view.contentHeight + 26 && view.enclosingScrollView?.hasVerticalScroller == true, "Audio lanes clipped at minimum size")
+        view.scrollToVisible(view.audioRect(project.audioClips[3], output: TimeRange(start: 9, end: 11)))
+        try check(view.visibleRect.intersects(view.laneRow(.audio(3))), "Bottom audio lane not reachable")
+        try check(model.project == project && model.project.checkInvariants() == nil, "Audio UI left invalid data")
+    }
+
+    private func beginAudioDrag(at point: CGPoint, event: NSEvent) -> Bool {
+        guard let model else { return false }
+        let id: UUID, edge: RecorderCore.Edge?
+        switch hitTest(at: point) {
+        case .blockBody(let block): id = block; edge = nil
+        case .blockEdge(let block, let side): id = block; edge = side
+        default: return false
+        }
+        guard let clip = model.project.audioClips.first(where: { $0.id == id.uuidString }),
+              let first = model.project.audioSegments(clip).first else { return false }
+        if splitModeSticky { return false }
+        selectBlock(id, addToSelection: event.modifierFlags.contains(.shift))
+        if event.modifierFlags.contains(.shift) { return true }
+        dragProject = model.project
+        dragOrigin = audioRect(clip, output: TimeRange(start: first.output.start, end: model.project.audioSegments(clip).last!.output.end))
+        model.beginGesture()
+        for side in [RecorderCore.Edge.leading, .trailing] {
+            if fadeHandle(clip, edge: side, project: model.project)?.insetBy(dx: -3, dy: -4).contains(point) == true {
+                dragKind = .audioFade(id: id, edge: side)
+                return true
+            }
+        }
+        dragKind = .audio(id: id, edge: edge, grabOffset: geometry.output(forX: geometryX(point)) - first.output.start)
+        return true
+    }
+
+    private func updateAudioDrag(id: UUID, edge: RecorderCore.Edge?, grabOffset: Double, point: CGPoint, snapDisabled: Bool) {
+        guard let model, let original = dragProject,
+              let clip = original.audioClips.first(where: { $0.id == id.uuidString }) else { return }
+        let raw = geometry.output(forX: geometryX(point)) - (edge == nil ? grabOffset : 0)
+        let (output, snapped) = snappedOutput(raw, excludingBlock: id, disabled: snapDisabled)
+        var changed = original
+        if let edge {
+            changed.resizeAudio(id, edge: edge, toOutput: output,
+                                mediaDuration: mediaDurations[clip.file] ?? clip.mediaStart + original.audioSegments(clip).reduce(0) { $0 + $1.media.end - $1.media.start },
+                                propagate: !dragIgnoresLinks)
+        } else {
+            if let lane = lanes.first(where: { laneRow($0).contains(CGPoint(x: gutterWidth + 1, y: point.y)) }),
+               case .audio(let track) = lane, let index = changed.audioClips.firstIndex(where: { $0.id == clip.id }) {
+                changed.audioClips[index].track = track
+            }
+            changed.moveAudio(id, toOutput: max(0, output), propagate: !dragIgnoresLinks)
+        }
+        if changed.checkInvariants(mediaDurations: mediaDurations) == nil { model.update { $0 = changed } }
+        snapGuideX = snapped ? x(forOutput: output) : nil
+        if let current = model.project.audioClips.first(where: { $0.id == id.uuidString }),
+           let first = model.project.audioSegments(current).first, let last = model.project.audioSegments(current).last {
+            trimChip = (x: point.x, text: String(format: "%.2f – %.2f s", first.output.start, last.output.end))
+        }
+        needsDisplay = true
+    }
+
+    private func updateAudioFade(id: UUID, edge: RecorderCore.Edge, point: CGPoint) {
+        guard let model, let audio = model.project.audioClips.first(where: { $0.id == id.uuidString }) else { return }
+        let segments = model.project.audioSegments(audio)
+        guard let first = segments.first, let last = segments.last else { return }
+        let time = geometry.output(forX: geometryX(point))
+        let length = min(last.output.end - first.output.start, max(0, ((edge == .leading ? time - first.output.start : last.output.end - time) * 10).rounded() / 10))
+        model.update { project in
+            guard let index = project.audioClips.firstIndex(where: { $0.id == id.uuidString }) else { return }
+            if edge == .leading { project.audioClips[index].fadeIn = length > 0 ? length : nil }
+            else { project.audioClips[index].fadeOut = length > 0 ? length : nil }
+        }
+        trimChip = (x: point.x, text: String(format: "fade %.2f s", length))
+        needsDisplay = true
+    }
+
+    @objc func toggleAudioLink() {
+        guard let model, model.selection.count == 1, let id = model.selection.first,
+              let clip = model.project.audioClips.first(where: { $0.id == id.uuidString }) else { return }
+        let target: AudioClip.Link = model.project.layers.contains { $0.file == clip.file && $0.kind == .video } ? .layer :
+            (clip.file == "mic.m4a" && model.project.source.hasCamera ? .camera : .screen)
+        AudioPanel(model: model, audioID: id).changeLink(clip.link == nil ? target : nil)
+    }
+
+    private func audioContextMenu(id: UUID) -> NSMenu {
+        selectBlock(id, addToSelection: false)
+        let menu = NSMenu()
+        guard let model, let clip = model.project.audioClips.first(where: { $0.id == id.uuidString }) else { return menu }
+        menu.addItem(actionItem("Split at Playhead (C)", action: #selector(menuSplitAtPlayhead)))
+        if clip.link != nil { menu.addItem(actionItem("Unlink (⌘L)", action: #selector(menuAudioLink(_:)), represented: "none")) }
+        menu.addItem(actionItem("Link to Screen", action: #selector(menuAudioLink(_:)), represented: "screen"))
+        if model.project.source.hasCamera { menu.addItem(actionItem("Link to Camera", action: #selector(menuAudioLink(_:)), represented: "camera")) }
+        if model.project.layers.contains(where: { $0.file == clip.file && $0.kind == .video }) {
+            menu.addItem(actionItem("Link to Its Video", action: #selector(menuAudioLink(_:)), represented: "layer"))
+        }
+        if model.project.syncOffset(clip) != nil { menu.addItem(actionItem("Move into Sync", action: #selector(menuAudioSync))) }
+        menu.addItem(.separator())
+        let mute = actionItem("Mute Clip", action: #selector(menuAudioMute))
+        mute.state = clip.gain == 0 ? .on : .off; menu.addItem(mute)
+        let record = actionItem("Re-record… (⇧R)", action: nil)
+        record.isEnabled = false; menu.addItem(record)
+        menu.addItem(actionItem("Remove (⌫)", action: #selector(menuRemoveBlock(_:)), represented: id))
+        return menu
+    }
+
+    @objc private func menuAudioLink(_ sender: NSMenuItem) {
+        guard let model, let id = model.selection.first, let target = sender.representedObject as? String else { return }
+        AudioPanel(model: model, audioID: id).changeLink(AudioClip.Link(rawValue: target))
+    }
+
+    @objc func menuAudioSync() {
+        guard let model, let id = model.selection.first else { return }
+        AudioPanel(model: model, audioID: id).moveIntoSync()
+    }
+
+    @objc private func menuAudioMute() {
+        guard let model, let id = model.selection.first else { return }
+        model.edit("Mute Audio") { project in
+            if let index = project.audioClips.firstIndex(where: { $0.id == id.uuidString }) { project.audioClips[index].gain = project.audioClips[index].gain == 0 ? 1 : 0 }
+        }
+    }
+
+    private func audioRect(_ audio: AudioClip, output: TimeRange) -> CGRect {
+        let row = laneRow(.audio(audio.track))
+        return CGRect(x: x(forOutput: output.start), y: row.minY + 3,
+                      width: max(0, x(forOutput: output.end) - x(forOutput: output.start)), height: row.height - 6)
+    }
+
+    private func drawAudioLanes(_ project: Project) {
+        for audio in project.audioClips {
+            let selected = UUID(uuidString: audio.id).map { model?.selection.contains($0) == true } ?? false
+            let segments = project.audioSegments(audio)
+            guard let first = segments.first, let last = segments.last else { continue }
+            for segment in segments {
+                let rect = audioRect(audio, output: segment.output)
+                guard rect.maxX >= gutterWidth, rect.minX <= bounds.width else { continue }
+                let voice = project.audioTracks[audio.track].name.hasPrefix("Voiceover")
+                drawBlock(rect, fill: voice ? Theme.voiceover : Theme.audio,
+                          tornLeft: false, tornRight: false, label: nil, selected: selected)
+                let strip = CGRect(x: rect.minX + 3, y: rect.minY + 14, width: max(0, rect.width - 6), height: 14)
+                drawAudioWaveform(audio, segment: segment, in: strip)
+                if audio.gain == 0 { drawAudioHatch(rect) }
+                let duration = last.output.end - first.output.start
+                let ramp = NSBezierPath()
+                ramp.move(to: CGPoint(x: x(forOutput: first.output.start), y: rect.maxY - 2))
+                ramp.line(to: CGPoint(x: x(forOutput: first.output.start + min(audio.fadeIn ?? 0, duration)), y: rect.minY + 2))
+                ramp.move(to: CGPoint(x: x(forOutput: last.output.end - min(audio.fadeOut ?? 0, duration)), y: rect.minY + 2))
+                ramp.line(to: CGPoint(x: x(forOutput: last.output.end), y: rect.maxY - 2))
+                NSGraphicsContext.saveGraphicsState()
+                NSBezierPath(rect: rect).addClip()
+                Theme.mediaMatte.withAlphaComponent(0.65).setStroke(); ramp.stroke()
+                let badge: String
+                switch audio.link {
+                case .screen: badge = "⛓ Scr"
+                case .camera: badge = "⛓ Cam"
+                case .layer: badge = "⛓ Clip"
+                case nil: badge = URL(fileURLWithPath: audio.file).lastPathComponent
+                }
+                let left = max(rect.minX + 12, gutterWidth + 4)
+                (badge as NSString).draw(at: CGPoint(x: left, y: rect.minY + 1),
+                    withAttributes: [.font: Theme.captionFont, .foregroundColor: Theme.mediaMatte])
+                if let offset = project.syncOffset(audio), abs(offset) >= 1 / 60.0 {
+                    let label = String(format: "%+.2f s", offset) as NSString
+                    let size = label.size(withAttributes: [.font: Theme.captionFont])
+                    let chip = CGRect(x: max(left + 48, rect.maxX - size.width - 7), y: rect.minY + 1, width: size.width + 4, height: 13)
+                    Theme.danger.setFill(); chip.fill()
+                    label.draw(at: CGPoint(x: chip.minX + 2, y: chip.minY), withAttributes: [.font: Theme.captionFont, .foregroundColor: Theme.mediaMatte])
+                }
+                if selected || hoverY.map({ laneRow(.audio(audio.track)).contains(CGPoint(x: gutterWidth + 1, y: $0)) }) == true {
+                    Theme.mediaMatte.setFill()
+                    for edge in [RecorderCore.Edge.leading, .trailing] { fadeHandle(audio, edge: edge, project: project)?.fill() }
+                }
+                NSGraphicsContext.restoreGraphicsState()
+            }
+        }
+    }
+
+    private func drawAudioWaveform(_ audio: AudioClip, segment: (media: TimeRange, output: TimeRange), in rect: CGRect) {
+        guard let peaks = waveformPeaks[audio.file], !peaks.isEmpty, rect.width > 0 else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: rect).addClip()
+        let duration = segment.media.end - segment.media.start
+        for span in silentSpans[audio.file] ?? [] where span.end > segment.media.start && span.start < segment.media.end {
+            let start = rect.minX + rect.width * CGFloat((max(span.start, segment.media.start) - segment.media.start) / duration)
+            let end = rect.minX + rect.width * CGFloat((min(span.end, segment.media.end) - segment.media.start) / duration)
+            drawAudioHatch(CGRect(x: start, y: rect.minY, width: end - start, height: rect.height))
+        }
+        Theme.mediaMatte.withAlphaComponent(0.5).setFill()
+        var pixel = max(gutterWidth, rect.minX)
+        while pixel < min(bounds.width, rect.maxX) {
+            let index = Int((segment.media.start + Double((pixel - rect.minX) / rect.width) * duration) * Double(Waveform.peaksPerSecond))
+            if peaks.indices.contains(index), audio.gain > 0 {
+                let height = max(1, min(1, CGFloat(peaks[index]).squareRoot() * audio.gain) * rect.height)
+                CGRect(x: pixel, y: rect.midY - height / 2, width: 2, height: height).fill()
+            }
+            pixel += 3
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func drawAudioHatch(_ rect: CGRect) {
+        guard rect.width > 0 else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: rect).addClip()
+        let path = NSBezierPath()
+        var pixel = max(gutterWidth, rect.minX) - rect.height
+        while pixel < min(bounds.width, rect.maxX) {
+            path.move(to: CGPoint(x: pixel, y: rect.maxY)); path.line(to: CGPoint(x: pixel + rect.height, y: rect.minY)); pixel += 6
+        }
+        Theme.mediaMatte.withAlphaComponent(0.3).setStroke(); path.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func fadeHandle(_ audio: AudioClip, edge: RecorderCore.Edge, project: Project) -> CGRect? {
+        let segments = project.audioSegments(audio)
+        guard let first = segments.first, let last = segments.last else { return nil }
+        let start = x(forOutput: first.output.start), end = x(forOutput: last.output.end)
+        guard end - start >= 28 else { return nil }
+        return CGRect(x: edge == .leading ? start + 8 : end - 14, y: laneRow(.audio(audio.track)).minY + 5, width: 6, height: 6)
+    }
+
+    private func layoutAudioHeaders() {
+        guard let model else { return }
+        let visible = Set(lanes.compactMap { lane -> Int? in
+            if case .audio(let track) = lane { return track }
+            return nil
+        })
+        for track in Array(audioHeaderButtons.keys) where !visible.contains(track) {
+            if let buttons = audioHeaderButtons.removeValue(forKey: track) { [buttons.volume, buttons.mute, buttons.record].forEach { $0.removeFromSuperview() } }
+        }
+        for track in visible {
+            let settings = model.project.audioTracks[track]
+            if audioHeaderButtons[track] == nil {
+                let volume = NSButton(title: settings.name, target: self, action: #selector(showAudioVolume(_:)))
+                let mute = NSButton(title: "M", target: self, action: #selector(toggleAudioTrackMute(_:)))
+                let record = NSButton(title: "●", target: nil, action: nil)
+                for button in [volume, mute, record] {
+                    button.tag = track; button.isBordered = false; button.font = Theme.captionFont
+                    button.contentTintColor = Theme.textPrimary; addSubview(button)
+                }
+                audioHeaderButtons[track] = (volume, mute, record)
+            }
+            guard let buttons = audioHeaderButtons[track] else { continue }
+            let row = laneRow(.audio(track))
+            buttons.volume.title = settings.name
+            buttons.volume.alignment = .left
+            buttons.volume.frame = CGRect(x: 20, y: row.minY + 2, width: 76, height: 28)
+            buttons.volume.toolTip = "\(settings.name) volume"
+            buttons.volume.setAccessibilityLabel("\(settings.name) volume")
+            buttons.mute.frame = CGRect(x: 98, y: row.minY + 2, width: 26, height: 28)
+            buttons.mute.contentTintColor = settings.muted ? Theme.danger : Theme.textSecondary
+            buttons.mute.setAccessibilityLabel("Mute \(settings.name)")
+            buttons.mute.setAccessibilityValue(settings.muted ? "On" : "Off")
+            buttons.record.frame = CGRect(x: 2, y: row.minY + 2, width: 28, height: 28)
+            buttons.record.isHidden = compactTrackHeaders || !settings.name.hasPrefix("Voiceover")
+            buttons.record.isEnabled = false
+            buttons.record.toolTip = "Voiceover recording"
+            buttons.record.setAccessibilityLabel("Record \(settings.name)")
+            if settings.name.hasPrefix("Voiceover") { buttons.volume.frame = CGRect(x: 30, y: row.minY + 2, width: 66, height: 28) }
+            buttons.volume.isHidden = compactTrackHeaders
+            buttons.mute.isHidden = compactTrackHeaders
+        }
+    }
+
+    private func drawAudioHeader(_ track: Int, row: CGRect) {
+        guard let model else { return }
+        let settings = model.project.audioTracks[track]
+        if compactTrackHeaders || !settings.name.hasPrefix("Voiceover") {
+            (settings.name.hasPrefix("Voiceover") ? Theme.voiceover : Theme.audio).setFill()
+            CGRect(x: compactTrackHeaders ? 5 : 9, y: row.midY - 5, width: 3, height: 10).fill()
+        }
+        guard !compactTrackHeaders else { return }
+        Theme.bgHover.setFill()
+        let meter = CGRect(x: 20, y: row.maxY - 5, width: 104, height: 3)
+        meter.fill()
+        guard model.isPlaying, !settings.muted else { return }
+        var level = 0.0
+        for audio in model.project.audioClips where audio.track == track {
+            for segment in model.project.audioSegments(audio) where model.playhead >= segment.output.start && model.playhead < segment.output.end {
+                let media = segment.media.start + (model.playhead - segment.output.start) / (segment.output.end - segment.output.start) * (segment.media.end - segment.media.start)
+                let index = Int(media * Double(Waveform.peaksPerSecond))
+                if let peaks = waveformPeaks[audio.file], peaks.indices.contains(index) {
+                    let ramp = model.project.audioVolumeRamps(audio).first { model.playhead >= $0.range.start && model.playhead <= $0.range.end }
+                    let gain = ramp.map { $0.start + ($0.end - $0.start) * (model.playhead - $0.range.start) / ($0.range.end - $0.range.start) } ?? audio.gain
+                    level = max(level, Double(peaks[index]) * gain * settings.volume)
+                }
+            }
+        }
+        Theme.audio.setFill()
+        CGRect(x: meter.minX, y: meter.minY, width: meter.width * min(1, sqrt(level)), height: 3).fill()
+    }
+
+    @objc private func toggleAudioTrackMute(_ sender: NSButton) {
+        guard model?.project.audioTracks.indices.contains(sender.tag) == true else { return }
+        model?.edit("Mute Track") { $0.audioTracks[sender.tag].muted.toggle() }
+        needsLayout = true
+    }
+
+    @objc private func showAudioVolume(_ sender: NSButton) {
+        guard let model, model.project.audioTracks.indices.contains(sender.tag) else { return }
+        let track = sender.tag
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView:
+            LabeledSlider(title: model.project.audioTracks[track].name, value: trackVolumeBinding(track),
+                          range: 0...2, defaultValue: 1, format: { String(format: "%.0f%%", $0 * 100) }, onEditingChanged: { editing in
+                editing ? model.beginGesture() : model.commitGesture("Track Volume")
+            }).padding(16).frame(width: 280).signalWindow())
+        volumePopover = popover
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+    }
+
+    private func trackVolumeBinding(_ track: Int) -> Binding<Double> {
+        guard let model, model.project.audioTracks.indices.contains(track) else { return .constant(1) }
+        let id = model.project.audioTracks[track].id
+        return Binding(get: { model.project.audioTracks.first { $0.id == id }?.volume ?? 1 }, set: { value in
+            guard value.isFinite else { return }
+            model.update { project in
+                if let index = project.audioTracks.firstIndex(where: { $0.id == id }) { project.audioTracks[index].volume = min(2, max(0, value)) }
+            }
+        })
+    }
+
+    private func drawLinkedPartners(_ project: Project) {
+        let selectedAudio = project.audioClips.filter { audio in UUID(uuidString: audio.id).map { model?.selection.contains($0) == true } ?? false }
+        func outline(_ rect: CGRect) {
+            Theme.textPrimary.withAlphaComponent(0.5).setStroke()
+            let path = NSBezierPath(rect: rect.insetBy(dx: -1, dy: -1)); path.lineWidth = 1; path.stroke()
+        }
+        var output = 0.0
+        for (index, clip) in project.clips.enumerated() {
+            defer { output += clip.outputDuration }
+            if !clip.isEmpty, selectedAudio.contains(where: { $0.link == .screen && $0.start < clip.sourceEnd && $0.end > clip.sourceStart }) {
+                outline(CGRect(x: x(forOutput: output), y: laneRow(.clip).minY + 3, width: CGFloat(clip.outputDuration * geometry.pxPerSecond), height: laneRow(.clip).height - 6))
+            }
+            if model?.selectedClips.contains(index) == true {
+                for audio in project.audioClips where audio.link == .screen && audio.start < clip.sourceEnd && audio.end > clip.sourceStart {
+                    project.audioSegments(audio).forEach { outline(audioRect(audio, output: $0.output)) }
+                }
+            }
+        }
+        for camera in project.cameraClips {
+            let selected = UUID(uuidString: camera.id).map { model?.selection.contains($0) == true } ?? false
+            let partners = project.audioClips.filter { $0.link == .camera && $0.start < camera.end && $0.end > camera.start }
+            if selected { for audio in partners { project.audioSegments(audio).forEach { outline(audioRect(audio, output: $0.output)) } } }
+            if partners.contains(where: { audio in selectedAudio.contains { $0.id == audio.id } }) {
+                for segment in visibleSegments(start: camera.start, end: camera.end, project: project, timeMap: TimeMap(project.clips)) {
+                    outline(CGRect(x: x(forOutput: segment.outStart), y: laneRow(.camera).minY + 3, width: CGFloat((segment.outEnd - segment.outStart) * geometry.pxPerSecond), height: laneRow(.camera).height - 6))
+                }
+            }
+        }
     }
 }
 

@@ -301,7 +301,7 @@ T-640 merges; T-648 needs T-643). T-650 last.
     PreviewView rebuilds on clip changes and refreshes the mix on gain/fade/mute.
   - Verify: new `--selftest audio-lanes` (AC-AU-1 segment equality on a legacy fixture + AC-AU-5); existing `audio-mix`,
     `export-range`, `parity` M6 maxDelta=0.
-- [ ] **T-644 Audio lanes UI**
+- [x] **T-644 Audio lanes UI**
   - Do: §4.3 for audio: lanes, per-clip waveform (moved from the video lane; `Waveform` takes any file), headers with
     mute/meter/volume, move/trim/lane change, fade handles, chain badges, partner outline, red sync chip, ⌥ override,
     context menu, ⌘L, AudioPanel (link segment, sync readout + Move into Sync, gain dB slider, fades, mute), compact

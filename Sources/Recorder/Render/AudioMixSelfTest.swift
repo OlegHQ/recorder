@@ -165,6 +165,10 @@ enum AudioMixSelfTest {
         try sound.insertTimeRange(CMTimeRange(start: .zero, duration: CMTime(seconds: 1, preferredTimescale: 600)), of: tone, at: .zero)
         try await writer.export(to: package.appendingPathComponent("media/sound.mov"), as: .mov)
         withExtendedLifetime((movieAsset, toneAsset)) {}
+        guard let waveformURL = Waveform.audioURL(in: package, file: "media/sound.mov") else { throw Fail(description: "video waveform file") }
+        let videoPeaks = try await Waveform.peaks(for: waveformURL)
+        guard videoPeaks.count >= 200, (videoPeaks.max() ?? 0) > 0.05 else { throw Fail(description: "video audio waveform") }
+        print("audio-lanes: video-file waveform decoded \(videoPeaks.count) peaks")
 
         let legacyJSON = """
         {"version":3,"source":{"pixelWidth":320,"pixelHeight":180,"duration":8,"hasCamera":true,"hasMic":true,"hasSystemAudio":true},

@@ -31,6 +31,8 @@ enum Theme {
     static let layout = adaptive("#DCE8D7")
     static let mask = adaptive("#E5DCEC")
     static let text = adaptive("#EFDCCF")
+    static let audio = adaptive("#D3DEE8")
+    static let voiceover = adaptive("#E9D8CF")
     static let warning = adaptive("#D8C86A", light: "#75620B")
     static let danger = adaptive("#E38276", light: "#A13027")
 

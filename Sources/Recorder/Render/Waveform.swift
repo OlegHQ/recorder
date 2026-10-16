@@ -11,12 +11,20 @@ enum Waveform {
     static let peaksPerSecond = 200
 
     nonisolated(unsafe) private static var cache: [URL: [Float]] = [:]
+    private static let cacheLock = NSLock()
+
+    static func audioURL(in packageURL: URL, file: String) -> URL? {
+        let root = packageURL.resolvingSymlinksInPath().standardizedFileURL
+        let url = root.appendingPathComponent(file).resolvingSymlinksInPath().standardizedFileURL
+        guard !file.hasPrefix("/"), url.path.hasPrefix(root.path + "/"),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
 
     /// `mic.m4a` if the project package has one, else `system.m4a`, else `nil`.
     static func audioURL(in packageURL: URL) -> URL? {
         for name in ["mic.m4a", "system.m4a"] {
-            let url = packageURL.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: url.path) { return url }
+            if let url = audioURL(in: packageURL, file: name) { return url }
         }
         return nil
     }
@@ -24,9 +32,9 @@ enum Waveform {
     /// Peak (max absolute sample across channels) per `peaksPerSecond`-of-a-second bucket, for the
     /// whole duration of the audio file at `url`. Cached in memory per `url` for the process lifetime.
     static func peaks(for url: URL) async throws -> [Float] {
-        if let cached = cache[url] { return cached }
+        if let cached = cacheLock.withLock({ cache[url] }) { return cached }
         let result = try await extractPeaks(from: url)
-        cache[url] = result
+        cacheLock.withLock { cache[url] = result }
         return result
     }
 
@@ -49,7 +57,7 @@ enum Waveform {
             AVLinearPCMIsNonInterleaved: false,
         ])
         reader.add(output)
-        reader.startReading()
+        guard reader.startReading() else { throw reader.error ?? CocoaError(.fileReadUnknown) }
 
         var peaks: [Float] = []
         var samplesPerBucket = 0
@@ -84,6 +92,7 @@ enum Waveform {
                 }
             }
         }
+        guard reader.status == .completed else { throw reader.error ?? CocoaError(.fileReadUnknown) }
         if bucketFrames > 0 { peaks.append(bucketPeak) }
         return peaks
     }

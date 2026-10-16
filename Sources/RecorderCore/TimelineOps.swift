@@ -246,8 +246,18 @@ public extension Project {
     /// frozen. Reuse Project's track arrays/settings; no second serialization model is needed.
     func copySelection(clips indices: Set<Int>, blocks ids: Set<UUID>) -> Project? {
         let selected = indices.filter { clips.indices.contains($0) && !clips[$0].isEmpty }
-        let ranges = selected.sorted().map { clips[$0].sourceStart...clips[$0].sourceEnd }
         let blockIDs = Set(ids.map(\.uuidString))
+        func mergedRanges(_ ranges: [ClosedRange<Double>]) -> [ClosedRange<Double>] {
+            ranges.sorted { $0.lowerBound < $1.lowerBound }.reduce(into: []) { merged, range in
+                if let last = merged.last, last.upperBound >= range.lowerBound {
+                    merged[merged.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
+                } else { merged.append(range) }
+            }
+        }
+        let selectedAudio = audioClips.filter { blockIDs.contains($0.id) }
+        let videoRanges = selected.sorted().map { clips[$0].sourceStart...clips[$0].sourceEnd }
+            + selectedAudio.filter { $0.link == .screen }.map { $0.start...$0.end }
+        let ranges = mergedRanges(videoRanges)
         func selectedBlocks<T: TimedBlock>(_ blocks: [T], linkedRanges: [ClosedRange<Double>]? = nil) -> [T] {
             blocks.flatMap { block -> [T] in
                 if blockIDs.contains(block.id) { return [block] }
@@ -263,13 +273,48 @@ public extension Project {
             }
         }
         var copied = self
-        copied.cameraClips = selectedBlocks(cameraClips)
+        let cameraRanges = mergedRanges((linkVideoEdits ? ranges : []) + selectedAudio.filter { $0.link == .camera }.map { $0.start...$0.end })
+        copied.cameraClips = selectedBlocks(cameraClips, linkedRanges: cameraRanges)
+        var layerOrigins: [String: String] = [:]
+        copied.layers = layers.flatMap { layer -> [LayerBlock] in
+            if blockIDs.contains(layer.id) { layerOrigins[layer.id] = layer.id; return [layer] }
+            guard let output = connectedOnOutput(layer) else { return [] }
+            let ranges = mergedRanges(selectedAudio.filter { $0.link == .layer && $0.layer == layer.id }.compactMap { audio in
+                outputRange(audio, connected: true).map { $0.start...$0.end }
+            })
+            return ranges.compactMap { range in
+                let lower = max(output.start, range.lowerBound), upper = min(output.end, range.upperBound)
+                guard upper > lower else { return nil }
+                var part = output
+                part.id = UUID().uuidString; part.advanceMedia(by: lower - output.start)
+                part.start = lower; part.end = upper
+                layerOrigins[part.id] = layer.id
+                return connectedFromOutput(part)
+            }
+        }
         copied.audioClips = audioClips.flatMap { audio -> [AudioClip] in
             if audio.link == .screen { return selectedBlocks([audio], linkedRanges: ranges) }
             if audio.link == .camera { return selectedBlocks([audio], linkedRanges: copied.cameraClips.map { $0.start...$0.end }) }
+            if audio.link == .layer {
+                if blockIDs.contains(audio.id) || audio.layer.map(blockIDs.contains) == true {
+                    var part = audio
+                    part.layer = copied.layers.first { layerOrigins[$0.id] == audio.layer }?.id ?? audio.layer
+                    return [part]
+                }
+                guard let output = connectedOnOutput(audio) else { return [] }
+                return copied.layers.filter { layerOrigins[$0.id] == audio.layer }.compactMap { layer in
+                    guard let range = outputRange(layer, connected: true) else { return nil }
+                    let lower = max(output.start, range.start), upper = min(output.end, range.end)
+                    guard upper > lower else { return nil }
+                    var part = output
+                    if lower != output.start { part.id = UUID().uuidString }
+                    part.advanceMedia(by: lower - output.start)
+                    part.start = lower; part.end = upper; part.layer = layer.id
+                    return connectedFromOutput(part)
+                }
+            }
             return blockIDs.contains(audio.id) ? [audio] : []
         }
-        copied.layers = layers.filter { blockIDs.contains($0.id) }
         copied.zooms = selectedBlocks(zooms)
         copied.keystrokeClips = selectedBlocks(keystrokeClips)
         copied.layouts = selectedBlocks(layouts)
@@ -277,7 +322,19 @@ public extension Project {
         copied.texts = selectedBlocks(texts)
         copied.windowShots = selectedBlocks(windowShots)
         copied.useOutputClock()
-        copied.clips = copied.clips.enumerated().filter { selected.contains($0.offset) }.map(\.element)
+        copied.clips = zip(clips, copied.clips).flatMap { original, output in
+            ranges.compactMap { range -> Clip? in
+                let lower = max(original.sourceStart, range.lowerBound), upper = min(original.sourceEnd, range.upperBound)
+                guard !original.isEmpty, upper > lower else { return nil }
+                var part = output
+                part.sourceStart = output.sourceStart + (lower - original.sourceStart) / original.timeScale
+                part.sourceEnd = output.sourceStart + (upper - original.sourceStart) / original.timeScale
+                part.mediaStart = original.mediaTime(atSource: lower)
+                if lower > original.sourceStart { part.fadeIn = nil }
+                if upper < original.sourceEnd { part.fadeOut = nil }
+                return part
+            }
+        }
         let starts = copied.clips.map(\.sourceStart) + copied.cameraClips.map(\.start) + copied.zooms.map(\.start) + copied.audioClips.map(\.start) + copied.layers.map(\.start)
             + copied.keystrokeClips.map(\.start) + copied.layouts.map(\.start) + copied.masks.map(\.start) + copied.texts.map(\.start) + copied.windowShots.map(\.start)
         guard let origin = starts.min() else { return nil }
@@ -288,6 +345,7 @@ public extension Project {
         offset(&copied.cameraClips); offset(&copied.zooms); offset(&copied.keystrokeClips)
         offset(&copied.layouts); offset(&copied.masks); offset(&copied.texts); offset(&copied.windowShots)
         offset(&copied.audioClips); offset(&copied.layers)
+        guard copied.layers.allSatisfy({ $0.end - $0.start >= 0.5 - 1e-9 }) else { return nil }
         return copied
     }
 
@@ -298,6 +356,17 @@ public extension Project {
         guard time.isFinite, time >= 0 else { return nil }
         var result = self
         result.useOutputClock()
+        var audioRoutes: [Int: Int] = [:]
+        for track in Set(copied.audioClips.map(\.track)).sorted() {
+            guard copied.audioTracks.indices.contains(track) else { return nil }
+            let settings = copied.audioTracks[track]
+            if let existing = result.audioTracks.firstIndex(where: { $0.id == settings.id }) { audioRoutes[track] = existing }
+            else { audioRoutes[track] = result.audioTracks.count; result.audioTracks.append(settings) }
+        }
+        let incomingAudio = copied.audioClips.map { audio -> AudioClip in
+            var part = audio; part.track = audioRoutes[audio.track]!
+            return part
+        }
         let duration = TimeMap(result.clips).outputDuration
         let t = min(time, duration)
         let pastedDuration = copied.clips.last?.sourceEnd ?? 0
@@ -320,8 +389,9 @@ public extension Project {
             return part
         }
         var pastedIDs: Set<UUID> = []
-        func paste<T: TimedBlock>(_ incoming: [T], into blocks: inout [T]) {
-            if insertDuration > 0 {
+        var pastedLinks: [String: String] = [:]
+        func paste<T: TimedBlock>(_ incoming: [T], into blocks: inout [T], shift: Bool = true) {
+            if shift && insertDuration > 0 {
                 blocks = blocks.flatMap { block -> [T] in
                     if block.end <= replaceEnd { return [block] }
                     var right = slice(block, start: max(replaceEnd, block.start), end: block.end)
@@ -333,6 +403,7 @@ public extension Project {
                 var pasted = block
                 let id = UUID()
                 pasted.id = id.uuidString
+                pastedLinks[block.id] = pasted.id
                 pasted.start += t; pasted.end += t
                 blocks = blocks.flatMap { existing -> [T] in
                     guard existing.start < pasted.end, existing.end > pasted.start else { return [existing] }
@@ -353,20 +424,38 @@ public extension Project {
         paste(copied.masks, into: &result.masks)
         paste(copied.texts, into: &result.texts)
         paste(copied.windowShots, into: &result.windowShots)
+        for index in result.layers.indices where insertDuration > 0 && result.layers[index].start >= replaceEnd {
+            result.layers[index].start += insertDuration; result.layers[index].end += insertDuration
+        }
+        for track in Set(copied.layers.map(\.track)) {
+            var lane = result.layers.filter { $0.track == track }
+            paste(copied.layers.filter { $0.track == track }, into: &lane, shift: false)
+            result.layers.removeAll { $0.track == track }
+            result.layers += lane
+        }
+        result.layers.sort { $0.start < $1.start }
         var audioByTrack: [AudioClip] = []
         for track in result.audioTracks.indices {
             var linked = result.audioClips.filter { $0.track == track && !$0.isConnected }
-            paste(copied.audioClips.filter { $0.track == track && !$0.isConnected }, into: &linked)
+            paste([], into: &linked)
             audioByTrack += linked
         }
         for var audio in result.audioClips where audio.isConnected {
             if insertDuration > 0 && audio.start >= replaceEnd { audio.start += insertDuration; audio.end += insertDuration }
             audioByTrack.append(audio)
         }
-        result.audioClips = audioByTrack.sorted { $0.start < $1.start }
-        for index in result.layers.indices where insertDuration > 0 && result.layers[index].start >= replaceEnd {
-            result.layers[index].start += insertDuration; result.layers[index].end += insertDuration
+        for track in result.audioTracks.indices {
+            var clips = audioByTrack.filter { $0.track == track }
+            let incoming = incomingAudio.filter { $0.track == track }.map { audio in
+                var part = audio
+                if let layer = part.layer { part.layer = pastedLinks[layer] ?? layer }
+                return part
+            }
+            paste(incoming, into: &clips, shift: false)
+            audioByTrack.removeAll { $0.track == track }
+            audioByTrack += clips
         }
+        result.audioClips = audioByTrack.sorted { $0.start < $1.start }
 
         var before: [Clip] = [], after: [Clip] = []
         for clip in result.clips {
@@ -410,6 +499,8 @@ public extension Project {
         ends += result.masks.map(\.end)
         ends += result.texts.map(\.end)
         ends += result.windowShots.map(\.end)
+        ends += result.audioClips.map { $0.isConnected ? $0.start : $0.end }
+        ends += result.layers.map(\.start)
         let end = ends.max() ?? 0
         let videoEnd = result.clips.last?.sourceEnd ?? 0
         if end > videoEnd {
@@ -903,6 +994,31 @@ public extension Project {
         moveAudio(id, toStart: TimeMap(clips).sourceTime(atOutput: range.start - offset), propagate: false)
     }
 
+    private mutating func extendAudioClock(toOutput time: Double) {
+        let duration = TimeMap(clips).outputDuration
+        guard time > duration, let last = clips.last else { return }
+        var gap = Clip(sourceStart: last.sourceEnd, sourceEnd: last.sourceEnd + time - duration)
+        gap.isGap = true
+        clips.append(gap)
+    }
+
+    mutating func splitAudio(_ id: UUID, atOutput time: Double, propagate: Bool = true) -> Bool {
+        guard time.isFinite, time >= 0, let audio = audioClips.first(where: { $0.id == id.uuidString }) else { return false }
+        let before = self
+        if audio.isConnected { extendAudioClock(toOutput: time + 0.1) }
+        let changed = splitBlock(id, atSource: TimeMap(clips).sourceTime(atOutput: time), propagate: propagate)
+        if !changed { self = before }
+        return changed
+    }
+
+    mutating func moveAudio(_ id: UUID, toOutput time: Double, propagate: Bool = true) {
+        guard time.isFinite, time >= 0, let audio = audioClips.first(where: { $0.id == id.uuidString }) else { return }
+        let before = self
+        if audio.isConnected { extendAudioClock(toOutput: time) }
+        moveAudio(id, toStart: TimeMap(clips).sourceTime(atOutput: time), propagate: propagate)
+        if audioClips.first(where: { $0.id == audio.id }) == audio { self = before }
+    }
+
     mutating func moveAudio(_ id: UUID, toStart source: Double, propagate: Bool = true) {
         guard source.isFinite, let audio = audioClips.first(where: { $0.id == id.uuidString }),
               let range = outputRange(audio, connected: audio.isConnected), let requested = TimeMap(clips).outputTime(atSource: source) else { return }
@@ -938,9 +1054,15 @@ public extension Project {
     }
 
     mutating func resizeAudio(_ id: UUID, edge: Edge, to source: Double, mediaDuration: Double? = nil, propagate: Bool = true) {
-        guard source.isFinite, let audio = audioClips.first(where: { $0.id == id.uuidString }),
-              let range = outputRange(audio, connected: audio.isConnected), let requested = TimeMap(clips).outputTime(atSource: source) else { return }
+        guard source.isFinite, let output = TimeMap(clips).outputTime(atSource: source) else { return }
+        resizeAudio(id, edge: edge, toOutput: output, mediaDuration: mediaDuration, propagate: propagate)
+    }
+
+    mutating func resizeAudio(_ id: UUID, edge: Edge, toOutput requested: Double, mediaDuration: Double? = nil, propagate: Bool = true) {
+        guard requested.isFinite, let audio = audioClips.first(where: { $0.id == id.uuidString }),
+              let range = outputRange(audio, connected: audio.isConnected) else { return }
         let before = self
+        if audio.isConnected, edge == .leading { extendAudioClock(toOutput: min(requested, range.end - 0.1)) }
         let neighbours = audioClips.filter { $0.track == audio.track && $0.id != audio.id }.compactMap { outputRange($0, connected: $0.isConnected) }
         let rate = (audio.end - audio.start) * (audio.mediaRate ?? 1) / (range.end - range.start)
         let duration = mediaDuration ?? (["mic.m4a", "system.m4a"].contains(audio.file) ? self.source.duration : .infinity)
@@ -949,14 +1071,14 @@ public extension Project {
         switch edge {
         case .leading:
             let lower = max(neighbours.filter { $0.end <= range.start + 1e-9 }.map(\.end).max() ?? 0, range.start - audio.mediaStart / rate)
-            target = min(max(requested, lower), range.end - 0.1)
+            target = min(max(requested, lower), range.end - 0.1, TimeMap(clips).outputDuration)
             changed.start = TimeMap(clips).sourceTime(atOutput: target)
             changed.mediaStart += audio.isConnected ? (target - range.start) * rate : (changed.start - audio.start) * (audio.mediaRate ?? 1)
             if audio.isConnected { changed.end = changed.start + range.end - target }
         case .trailing:
             let upper = min(neighbours.filter { $0.start >= range.end - 1e-9 }.map(\.start).min() ?? .infinity,
                             range.start + (duration - audio.mediaStart) / rate)
-            target = max(min(requested, upper), range.start + 0.1)
+            target = max(min(requested, upper, audio.isConnected ? .infinity : TimeMap(clips).outputDuration), range.start + 0.1)
             changed.end = audio.isConnected ? changed.start + target - range.start : TimeMap(clips).sourceTime(atOutput: target)
         }
         if propagate, audio.link == .screen {

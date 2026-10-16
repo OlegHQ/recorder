@@ -221,7 +221,8 @@ import RecorderCore
     private func keepExistingSelection() {
         gestureSnapshot = nil
         let ids = Set(project.zooms.map(\.id) + project.layouts.map(\.id) + project.masks.map(\.id)
-                      + project.keystrokeClips.map(\.id) + project.cameraClips.map(\.id))
+                      + project.keystrokeClips.map(\.id) + project.cameraClips.map(\.id)
+                      + project.audioClips.map(\.id) + project.texts.map(\.id) + project.windowShots.map(\.id))
         selection = selection.filter { ids.contains($0.uuidString) }
         selectedClips = selectedClips.filter { project.clips.indices.contains($0) }
     }

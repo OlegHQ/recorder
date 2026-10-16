@@ -16,6 +16,7 @@ struct InspectorView: View {
         case multiple(Int)
         case keys(UUID)
         case camera(UUID)
+        case audio(UUID)
         case clip(Int)
         case zoom(UUID)
         case layout(UUID)
@@ -32,6 +33,7 @@ struct InspectorView: View {
         if model.selection.count == 1, let id = model.selection.first {
             if model.project.keystrokeClips.contains(where: { $0.id == id.uuidString }) { return .keys(id) }
             if model.project.cameraClips.contains(where: { $0.id == id.uuidString }) { return .camera(id) }
+            if model.project.audioClips.contains(where: { $0.id == id.uuidString }) { return .audio(id) }
             if model.project.zooms.contains(where: { $0.id == id.uuidString }) { return .zoom(id) }
             if model.project.layouts.contains(where: { $0.id == id.uuidString }) { return .layout(id) }
             if model.project.masks.contains(where: { $0.id == id.uuidString }) { return .mask(id) }
@@ -45,6 +47,7 @@ struct InspectorView: View {
         case .multiple(let count): return "multiple-\(count)"
         case .keys(let id): return "keys-\(id)"
         case .camera(let id): return "camera-\(id)"
+        case .audio(let id): return "audio-\(id)"
         case .clip(let index): return "clip-\(index)"
         case .zoom(let id): return "zoom-\(id)"
         case .layout(let id): return "layout-\(id)"
@@ -198,6 +201,7 @@ struct InspectorView: View {
                 model.selection = []
             }.buttonStyle(TechButtonStyle(kind: .danger, compact: true))
         case .clip(let i): ClipPanel(model: model, clipIndex: i)
+        case .audio(let id): AudioPanel(model: model, audioID: id)
         case .zoom(let id): ZoomPanel(model: model, zoomID: id)
         case .layout(let id): LayoutPanel(model: model, layoutID: id)
         case .mask(let id): MaskPanel(model: model, maskID: id)

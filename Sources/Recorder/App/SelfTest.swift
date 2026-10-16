@@ -1005,6 +1005,14 @@ enum SelfTest {
 
             // T-416: a short synthetic mic track so the clip lane actually has a waveform to draw.
             try synthesizeSineM4A(at: tmp.appendingPathComponent("mic.m4a"), duration: 15, silence: 6...10)
+            for file in ["system.m4a", "voice.m4a", "music.m4a"] { try fm.copyItem(at: tmp.appendingPathComponent("mic.m4a"), to: tmp.appendingPathComponent(file)) }
+            project.audioTracks = [AudioTrack(name: "Mic"), AudioTrack(name: "System"), AudioTrack(name: "Voiceover 1"), AudioTrack(name: "Audio 1")]
+            project.audioClips = [
+                AudioClip(start: 2.4, end: 13.4, mediaStart: 2, file: "mic.m4a", track: 0, link: .camera, fadeIn: 1, fadeOut: 0.7),
+                AudioClip(start: 18, end: 30, mediaStart: 0, file: "system.m4a", track: 1, link: .screen),
+                AudioClip(start: 8, end: 14, file: "voice.m4a", track: 2, fadeIn: 0.3, fadeOut: 0.5),
+                AudioClip(start: 18, end: 24, mediaStart: 2, file: "music.m4a", track: 3, gain: 0, fadeIn: 0.6),
+            ]
 
             let model = EditorModel(packageURL: tmp, project: project, events: EventLog())
             let outputDuration = model.timeMap.outputDuration
@@ -1076,15 +1084,19 @@ enum SelfTest {
                     view.needsLayout = true
                 }
                 if args.contains("--empty") {
-                    model.update { $0.clips = []; $0.cameraClips = []; $0.keystrokeClips = []; $0.zooms = []; $0.layouts = []; $0.masks = [] }
+                    model.update { $0.clips = []; $0.cameraClips = []; $0.keystrokeClips = []; $0.zooms = []; $0.layouts = []; $0.masks = []; $0.audioClips = [] }
                     model.selection = []
                     model.playhead = 0
                 }
                 let toolbar = TimelineToolbar(frame: .zero)
                 toolbar.timelineView = view
                 let container = TimelineContainerView(toolbar: toolbar, timeline: view)
-                container.frame = CGRect(x: 0, y: 0, width: width, height: args.contains("--tall") ? 420 : 250)
+                if args.contains("--compact") { view.toggleCompactTrackHeaders() }
+                if args.contains("--selected-audio"), let audio = model.project.audioClips.first { model.selection = [UUID(uuidString: audio.id)!] }
+                if args.contains("--playing") { model.playhead = 12; model.isPlaying = true }
+                container.frame = CGRect(x: 0, y: 0, width: width, height: args.contains("--minimum") ? 250 : max(250, view.contentHeight + 58))
                 container.layoutSubtreeIfNeeded()
+                if args.contains("--bottom") { view.scrollToVisible(CGRect(x: 0, y: view.contentHeight - 36, width: 1, height: 62)) }
                 view.needsDisplay = true
                 guard let rep = container.bitmapImageRepForCachingDisplay(in: container.bounds) else { return (nil, errors) }
                 container.cacheDisplay(in: container.bounds, to: rep)
@@ -1420,6 +1432,7 @@ enum SelfTest {
         // undo step, invariants hold throughout. Clip: a speed preset == `setSpeed` + one undo
         // step. Cursor: size/style edits persist via autosave.
         "inspector-panels": { _ in
+            try await MainActor.run { try TimelineView.runAudioUISelfTest() }
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
             let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-panels-\(UUID().uuidString)")
@@ -1829,6 +1842,7 @@ enum SelfTest {
         // produce the documented `Project` change, leave `checkInvariants() == nil`, and are exactly
         // one `performUndo`/`performRedo` step.
         "menu-actions": { _ in
+            try await MainActor.run { try TimelineView.runAudioUISelfTest() }
             struct Fail: Error, CustomStringConvertible { let description: String }
 
             @Sendable func findItem(_ menu: NSMenu, _ menuTitle: String, _ itemTitle: String) throws -> NSMenuItem {
@@ -1880,7 +1894,7 @@ enum SelfTest {
                     ("Edit", "Restore All Cuts"), ("Edit", "Speed Up Typing"), ("Edit", "Split at Pauses"), ("Edit", "Hide Cursor in Selected Clip"),
                     ("View", "Canvas"), ("View", "Cursor"), ("View", "Camera"), ("View", "Sound"),
                     ("View", "Motion"), ("View", "Keystrokes"), ("View", "Zoom In"), ("View", "Zoom Out"),
-                    ("View", "Fit"), ("View", "Crop…"),
+                    ("View", "Fit"), ("View", "Crop…"), ("View", "Compact Track Headers"), ("Edit", "Link / Unlink Audio"),
                     ("Export", "Export…"), ("Export", "Copy Frame as Image"),
                 ]
                 var items: [String: NSMenuItem] = [:]
@@ -2849,8 +2863,16 @@ enum SelfTest {
         },
         "waveform": { args in
             struct Fail: Error, CustomStringConvertible { let description: String }
-            guard let path = args.first else { throw Fail(description: "usage: waveform <audiofile>") }
-            let peaks = try await Waveform.peaks(for: URL(fileURLWithPath: path))
+            let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("waveform-" + UUID().uuidString + ".m4a")
+            if args.isEmpty { try synthesizeSineM4A(at: fixture, duration: 1) }
+            defer { if args.isEmpty { try? FileManager.default.removeItem(at: fixture) } }
+            let file = args.first.map { URL(fileURLWithPath: $0) } ?? fixture
+            let escapedRoot = file.deletingLastPathComponent().appendingPathComponent("not-a-package")
+            guard Waveform.audioURL(in: escapedRoot, file: "../" + file.lastPathComponent) == nil,
+                  Waveform.audioURL(in: file.deletingLastPathComponent(), file: file.path) == nil else {
+                throw Fail(description: "waveform accepted an escaping package path")
+            }
+            let peaks = try await Waveform.peaks(for: file)
             let max = peaks.max() ?? 0
             print("peaks=\(peaks.count) max=\(max)")
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
@@ -3066,7 +3088,7 @@ enum SelfTest {
             try await MainActor.run {
                 let pasteboard = NSPasteboard(name: NSPasteboard.Name("recorder-clipboard-test-\(UUID().uuidString)"))
                 defer { pasteboard.releaseGlobally() }
-                for lane in Lane.allCases where lane != .window { // Window lane exists only in multi-window projects
+                for lane in Lane.allCases.filter({ $0 != .window }) + [.audio(0), .audio(1), .audio(2), .audio(3)] {
                     var project = Project(source: Source(duration: 12, hasCamera: true), clips: [Clip(sourceStart: 0, sourceEnd: 12)])
                     project.linkVideoEdits = false
                     project.zooms = [Zoom(start: 2, end: 6, scale: 3)]
@@ -3074,14 +3096,21 @@ enum SelfTest {
                     project.layouts = [Layout(start: 2, end: 6, kind: .bubble)]
                     project.masks = [Mask(start: 2, end: 6, kind: .blur)]
                     project.texts = [TextBlock(start: 2, end: 6)]
+                    project.audioTracks = [AudioTrack(name: "Mic"), AudioTrack(name: "System"), AudioTrack(name: "Voiceover 1"), AudioTrack(name: "Audio 1")]
+                    project.audioClips = project.audioTracks.indices.map { track in
+                        AudioClip(start: 2, end: 6, mediaStart: 2, file: "audio-\(track).m4a", track: track,
+                                  link: track == 0 ? .camera : track == 1 ? .screen : nil)
+                    }
+                    project.cameraClips = [CameraClip(start: 2, end: 6)]
                     let model = EditorModel(packageURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
                                             project: project, events: EventLog())
                     let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 250))
                     view.model = model
                     view.clipboardPasteboard = pasteboard
-                    let ids: [Lane: String] = [.camera: project.cameraClips[0].id, .zoom: project.zooms[0].id,
+                    var ids: [Lane: String] = [.camera: project.cameraClips[0].id, .zoom: project.zooms[0].id,
                         .keys: project.keystrokeClips[0].id, .layout: project.layouts[0].id, .mask: project.masks[0].id,
                         .text: project.texts[0].id]
+                    for clip in project.audioClips { ids[.audio(clip.track)] = clip.id }
                     if lane == .clip { model.selectedClips = [0] }
                     else { model.selection = [UUID(uuidString: ids[lane]!)!] }
                     model.playhead = 10 // Cut must ignore the playhead, including outside the selection.
@@ -3099,10 +3128,18 @@ enum SelfTest {
                     if lane == .clip {
                         guard let index = model.selectedClip, model.project.clips[index].sourceStart == 8,
                               model.project.clips[index].mediaIn == 0 else { throw Fail(message: "Pasted video position") }
+                    } else if case .audio(let track) = lane {
+                        guard model.selectedClips.isEmpty, !model.selection.isEmpty,
+                              model.selection.allSatisfy({ id in model.project.audioClips.contains { $0.id == id.uuidString && $0.track == track } })
+                        else { throw Fail(message: "Pasted selection is not the grabbed audio lane") }
+                        guard model.project.audioClips.contains(where: { audio in
+                            audio.track == track && audio.mediaStart == 2 && model.project.audioSegments(audio).first?.output.start == 8
+                        }) else { throw Fail(message: "Pasted audio position/media: \(lane)") }
                     } else {
                         let blocks = model.project.cameraClips.map { ($0.id, $0.start) } + model.project.zooms.map { ($0.id, $0.start) }
                             + model.project.keystrokeClips.map { ($0.id, $0.start) } + model.project.layouts.map { ($0.id, $0.start) }
                             + model.project.masks.map { ($0.id, $0.start) } + model.project.texts.map { ($0.id, $0.start) }
+                            + model.project.audioClips.map { ($0.id, $0.start) }
                         guard blocks.contains(where: { UUID(uuidString: $0.0).map(model.selection.contains) == true && $0.1 == 8 })
                         else { throw Fail(message: "Pasted layer position: \(lane)") }
                     }
@@ -3322,7 +3359,10 @@ enum SelfTest {
                   abs(camera.timeMapping.source.start.seconds - 5) < 0.01,
                   abs(camera.timeMapping.target.start.seconds - 2) < 0.01 else { throw Fail.composition }
         },
-        "timeline-ops": { _ in try await runTimelineOpsSelfTest() },
+        "timeline-ops": { _ in
+            try await runTimelineOpsSelfTest()
+            try await MainActor.run { try TimelineView.runAudioUISelfTest() }
+        },
         // T-415: manual zoom target overlay — mapping round trip + synthetic drag (see
         // `Render/ZoomTargetMapping.swift`).
         "zoom-target": { args in try await ZoomTargetMapping.runSelfTest(args) },

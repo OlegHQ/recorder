@@ -276,6 +276,7 @@ struct EditorWorkspacePrototype: View {
             else if model.project.masks.contains(where: { $0.id == id.uuidString }) { MaskPanel(model: model, maskID: id) }
             else if model.project.layouts.contains(where: { $0.id == id.uuidString }) { LayoutPanel(model: model, layoutID: id) }
             else if model.project.keystrokeClips.contains(where: { $0.id == id.uuidString }) { KeysTab(model: model, layoutID: id) }
+            else if model.project.audioClips.contains(where: { $0.id == id.uuidString }) { AudioPanel(model: model, audioID: id) }
         }
     }
 
