@@ -8,19 +8,30 @@ version = '0.0.1'
 module = 'github.com/dietrichgebert/ponytail'
 direct = true
 kind = 'plugin'
-url = 'https://github.com/dietrichgebert/ponytail/tree/e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156'
+url = 'https://github.com/dietrichgebert/ponytail/tree/f329330e6104f7ab771fb0ba9612011f401d73cc'
 owner = 'dietrichgebert'
 repo = 'ponytail'
-commit = 'e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156'
-cache_key = 'a8e9bee7c0847c01c5f5eddf53560846fdc7802a173a245c957f3a51fb772ef7'
+commit = 'f329330e6104f7ab771fb0ba9612011f401d73cc'
+cache_key = 'd625145cdd7b1925469ed0f015158ff914274dfa9bb0bee32489c68919ce3c45'
+
+[[packages]]
+module = 'github.com/olegpustovit/agent-configs/mcps/1password'
+direct = true
+kind = 'plugin'
+url = 'https://github.com/olegpustovit/agent-configs/tree/ee2fc545a1003ae08a5c022d32409f07454ebe69/mcps/1password'
+owner = 'olegpustovit'
+repo = 'agent-configs'
+path = 'mcps/1password'
+commit = 'ee2fc545a1003ae08a5c022d32409f07454ebe69'
+cache_key = '2d6fa024efa82afffc7e9a635b317915caee83147f82d0468e7c640a3b1111ed'
 
 [[packages]]
 module = 'github.com/olegpustovit/agent-configs/skills/nudge-cli'
 direct = true
 kind = 'skill'
-url = 'https://github.com/olegpustovit/agent-configs/tree/b2eb27d2020384700a358da3ad0cc6d9d709acb1/skills/nudge-cli'
+url = 'https://github.com/olegpustovit/agent-configs/tree/ee2fc545a1003ae08a5c022d32409f07454ebe69/skills/nudge-cli'
 owner = 'olegpustovit'
 repo = 'agent-configs'
 path = 'skills/nudge-cli'
-commit = 'b2eb27d2020384700a358da3ad0cc6d9d709acb1'
-cache_key = 'ed4dda72812205937c109f2c1b554ba2d96bac27d62c584a212dc0dbf0f543e7'
+commit = 'ee2fc545a1003ae08a5c022d32409f07454ebe69'
+cache_key = 'c2e1e469742b2716d20e9a5e59ffab8467308a9e80d3c554aa48f23f43021980'

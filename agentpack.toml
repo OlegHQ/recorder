@@ -6,4 +6,6 @@ version = "0.0.1"
 [dependencies]
 "github.com/dietrichgebert/ponytail" = {}
 "github.com/olegpustovit/agent-configs/skills/nudge-cli" = "dev"
+"github.com/olegpustovit/agent-configs/mcps/1password" = "dev"
 # "github.com/owner/repo/path" = {}
+
