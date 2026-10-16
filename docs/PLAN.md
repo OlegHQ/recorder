@@ -774,7 +774,8 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
 - [x] **T-507 GIF** — same frame loop → `CGImageDestinationCreateWithURL(… UTType.gif …)`, per-frame `kCGImagePropertyGIFDelayTime`, loop 0, long edge ≤ 960; warn if > 60 s. `// ponytail: ImageIO's default palette; add per-frame quantisation only if banding is reported.`
 - [~] **T-508 Perf gates** — HUMAN + selftest timing: AC-EXP-1 (1 min 1080p60 < 30 s), AC-EXP-2 (10-min drift < 1 frame: compare last click sound vs cursor pulse), AC-APP-3 (idle CPU/RAM). Numbers into §Log.
   - WAITING ON HUMAN: `export-perf 60` = 19.5 s for 1 min 1080p60 (AC-EXP-1 PASS, machine under load); `record-perf 20` = 0.4 % CPU avg of one core in-process, HEVC (AC-REC-1 indicative). Still to run: `export-perf 600` for AC-EXP-2 with audio, 10-min Activity Monitor check.
-- [ ] **T-509 M5 gate / v1.0** — `make install` from a clean clone (AC-APP-1); record → edit → export end-to-end by HUMAN; tag `v1.0`.
+- [~] **T-509 M5 gate / release** — clean-clone build and installer regressions; signed/notarized universal DMG and next `vMAJOR.MINOR.PATCH` release. Original v1.0 acceptance still requires HUMAN record → edit → export and real-device/performance gates.
+  - IN PROGRESS: prepare v0.3.0 at the user's request to proceed despite visual deviations. Use a clean source build, installer fixtures and a separately mounted DMG instead of `make install`, which resets local TCC grants and quits running copies. Do not claim the full v1.0 acceptance suite is complete.
 
 ---
 

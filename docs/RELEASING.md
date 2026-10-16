@@ -2,8 +2,16 @@
 
 Push an annotated `vMAJOR.MINOR.PATCH` tag. The release workflow tests the app on
 macOS 15, builds arm64 and x86_64 slices, verifies the universal executable, runs
-GPU/color and export-sheet checks in the assembled app, then packages and publishes
+background persistence/crash recovery, GPU/color and export-sheet checks in the assembled app, then packages and publishes
 `Recorder-<version>-universal.dmg`. A failed export check blocks publication.
+
+The October 2026 audio/media update ships as v0.3.0, not a claim that every v1.0
+acceptance gate passed. Visual deviations are accepted by the user. Real-device
+permission migration, microphone latency, Intel playback and extended-duration
+capture/timeline performance remain manual checks tracked in `docs/PLAN.md`.
+Disclose these limits in release notes. Do not reset local privacy grants or quit
+the user's running Recorder merely to test installation: use installer regression
+fixtures, a clean source build and a separately mounted release DMG.
 
 `make app` derives its version from an exact release tag and its build number from
 the commit count or GitHub Actions run number. Untagged builds use `0.0.0`.

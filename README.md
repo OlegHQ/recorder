@@ -2,11 +2,10 @@
   <img src="docs/images/hero.png" alt="Recorder — screen recording, with room to edit. Capture, edit and export." width="100%">
 </p>
 
-> **Release DMG currently has an unresolved permissions failure.** Users report
-> Recorder still cannot detect granted Screen Recording/Accessibility access, including
-> in v0.1.4. The previous permission fixes did **not** resolve this reported failure.
-> Do not treat the DMG as a working installation path. A self-signed local install is
-> available below, but is not yet verified to resolve this issue on affected Macs.
+> **Permission migration still needs real-device verification.** Earlier builds,
+> including v0.1.4, have reports of granted access not being detected. Current release
+> packaging requires Developer ID signing and Apple notarization, but passing those
+> checks does not prove that an affected Mac's existing permission grants recover.
 
 <p align="center">
   Native macOS screen recording and non-destructive editing.<br>
@@ -14,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/olegpustovit/recorder/releases/latest">Release DMG — known permission issue</a>
+  <a href="https://github.com/olegpustovit/recorder/releases/latest">Download release DMG</a>
   &nbsp;·&nbsp; <a href="#installation">Installation</a>
   &nbsp;·&nbsp; <a href="#build-from-source">Build from source</a>
   &nbsp;·&nbsp; <a href="https://github.com/olegpustovit/recorder/issues">Report an issue</a>
@@ -35,6 +34,8 @@ result with cuts, zooms, camera placement, cursor effects and keystroke overlays
   microphone and system audio.
 - **Edit without losing the original.** Trim and split clips, adjust speed, arrange
   independent tracks, and undo changes.
+- **Build up the scene.** Import images, video and audio; arrange connected media
+  layers and linked audio tracks, or record a voiceover directly in the editor.
 - **Direct attention.** Automatic and manual zooms, cursor styling, masks,
   camera layouts, backgrounds and keystroke overlays.
 - **Share the result.** H.264 or HEVC MP4, animated GIF, and exported-file clipboard
@@ -47,9 +48,10 @@ result with cuts, zooms, camera placement, cursor effects and keystroke overlays
 
 ## Installation
 
-**The release DMG installation below is currently affected by the unresolved
-permission-detection failure described above.** Passing export/CI checks does not
-establish that permission grants work on an affected user's Mac.
+**Existing permission grants may need repair after an older build.** Passing
+export/CI checks does not establish that permission migration works on an affected
+Mac. Real-microphone latency and extended-duration performance gates also remain
+unverified; see the acceptance tracker in [the plan](docs/PLAN.md).
 
 1. Download `Recorder-<version>-universal.dmg` from the
    [latest release](https://github.com/olegpustovit/recorder/releases/latest).
@@ -61,10 +63,12 @@ The same DMG supports Apple Silicon and Intel Macs running **macOS 15 or later**
 To update, quit Recorder and replace the app in Applications with the new version.
 Your recordings are stored separately, by default in `~/Movies/Recorder`.
 
-### First launch: Gatekeeper / “Open Anyway”
+### First launch: signing and Gatekeeper
 
-Current public builds are **ad-hoc signed and not notarized by Apple**. macOS may
-block the first launch with an unidentified-developer or “Apple could not verify” message.
+Current release packaging requires **Developer ID signing and Apple notarization**
+of both the app and DMG, including stapled tickets and Gatekeeper assessment before
+publication. Older ad-hoc releases may still show an unidentified-developer or
+“Apple could not verify” message.
 
 After attempting to open the installed app:
 
@@ -74,8 +78,8 @@ After attempting to open the installed app:
 
 Use this exception only for the Recorder build you intentionally downloaded from
 this repository. See [Apple’s explanation of Gatekeeper](https://support.apple.com/en-us/102445).
-No global Gatekeeper change is needed. Signing and notarization support exists in the
-release workflow, but requires Apple Developer credentials; see [releasing](docs/RELEASING.md).
+No global Gatekeeper change is needed. If a current release is blocked, report the
+version and warning rather than disabling Gatekeeper; see [releasing](docs/RELEASING.md).
 
 ### Capture permissions
 

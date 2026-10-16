@@ -51,6 +51,7 @@ APP="$app" BINARY="$work/Recorder" VERSION="$version" BUILD="$build" SIGN_ID="${
 codesign --verify --deep --strict --verbose=2 "$app"
 "$app/Contents/MacOS/Recorder" --selftest permission-refresh
 "$app/Contents/MacOS/Recorder" --selftest identity-migration
+"$app/Contents/MacOS/Recorder" --selftest background-persistence
 # Run real GPU/codec paths in the assembled universal app before publishing it.
 "$app/Contents/MacOS/Recorder" --selftest export-colors
 "$app/Contents/MacOS/Recorder" --selftest export-sheet
