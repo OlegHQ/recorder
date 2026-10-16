@@ -57,6 +57,148 @@ import Testing
     }
 }
 
+@Test func audioModelRoundTrip() throws {
+    let project = Project(source: Source(duration: 20), clips: [Clip(sourceStart: 0, sourceEnd: 20)],
+        audioTracks: [AudioTrack(id: "track", name: "Audio 1", volume: 1.5, muted: true)],
+        audioClips: [AudioClip(id: "audio", start: 1, end: 4, mediaStart: 2, mediaRate: 0.5,
+                              file: "media/video.mov", link: .layer, layer: "video", gain: 0.7, fadeIn: 0.2, fadeOut: 0.4)],
+        layers: [LayerBlock(id: "video", kind: .video, start: 1, end: 4, file: "media/video.mov", mediaStart: 2,
+                            rect: NormRect(x: 0.1, y: 0.2, w: 0.6, h: 0.4), backdrop: .blur, motion: .slide,
+                            fadeIn: 0.1, fadeOut: 0.6, aboveCamera: true),
+                 LayerBlock(id: "image", kind: .image, start: 4, end: 8, file: "media/image.png", track: 1,
+                            rect: NormRect(), backdrop: .none, motion: .scale, fadeIn: nil, fadeOut: nil)])
+    #expect(project.checkInvariants(mediaDurations: ["media/video.mov": 8]) == nil)
+    #expect(try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(project)) == project)
+    #expect(Project.currentVersion == 3)
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+    defer { try? FileManager.default.removeItem(at: url) }
+    try project.save(to: url)
+    #expect(try Project.load(from: url) == project)
+}
+
+@Test func audioModelLegacyDerivation() throws {
+    let json = """
+    {"source":{"duration":20,"hasCamera":true,"hasMic":true,"hasSystemAudio":true},
+     "clips":[{"sourceStart":2,"sourceEnd":6,"speed":2},
+              {"sourceStart":6,"sourceEnd":8,"speed":1,"isGap":true},
+              {"sourceStart":10,"sourceEnd":14,"speed":2,"clockSpeed":1,"mediaStart":12}],
+     "audio":{"micVolume":0.6,"micMuted":true,"systemVolume":1.4,"systemMuted":false,"denoise":true}}
+    """
+    let project = try JSONDecoder().decode(Project.self, from: Data(json.utf8))
+    #expect(project.audioTracks.map(\.name) == ["Mic", "System"])
+    #expect(project.audioTracks.map(\.volume) == [0.6, 1.4])
+    #expect(project.audioTracks.map(\.muted) == [true, false])
+    #expect(project.audio.denoise)
+    #expect(project.audioClips.count == 4)
+    #expect(project.checkInvariants() == nil)
+    let map = TimeMap(project.clips)
+    for track in 0...1 {
+        let audioClips = project.audioClips.filter { $0.track == track }
+        #expect(audioClips.map(\.file) == Array(repeating: track == 0 ? "mic.m4a" : "system.m4a", count: 2))
+        #expect(audioClips.map(\.link) == Array(repeating: track == 0 ? .camera : .screen, count: 2))
+        #expect(audioClips.map(\.mediaStart) == [2, 12])
+        #expect(audioClips.map(\.mediaRate) == [1, 2])
+        #expect(audioClips.map { ($0.end - $0.start) * ($0.mediaRate ?? 1) } == [4, 8])
+        #expect(audioClips.map { map.outputTime(atSource: $0.start) } == [0, 4])
+        #expect(audioClips.map { map.outputTime(atSource: $0.end) } == [2, 8])
+    }
+    for hasMic in [false, true] {
+        for hasSystem in [false, true] {
+            let source = Source(duration: 2, hasMic: hasMic, hasSystemAudio: hasSystem)
+            let derived = Project(source: source, clips: [Clip(sourceStart: 0, sourceEnd: 2)])
+            #expect(derived.audioTracks.count == (hasMic ? 1 : 0) + (hasSystem ? 1 : 0))
+            #expect(derived.audioClips.allSatisfy { $0.link == .screen })
+            #expect(derived.checkInvariants() == nil)
+        }
+    }
+    var explicit = project
+    explicit.audioClips = []
+    let decoded = try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(explicit))
+    #expect(decoded == explicit)
+    let empty = Project(source: project.source, clips: project.clips, audioTracks: [], audioClips: [])
+    #expect(empty.audioClips.isEmpty && empty.audioTracks.isEmpty)
+}
+
+@Test func audioModelDefaultsAndMediaAdvance() throws {
+    let data = Data("{}".utf8)
+    let track = try JSONDecoder().decode(AudioTrack.self, from: data)
+    #expect(track.volume == 1 && !track.muted)
+    var audioClip = try JSONDecoder().decode(AudioClip.self, from: data)
+    #expect(audioClip.link == nil && audioClip.layer == nil && audioClip.gain == 1)
+    #expect(audioClip.fadeIn == nil && audioClip.fadeOut == nil && audioClip.mediaRate == nil)
+    audioClip.mediaRate = 2
+    audioClip.advanceMedia(by: 0.5)
+    #expect(audioClip.mediaStart == 1)
+    var layer = try JSONDecoder().decode(LayerBlock.self, from: data)
+    #expect(layer.kind == .image && layer.backdrop == .dim && layer.motion == .fade)
+    #expect(layer.fadeIn == 0.3 && layer.fadeOut == 0.3 && !layer.aboveCamera)
+    layer.advanceMedia(by: 2)
+    #expect(layer.mediaStart == 0)
+    layer.kind = .video
+    layer.advanceMedia(by: 2)
+    #expect(layer.mediaStart == 2)
+}
+
+@Test func audioModelInvariants() {
+    let base = Project(source: Source(duration: 20),
+        clips: [Clip(sourceStart: 0, sourceEnd: 4, speed: 2), Clip(sourceStart: 4, sourceEnd: 20)],
+        audioTracks: [AudioTrack(name: "Audio 1")],
+        audioClips: [AudioClip(start: 0, end: 1, file: "media/video.mov", link: .layer, layer: "video"),
+                     AudioClip(start: 4, end: 6, mediaStart: 1, file: "media/music.m4a")],
+        layers: [LayerBlock(id: "video", kind: .video, start: 0, end: 1, file: "media/video.mov", rect: NormRect()),
+                 LayerBlock(kind: .image, start: 4, end: 6, file: "media/image.png", rect: NormRect())])
+    let durations = ["media/video.mov": 5.0, "media/music.m4a": 8.0]
+    #expect(base.checkInvariants(mediaDurations: durations) == nil)
+    let invalidEdits: [(inout Project) -> Void] = [
+        { $0.audioClips[0].end = 3 },
+        { $0.audioClips.reverse() },
+        { $0.audioClips[0].track = -1 },
+        { $0.audioClips[0].track = 1 },
+        { $0.audioClips[0].layer = "missing" },
+        { $0.audioClips[0].layer = nil },
+        { $0.audioClips[0].link = nil },
+        { $0.layers[0].kind = .image },
+        { $0.audioClips[0].gain = 2.1 },
+        { $0.audioClips[0].gain = -.infinity },
+        { $0.audioTracks[0].volume = -0.1 },
+        { $0.audioClips[0].mediaStart = -1 },
+        { $0.audioClips[0].mediaRate = 0 },
+        { $0.audioClips[0].mediaStart = 5 },
+        { $0.audioClips[0].fadeIn = -0.1 },
+        { $0.audioClips[0].end = 0.09 },
+        { $0.audioClips[0].start = .nan },
+        { $0.audioClips[0].end = .infinity },
+        { $0.layers[0].end = 3 },
+        { $0.layers.reverse() },
+        { $0.layers[0].end = 0.49 },
+        { $0.layers[0].track = -1 },
+        { $0.layers[0].rect.w = 0 },
+        { $0.layers[0].rect.x = -0.1 },
+        { $0.layers[0].rect.h = 1.1 },
+        { $0.layers[0].rect.y = .nan },
+        { $0.layers[0].mediaStart = 5 },
+        { $0.layers[0].fadeOut = .infinity }
+    ]
+    for edit in invalidEdits {
+        var invalid = base
+        edit(&invalid)
+        #expect(invalid.checkInvariants(mediaDurations: durations) != nil)
+    }
+    var separateLanes = base
+    separateLanes.audioTracks.append(AudioTrack(name: "Audio 2"))
+    separateLanes.audioClips[1].start = 1; separateLanes.audioClips[1].end = 3; separateLanes.audioClips[1].track = 1
+    separateLanes.layers[1].start = 1; separateLanes.layers[1].end = 3; separateLanes.layers[1].track = 1
+    #expect(separateLanes.checkInvariants(mediaDurations: durations) == nil)
+    separateLanes.audioClips[1].track = 0
+    #expect(separateLanes.checkInvariants(mediaDurations: durations) != nil)
+    separateLanes.audioClips[1].track = 1; separateLanes.layers[1].track = 0
+    #expect(separateLanes.checkInvariants(mediaDurations: durations) != nil)
+    var shortLinked = base
+    shortLinked.audioClips[1].link = .screen
+    shortLinked.audioClips[1].start = 1; shortLinked.audioClips[1].end = 1.15
+    #expect(shortLinked.checkInvariants() != nil)
+}
+
 @Test func eventLogRoundTrip() throws {
     let log = EventLog(events: [
         InputEvent(t: 0.1, k: .move, x: 0.10, y: 0.20),

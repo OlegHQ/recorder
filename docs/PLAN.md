@@ -123,6 +123,33 @@ Proposal: https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA · SPEC §"Editor ro
 
 ---
 
+## Audio & layers roadmap — 2026-10-16
+
+Design + full Do/Verify per task: `docs/AUDIO-LAYERS.md` (decided 2026-10-16; read §1–§5 before any task, then the task's
+§6 entry). Prototype: https://claude.ai/artifact/J2AhVTkaGo2CcbUfViHFFH. SPEC §"Audio lanes and layers (October 2026)".
+Lanes: **A** T-640→T-645 · **L** T-646→T-649 (after T-640 merges; T-648 needs T-643) · T-650 last.
+
+| Scope | Tasks | Done |
+|---|---|---|
+| Core model + links | T-640…T-642 | 1/3 |
+| Audio lanes + voiceover | T-643…T-645 | 0/3 |
+| Media layers + import | T-646…T-649 | 0/4 |
+| Docs | T-650 | 0/1 |
+
+- [x] **T-640 Audio/layer model + legacy derivation (Core)** — AUDIO-LAYERS §6
+- [ ] **T-641 Linked audio edits (Core)** — AUDIO-LAYERS §6
+- [ ] **T-642 Connected blocks settle (Core)** — AUDIO-LAYERS §6
+- [ ] **T-643 Composition + mix for N audio tracks** — AUDIO-LAYERS §6
+- [ ] **T-644 Audio lanes UI** — AUDIO-LAYERS §6
+- [ ] **T-645 Voiceover recording** — AUDIO-LAYERS §6
+- [ ] **T-646 Media import + layer lanes (Core + UI)** — AUDIO-LAYERS §6
+- [ ] **T-647 Image layer render pass** — AUDIO-LAYERS §6
+- [ ] **T-648 Video layer playback** — AUDIO-LAYERS §6
+- [ ] **T-649 Layer inspector + direct manipulation** — AUDIO-LAYERS §6
+- [ ] **T-650 Docs + snapshot** — AUDIO-LAYERS §6
+
+---
+
 ## Requested Nudge fixes — 2026-09-22
 
 User-requested fixes are handled individually in this order, separately from the outstanding HUMAN milestone gates.
@@ -872,3 +899,4 @@ Recheck · 2026-10-15 · screen unlocked, app frontmost via LaunchServices: `cro
 T-633 · 2026-10-15 · live (Screen Recording granted, LaunchServices): first `record-windows 3` HUNG — merge bug: lane W's window-frame timer called `outputTime` (lane K made it take the NSLock) while holding the same non-recursive lock → deadlock in `EventRecorder.stop()` (sampled). Fixed by reading the time before locking. Then `record-windows 3 10` OK: 3 animated windows (corner square moving at 60 Hz), 3 files at their own sizes, one clock (durations within 0.75 s), centre colours correct, windowFrames for every window, avg CPU 1.1 % of one core (< 25 % AC-REC-1 bar, now asserted in the check); `record-perf 5` display regression OK (0.6 %, hvc1); `events 3` OK.
 T-622 · 2026-10-15 · live (Screen Recording + Accessibility granted): new `events 3 keys` posts Shift-alone and F13 through the real tap → captured as `key` 56/105. First run FOUND A BUG: F13 also logged `.typing` (hand-kept non-printing keycode list lacked F13–F20) → root fix: `.typing` only when the key produced a printable character (`ch != nil`); list deleted. Re-run: `events 3 keys` OK (key ×2, no typing), `key-capture` OK, `make test` 86/86, parity M6 maxDelta=0.
 
+T-640 · 2026-10-16 · Added AudioTrack/AudioClip/LayerBlock, additive version-3 project keys, legacy Mic/System derivation and TimedBlock media advancement. Verified `make test FILTER=audioModel` 4/4 and `make test` 90/90 (including AC-PRJ-1/2), both with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`: the selected Xcode 6.4 compiler otherwise loads the Makefile's incompatible CLT 6.3 Testing framework. Tests cover populated JSON/disk round trips, explicit disabled fades, legacy cuts/2×/gaps/media in-points/link defaults, empty clip preservation, output-time overlaps, track/link/gain/rect checks and known media bounds. `checkInvariants(mediaDurations:)` accepts known imported-file durations; recorded audio uses source.duration. App composition/UI wiring remains T-641…T-649. Existing agentpack.toml/pack.lock conflicts preserved; task commit uses a separate index.

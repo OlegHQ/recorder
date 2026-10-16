@@ -915,3 +915,24 @@ Source: proposal https://claude.ai/artifact/5AM3Z6uVtk3nBi142picJA (decisions 20
   disabled for multi-window projects. Implementation: the composition inserts the visible window's footage into the one
   screen video track, split at shot edges (no per-window tracks); `Source.windowSizes` holds each window's pixel size and
   `events.json` `windowFrames` holds global-point frame samples written only on change.
+
+
+### Audio lanes and layers (October 2026)
+
+Source: `docs/AUDIO-LAYERS.md` (detail, decided 2026-10-16) · prototype https://claude.ai/artifact/J2AhVTkaGo2CcbUfViHFFH ·
+PLAN T-640…T-650.
+
+- **Audio is clips on tracks.** `Project.audioTracks` (name, volume, muted) and `audioClips` (file, media in-point, track,
+  gain, fades, `link`). Mic and system audio become clips; old projects derive one clip per video clip and sound unchanged.
+- **Links.** `screen`-linked audio always follows video edits; `camera`-linked follows the camera clip; `layer`-linked
+  follows its video layer. ⌥ acts on one clip. Unlink/relink per clip; an out-of-sync clip shows a red offset chip with
+  Move into Sync.
+- **Connected.** Unlinked audio, voiceover takes, audio files and all layers ride the video clock (ripple carries them),
+  are never cut by video edits, and are pushed to another lane instead of overlapping.
+- **Voiceover.** Record at the playhead or re-record the selected audio clip (pre-roll 1.5 s, auto-stop, original piece
+  muted). Project audio muted while recording. Takes go to `voice/<id>.m4a`; a new take replaces the old one in that range.
+- **Layers.** `Project.layers`: image or video blocks on Layer lanes, Card/Full/Corner/Free placement, Dim/Blur
+  backdrop, Fade/Scale/Slide motion, fades, optional in front of camera. A video layer's sound is a `layer`-linked clip.
+  Imported media is copied into `media/`. Idle spans from `events.json` appear as slots on Layer 1.
+- **Render order.** background → screen → cursor → backdrop → layers → camera → front layers → text → keys. Preview and
+  export share it (parity maxDelta 0).

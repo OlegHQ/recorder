@@ -671,7 +671,7 @@ public extension Project {
     /// SPEC §7.4: clips sorted by `sourceStart`, non-overlapping, each >= 0.1 s, speed in
     /// 0.25...16, at least one clip; zooms/layouts/masks sorted, non-overlapping, >= 0.5 s,
     /// within `[0, source.duration]`.
-    func checkInvariants() -> String? {
+    func checkInvariants(mediaDurations: [String: Double] = [:]) -> String? {
         let eps = 1e-9
         if clips.isEmpty { return "no clips" }
         var prevEnd: Double?
@@ -694,6 +694,59 @@ public extension Project {
         if let e = masks.blockInvariantError(kind: "mask", duration: timelineSourceDuration) { return e }
         if let e = texts.blockInvariantError(kind: "text", duration: timelineSourceDuration) { return e }
         if let e = windowShots.blockInvariantError(kind: "window shot", duration: timelineSourceDuration) { return e }
+        let map = TimeMap(clips)
+        func mediaIsValid(file: String, start: Double, length: Double) -> Bool {
+            guard start.isFinite, start >= 0, length.isFinite, length > 0 else { return false }
+            let recordedDuration = ["mic.m4a", "system.m4a"].contains(file) ? source.duration : nil
+            guard let duration = mediaDurations[file] ?? recordedDuration else { return true }
+            return duration.isFinite && start + length <= duration + eps
+        }
+        func fadesAreValid(_ fadeIn: Double?, _ fadeOut: Double?) -> Bool {
+            [fadeIn, fadeOut].compactMap { $0 }.allSatisfy { $0.isFinite && $0 >= 0 }
+        }
+        for (index, track) in audioTracks.enumerated() {
+            if !track.volume.isFinite || !(0...2).contains(track.volume) { return "audio track \(index) volume out of range" }
+        }
+        var audioEnds: [Int: Double] = [:]
+        for (index, audioClip) in audioClips.enumerated() {
+            guard audioTracks.indices.contains(audioClip.track) else { return "audio \(index) track out of range" }
+            guard audioClip.start.isFinite, audioClip.end.isFinite, audioClip.end > audioClip.start,
+                  let start = map.outputTime(atSource: audioClip.start) else { return "audio \(index) invalid interval" }
+            let linked = audioClip.link == .screen || audioClip.link == .camera
+            let end = linked ? map.outputTime(atSource: audioClip.end) : start + audioClip.end - audioClip.start
+            guard let end, end.isFinite, end - start >= 0.1 - eps else { return "audio \(index) shorter than 0.1s" }
+            if let previous = audioEnds[audioClip.track], start < previous - eps { return "audio \(index) overlaps the previous audio clip" }
+            audioEnds[audioClip.track] = end
+            if !audioClip.gain.isFinite || !(0...2).contains(audioClip.gain) { return "audio \(index) gain out of range" }
+            if !fadesAreValid(audioClip.fadeIn, audioClip.fadeOut) { return "audio \(index) invalid fade" }
+            let rate = audioClip.mediaRate ?? 1
+            if !rate.isFinite || rate <= 0 || !mediaIsValid(file: audioClip.file, start: audioClip.mediaStart,
+                                                         length: (audioClip.end - audioClip.start) * rate) {
+                return "audio \(index) media range outside file"
+            }
+            if audioClip.link == .layer {
+                guard let layer = audioClip.layer, layers.contains(where: { $0.id == layer && $0.kind == .video }) else {
+                    return "audio \(index) dangling layer link"
+                }
+            } else if audioClip.layer != nil { return "audio \(index) layer without layer link" }
+        }
+        var layerEnds: [Int: Double] = [:]
+        for (index, layer) in layers.enumerated() {
+            guard layer.track >= 0 else { return "layer \(index) track out of range" }
+            guard layer.start.isFinite, layer.end.isFinite, layer.end - layer.start >= 0.5 - eps,
+                  let start = map.outputTime(atSource: layer.start) else { return "layer \(index) invalid interval" }
+            let end = start + layer.end - layer.start
+            guard end.isFinite else { return "layer \(index) invalid interval" }
+            if let previous = layerEnds[layer.track], start < previous - eps { return "layer \(index) overlaps the previous layer" }
+            layerEnds[layer.track] = end
+            let rect = layer.rect
+            if ![rect.x, rect.y, rect.w, rect.h].allSatisfy(\.isFinite) || rect.x < 0 || rect.y < 0 || rect.w <= 0 || rect.h <= 0
+                || rect.x + rect.w > 1 + eps || rect.y + rect.h > 1 + eps { return "layer \(index) rect outside canvas" }
+            if !fadesAreValid(layer.fadeIn, layer.fadeOut) { return "layer \(index) invalid fade" }
+            if layer.kind == .video && !mediaIsValid(file: layer.file, start: layer.mediaStart, length: layer.end - layer.start) {
+                return "layer \(index) media range outside file"
+            }
+        }
         return nil
     }
 }
@@ -717,6 +770,12 @@ extension Layout: TimedBlock {
 }
 extension CameraClip: TimedBlock {
     mutating func advanceMedia(by delta: Double) { mediaStart += delta * (mediaRate ?? 1) }
+}
+extension AudioClip: TimedBlock {
+    mutating func advanceMedia(by delta: Double) { mediaStart += delta * (mediaRate ?? 1) }
+}
+extension LayerBlock: TimedBlock {
+    mutating func advanceMedia(by delta: Double) { if kind == .video { mediaStart += delta } }
 }
 extension Mask: TimedBlock {}
 extension TextBlock: TimedBlock {

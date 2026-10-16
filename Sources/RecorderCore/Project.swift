@@ -290,6 +290,123 @@ public struct CameraClip: Codable, Equatable, Sendable {
     }
 }
 
+public struct AudioTrack: Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var volume: Double
+    public var muted: Bool
+
+    public init(id: String = UUID().uuidString, name: String, volume: Double = 1, muted: Bool = false) {
+        self.id = id; self.name = name; self.volume = volume; self.muted = muted
+    }
+    enum CodingKeys: String, CodingKey { case id, name, volume, muted }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.value(.id, default: UUID().uuidString)
+        name = try container.value(.name, default: "Audio 1")
+        volume = try container.value(.volume, default: 1)
+        muted = try container.value(.muted, default: false)
+    }
+}
+
+public struct AudioClip: Codable, Equatable, Sendable {
+    public enum Link: String, Codable, Sendable { case screen, camera, layer }
+    public var id: String
+    public var start: Double
+    public var end: Double
+    public var mediaStart: Double
+    public var mediaRate: Double?
+    public var file: String
+    public var track: Int
+    public var link: Link?
+    public var layer: String?
+    public var gain: Double
+    public var fadeIn: Double?
+    public var fadeOut: Double?
+
+    public init(id: String = UUID().uuidString, start: Double, end: Double, mediaStart: Double = 0,
+                mediaRate: Double? = nil, file: String, track: Int = 0, link: Link? = nil, layer: String? = nil,
+                gain: Double = 1, fadeIn: Double? = nil, fadeOut: Double? = nil) {
+        self.id = id; self.start = start; self.end = end; self.mediaStart = mediaStart; self.mediaRate = mediaRate
+        self.file = file; self.track = track; self.link = link; self.layer = layer
+        self.gain = gain; self.fadeIn = fadeIn; self.fadeOut = fadeOut
+    }
+    enum CodingKeys: String, CodingKey {
+        case id, start, end, mediaStart, mediaRate, file, track, link, layer, gain, fadeIn, fadeOut
+    }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.value(.id, default: UUID().uuidString)
+        start = try container.value(.start, default: 0)
+        end = try container.value(.end, default: 0)
+        mediaStart = try container.value(.mediaStart, default: 0)
+        mediaRate = try container.decodeIfPresent(Double.self, forKey: .mediaRate)
+        file = try container.value(.file, default: "")
+        track = try container.value(.track, default: 0)
+        link = try container.decodeIfPresent(Link.self, forKey: .link)
+        layer = try container.decodeIfPresent(String.self, forKey: .layer)
+        gain = try container.value(.gain, default: 1)
+        fadeIn = try container.decodeIfPresent(Double.self, forKey: .fadeIn)
+        fadeOut = try container.decodeIfPresent(Double.self, forKey: .fadeOut)
+    }
+}
+
+public struct LayerBlock: Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable { case image, video }
+    public enum Backdrop: String, Codable, Sendable { case none, dim, blur }
+    public enum Motion: String, Codable, Sendable { case fade, scale, slide }
+    public var id: String
+    public var kind: Kind
+    public var start: Double
+    public var end: Double
+    public var file: String
+    public var mediaStart: Double
+    public var track: Int
+    public var rect: NormRect
+    public var backdrop: Backdrop
+    public var motion: Motion
+    public var fadeIn: Double?
+    public var fadeOut: Double?
+    public var aboveCamera: Bool
+
+    public init(id: String = UUID().uuidString, kind: Kind, start: Double, end: Double, file: String,
+                mediaStart: Double = 0, track: Int = 0, rect: NormRect, backdrop: Backdrop = .dim,
+                motion: Motion = .fade, fadeIn: Double? = 0.3, fadeOut: Double? = 0.3, aboveCamera: Bool = false) {
+        self.id = id; self.kind = kind; self.start = start; self.end = end; self.file = file
+        self.mediaStart = mediaStart; self.track = track; self.rect = rect; self.backdrop = backdrop
+        self.motion = motion; self.fadeIn = fadeIn; self.fadeOut = fadeOut; self.aboveCamera = aboveCamera
+    }
+    enum CodingKeys: String, CodingKey {
+        case id, kind, start, end, file, mediaStart, track, rect, backdrop, motion, fadeIn, fadeOut, aboveCamera
+    }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.value(.id, default: UUID().uuidString)
+        kind = try container.value(.kind, default: .image)
+        start = try container.value(.start, default: 0)
+        end = try container.value(.end, default: 0)
+        file = try container.value(.file, default: "")
+        mediaStart = try container.value(.mediaStart, default: 0)
+        track = try container.value(.track, default: 0)
+        rect = try container.value(.rect, default: NormRect())
+        backdrop = try container.value(.backdrop, default: .dim)
+        motion = try container.value(.motion, default: .fade)
+        fadeIn = container.contains(.fadeIn) ? try container.decodeIfPresent(Double.self, forKey: .fadeIn) : 0.3
+        fadeOut = container.contains(.fadeOut) ? try container.decodeIfPresent(Double.self, forKey: .fadeOut) : 0.3
+        aboveCamera = try container.value(.aboveCamera, default: false)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id); try container.encode(kind, forKey: .kind)
+        try container.encode(start, forKey: .start); try container.encode(end, forKey: .end)
+        try container.encode(file, forKey: .file); try container.encode(mediaStart, forKey: .mediaStart)
+        try container.encode(track, forKey: .track); try container.encode(rect, forKey: .rect)
+        try container.encode(backdrop, forKey: .backdrop); try container.encode(motion, forKey: .motion)
+        try container.encode(fadeIn, forKey: .fadeIn); try container.encode(fadeOut, forKey: .fadeOut)
+        try container.encode(aboveCamera, forKey: .aboveCamera)
+    }
+}
+
 public struct Background: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable { case wallpaper, gradient, color, image }
     public var kind: Kind
@@ -541,6 +658,9 @@ public struct Project: Codable, Equatable, Sendable {
     public var layouts: [Layout]
     public var keystrokeClips: [Layout]
     public var cameraClips: [CameraClip]
+    public var audioTracks: [AudioTrack]
+    public var audioClips: [AudioClip]
+    public var layers: [LayerBlock]
     public var masks: [Mask]
     public var texts: [TextBlock]
     public var windowShots: [WindowShot]
@@ -578,7 +698,10 @@ public struct Project: Codable, Equatable, Sendable {
         animation: Animation = Animation(),
         camera: Camera = Camera(),
         audio: Audio = Audio(),
-        keys: Keys = Keys()
+        keys: Keys = Keys(),
+        audioTracks: [AudioTrack]? = nil,
+        audioClips: [AudioClip]? = nil,
+        layers: [LayerBlock] = []
     ) {
         self.version = version; self.id = id; self.title = title; self.createdAt = createdAt
         self.keystrokeClips = keystrokeClips + layouts.filter { $0.kind == .settings }
@@ -587,11 +710,13 @@ public struct Project: Codable, Equatable, Sendable {
         self.cursorHidden = cursorHidden; self.crop = crop; self.output = output; self.background = background
         self.frame = frame; self.cursor = cursor; self.animation = animation; self.camera = camera
         self.audio = audio; self.keys = keys
+        self.audioTracks = audioTracks ?? []; self.audioClips = audioClips ?? []; self.layers = layers
+        if audioClips == nil { deriveLegacyAudio() }
     }
 
     enum CodingKeys: String, CodingKey {
         case version, id, title, createdAt, source, linkVideoEdits, rippleDelete, clips, zooms, layouts, cameraClips, keystrokeClips, masks, texts, windowShots, cursorHidden, crop, output,
-             background, frame, cursor, animation, camera, audio, keys
+             background, frame, cursor, animation, camera, audio, keys, audioTracks, audioClips, layers
     }
 
     public init(from decoder: Decoder) throws {
@@ -622,6 +747,25 @@ public struct Project: Codable, Equatable, Sendable {
         camera = try c.value(.camera, default: Camera())
         audio = try c.value(.audio, default: Audio())
         keys = try c.value(.keys, default: Keys())
+        audioTracks = try c.value(.audioTracks, default: [])
+        audioClips = try c.value(.audioClips, default: [])
+        layers = try c.value(.layers, default: [])
+        if !c.contains(.audioClips) { deriveLegacyAudio() }
+    }
+
+    private mutating func deriveLegacyAudio() {
+        audioTracks = []; audioClips = []
+        for (enabled, name, file, volume, muted, link) in [
+            (source.hasMic, "Mic", "mic.m4a", audio.micVolume, audio.micMuted, source.hasCamera ? AudioClip.Link.camera : .screen),
+            (source.hasSystemAudio, "System", "system.m4a", audio.systemVolume, audio.systemMuted, AudioClip.Link.screen)
+        ] where enabled {
+            let track = audioTracks.count
+            audioTracks.append(AudioTrack(name: name, volume: volume, muted: muted))
+            audioClips += clips.filter { !$0.isEmpty }.map {
+                AudioClip(start: $0.sourceStart, end: $0.sourceEnd, mediaStart: $0.mediaIn,
+                          mediaRate: $0.speed / $0.timeScale, file: file, track: track, link: link)
+            }
+        }
     }
 
     /// Throws `ProjectError.newerVersion` rather than silently opening (and risking a rewrite) a
