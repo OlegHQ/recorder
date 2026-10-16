@@ -60,17 +60,18 @@ enum Waveform {
         guard reader.startReading() else { throw reader.error ?? CocoaError(.fileReadUnknown) }
 
         var peaks: [Float] = []
-        var samplesPerBucket = 0
+        var sampleRate = 0.0
         var channels = 1
         var bucketPeak: Float = 0
         var bucketFrames = 0
+        var totalFrames = 0
 
         while let sampleBuffer = reader.status == .reading ? output.copyNextSampleBuffer() : nil {
-            if samplesPerBucket == 0,
+            if sampleRate == 0,
                let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
                let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) {
                 channels = max(1, Int(asbd.pointee.mChannelsPerFrame))
-                samplesPerBucket = max(1, Int(asbd.pointee.mSampleRate / Double(peaksPerSecond)))
+                sampleRate = max(Double(peaksPerSecond), asbd.pointee.mSampleRate)
             }
             guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
             let byteCount = CMBlockBufferGetDataLength(blockBuffer)
@@ -84,8 +85,9 @@ enum Waveform {
                 for c in 0..<channels where frame + c < floatCount { frameMax = max(frameMax, abs(samples[frame + c])) }
                 bucketPeak = max(bucketPeak, frameMax)
                 bucketFrames += 1
+                totalFrames += 1
                 frame += channels
-                if bucketFrames >= samplesPerBucket {
+                if Double(totalFrames) * Double(peaksPerSecond) >= Double(peaks.count + 1) * sampleRate {
                     peaks.append(bucketPeak)
                     bucketPeak = 0
                     bucketFrames = 0

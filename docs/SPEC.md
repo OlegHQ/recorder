@@ -763,7 +763,7 @@ Video clip movement uses output-time distances across mixed playback speeds, inc
 
 **Undo**: every completed gesture = exactly one undo step (`model.edit` opens on mouseDown, commits on mouseUp; `Esc` during a drag cancels and reverts). `⌘Z` / `⇧⌘Z`.
 
-**Feel**: all drags update at display refresh rate; blocks have 10 pt radius, 1 px inner highlight, hover brightens 8%; block moves/resizes caused by *other* edits animate 0.18 s; nothing animates while the user is dragging that block. Waveform = min/max peaks precomputed once per audio file into a 200 samples/s table (mic preferred, else system).
+**Feel**: all drags update at display refresh rate; blocks have 10 pt radius, 1 px inner highlight, hover brightens 8%; block moves/resizes caused by *other* edits animate 0.18 s; nothing animates while the user is dragging that block. Waveform = min/max peaks precomputed once per audio file into an exact 200 samples/s table, including fractional frames per bucket at 44.1 kHz. The audio/layers roadmap draws these in each audio clip using its media-to-output mapping, superseding the earlier mic-preferred inline Video-lane waveform.
 
 ### 7.3 Keyboard map (editor)
 

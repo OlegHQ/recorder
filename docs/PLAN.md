@@ -59,7 +59,7 @@ Tests: Core logic gets the tests the task lists — no more. App target gets non
 | M1 Record | T-101…T-114 | 7/14 |
 | M2 Record+ | T-201…T-208 (+T-207b) | 0/9 |
 | M3 Editor shell | T-301…T-313 | 6/13 |
-| M4 Timeline | T-401…T-418 | 6/18 |
+| M4 Timeline | T-401…T-418 | 7/18 |
 | M5 Ship | T-501…T-509 | 2/9 |
 | M6 Polish | T-601…T-610 | 4/10 |
 
@@ -756,8 +756,12 @@ Core first (T-401…T-403, T-410…T-412 are pure + tested), then the view.
     Deviation: per-clip audio controls live on the audio lane, not an added field on the screen Clip.
 - [~] **T-415 Manual zoom target in preview** — when a `.manual` zoom is selected, `PreviewView` shows the **un-zoomed** frame with a draggable accent rectangle (size = 1/scale) — reuse `SelectionRectView` with `aspect` locked and resize disabled (`allowsResize = false`, add that flag). Drag = `update { zoom.center }`.
   - WAITING ON HUMAN (feel only): `zoom-target`/`zoom-target-png`/`hover-preview` all pass headlessly (mapping round trip, one-undo-step drag, clamped-to-frame drag, AC-TL-7 hover-without-moving-playhead); `TimelineView.onHoverTime` now wired to `PreviewView.hoverTime` in `EditorWindowController`'s init. Human: live drag feel over a real recording (does the rectangle track the cursor smoothly, no jitter/lag).
-- [~] **T-416 Waveform** — File `Render/Waveform.swift`: `AVAssetReader` over mic (else system) → min/max peaks at 200/s → `[Float]` cached in memory; drawn inside clip blocks mapped through `TimeMap`. `// ponytail: computed on open, not cached on disk.`
-  - WAITING ON HUMAN (taste): peaks + drawing inside clips merged; `timeline-png` reviewed with a synthesized mic track.
+- [x] **T-416 Waveform** — File `Render/Waveform.swift`: `AVAssetReader` over mic (else system) → min/max peaks at 200/s → `[Float]` cached in memory; drawn inside clip blocks mapped through `TimeMap`. `// ponytail: computed on open, not cached on disk.`
+  - VERIFIED: fixed rounded-down sample buckets that produced 201 rather than 200 peaks for one second of 44.1 kHz
+    audio. The shared extractor now compares cumulative frames to exact bucket boundaries. New waveform regression
+    fails before the fix and passes after it; audio-lanes, synthetic voiceover, timeline-ops, timeline-png and all
+    129 Core tests pass. Reviewed fresh waveform/silence/mute rendering. Placement is per audio clip after T-644's
+    audio-lane roadmap; the user's visual waiver closes the remaining taste review, not other performance gates.
 - [~] **T-417 Accessibility** · AC-TL-8 — `accessibilityChildren()` returns one `NSAccessibilityElement` per block, role `.button`, label per SPEC, `accessibilityPerformIncrement/Decrement` move by one frame. HUMAN: VoiceOver reads blocks.
   - WAITING ON HUMAN: merged; `timeline-ops` asserts children count/roles/labels/frames and increment/decrement = 1 undo step. Human: VoiceOver pass (AC-TL-8).
 - [~] **T-418 M4 gate** — `make test` all green; HUMAN walks SPEC §7.2 paragraph by paragraph and §7.3 key by key; deviations into §Log. AC-TL-3 on a 30-min recording.
@@ -1004,3 +1008,5 @@ T-111 · 2026-10-16 · Revalidated v0.3.2's signed-bundle permissions through La
 T-508 · 2026-10-16 · Inspected both performance helpers before using their evidence: export-perf has no audio, and idle-perf hosts no toolbar and labels itself a headless lower bound. Corrected the tracker instruction that incorrectly suggested export-perf 600 could close A/V drift. Ran signed v0.3.2's export-perf 60 on Apple M1: synthesizes moving 1920×1080@60 content in 19.3 s (excluded), exports 3,600 frames in 19.58 s / 183.8 fps, AC-EXP-1 PASS under 30 s; video duration 60.0000 s, drift 0.0000 s, last PTS 59.9833 s. Explicit shell checks also require all frames and the duration PASS line. Temporary media cleaned and readonly DMG detached. Keep [~] for the actual ten-minute audio/cursor comparison and real-toolbar idle CPU/RAM measurement; no headless/synthetic substitute claimed. No app-source change/new release; existing config conflicts preserved.
 
 T-414 · 2026-10-16 · Audited InspectorView selection routing and ZoomPanel/ClipPanel/CursorTab bindings plus TimelineView's cancel-before-deselect Escape chain against SPEC §6.6/AC-INS-3. Current v0.3.2 release-source build passes inspector-panels, menu-actions and timeline-ops; generated and inspected fresh /tmp/recorder-t414-{zoom,clip,cursor}.png. Existing tests cover model edit/gesture undo and persisted fields, not a timed rendered panel switch. User's visual waiver closes mockup approval, but the literal one-frame latency requirement remains unverified; corrected the previous “taste only” claim and retained [~] rather than calling a settled PNG timing evidence. No app-source change/new release; existing config conflicts preserved.
+
+T-416 · 2026-10-16 · Found a functional timing defect while auditing the waveform taste gate: flooring 44,100/200 to 220 frames per bucket made the nominal 200 Hz table run fast, shifting waveforms/silence decisions on longer audio. Added a native regression requiring exactly 200 buckets for the existing one-second 44.1 kHz fixture; observed failure at 201 before editing the extractor. Replaced fixed rounded bucket lengths with cumulative frame/rate boundary comparisons in the shared extractor, preserving channels, final partial buckets, caching and errors. Regression now passes at 200; audio-lanes (including MOV audio), synthetic voiceover, timeline-ops, timeline-png and make test 129/129 pass with CLT; strict codesign and diff checks pass. Inspected /tmp/recorder-t416-timeline.png with mic/system/voice/imported audio, silence and muted hatching. User's accepted visual deviations close taste review; task [x], M4 7/18. SPEC clarifies exact bucket rate and the newer audio-lane placement. This source fix is newer than v0.3.2 and needs the follow-up release; no physical-mic or performance gate implied. Existing config conflicts preserved.

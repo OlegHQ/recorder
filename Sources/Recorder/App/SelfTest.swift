@@ -2958,6 +2958,9 @@ enum SelfTest {
             let peaks = try await Waveform.peaks(for: file)
             let max = peaks.max() ?? 0
             print("peaks=\(peaks.count) max=\(max)")
+            if args.isEmpty, peaks.count != Waveform.peaksPerSecond {
+                throw Fail(description: "One second of 44.1 kHz audio must produce exactly 200 waveform buckets")
+            }
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
