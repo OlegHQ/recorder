@@ -121,6 +121,7 @@ final class PreviewView: MTKView {
         enableSetNeedsDisplay = true
         colorPixelFormat = .bgra8Unorm
         colorspace = VideoColor.space
+        registerForDraggedTypes([.fileURL])
 
         zoomTargetView.allowsResize = false
         zoomTargetView.minSize = CGSize(width: 1, height: 1)
@@ -400,6 +401,22 @@ final class PreviewView: MTKView {
     }
 
     // MARK: - Keys (SPEC §7.3): Space, ←/→, ⇧←/⇧→, Home/End, J/K/L
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        !model.voiceover.isActive && model.mediaImportStatus == nil && !EditorModel.mediaFiles(on: sender.draggingPasteboard).isEmpty ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { draggingEntered(sender) }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard !model.voiceover.isActive, model.mediaImportStatus == nil else { return false }
+        let files = EditorModel.mediaFiles(on: sender.draggingPasteboard)
+        guard !files.isEmpty else { return false }
+        model.addMediaFiles(files, atOutput: model.playhead, window: window)
+        return true
+    }
+
+    @objc func paste(_ sender: Any?) { nextResponder?.tryToPerform(#selector(NSText.paste(_:)), with: sender) }
 
     override func keyDown(with event: NSEvent) {
         if model.voiceover.isActive {

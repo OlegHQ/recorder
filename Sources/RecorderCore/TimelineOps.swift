@@ -10,6 +10,61 @@ public enum Edge: Sendable {
 /// `assert`. The x-axis callers work in is *output* time; conversion to *source* time (where
 /// clips live) goes only through `TimeMap`. See docs/SPEC.md §7.4.
 public extension Project {
+    private func importedAudioTrack(start: Double, end: Double) -> Int {
+        for track in audioTracks.indices where audioTracks[track].name.hasPrefix("Audio ") {
+            if !audioClips.contains(where: { audio in
+                guard audio.track == track, let range = outputRange(audio, connected: audio.isConnected) else { return false }
+                return range.start < end - 1e-9 && range.end > start + 1e-9
+            }) { return track }
+        }
+        return audioTracks.count
+    }
+
+    @discardableResult
+    mutating func addImportedAudio(file: String, atOutput time: Double, duration: Double, layer: String? = nil) -> UUID? {
+        guard file.hasPrefix("media/"), !file.split(separator: "/").contains(".."),
+              time.isFinite, time >= 0, duration.isFinite, duration >= 0.1 else { return nil }
+        let before = self
+        extendAudioClock(toOutput: time)
+        let track = importedAudioTrack(start: time, end: time + duration)
+        if track == audioTracks.count {
+            var number = 1
+            while audioTracks.contains(where: { $0.name == "Audio \(number)" }) { number += 1 }
+            audioTracks.append(AudioTrack(name: "Audio \(number)"))
+        }
+        let start = TimeMap(clips).sourceTime(atOutput: time)
+        let id = UUID()
+        audioClips.append(AudioClip(id: id.uuidString, start: start, end: start + duration, file: file,
+                                    track: track, link: layer == nil ? nil : .layer, layer: layer))
+        audioClips.sort { $0.start < $1.start }
+        guard checkInvariants(mediaDurations: [file: duration]) == nil else { self = before; return nil }
+        return id
+    }
+
+    @discardableResult
+    mutating func addLayer(kind: LayerBlock.Kind, file: String, atOutput time: Double, duration: Double,
+                           rect: NormRect, hasAudio: Bool = false, track preferredTrack: Int = 0) -> UUID? {
+        guard file.hasPrefix("media/"), !file.split(separator: "/").contains(".."), preferredTrack >= 0,
+              time.isFinite, time >= 0, duration.isFinite, duration >= 0.5 else { return nil }
+        let before = self
+        let length = kind == .video ? min(duration, TimeMap(clips).outputDuration - time) : duration
+        guard length >= 0.5 else { return nil }
+        extendAudioClock(toOutput: time)
+        var track = preferredTrack
+        while layers.contains(where: { layer in
+            guard layer.track == track, let range = outputRange(layer, connected: true) else { return false }
+            return range.start < time + length - 1e-9 && range.end > time + 1e-9
+        }) { track += 1 }
+        let start = TimeMap(clips).sourceTime(atOutput: time)
+        let id = UUID()
+        layers.append(LayerBlock(id: id.uuidString, kind: kind, start: start, end: start + length, file: file, track: track, rect: rect))
+        layers.sort { $0.start < $1.start }
+        if kind == .video, hasAudio,
+           addImportedAudio(file: file, atOutput: time, duration: length, layer: id.uuidString) == nil { self = before; return nil }
+        guard checkInvariants(mediaDurations: kind == .video ? [file: duration] : [:]) == nil else { self = before; return nil }
+        return id
+    }
+
     func voiceoverDestination(atOutput time: Double, replacing range: TimeRange? = nil) -> (track: Int, name: String, stop: Double?) {
         func retained(_ audio: AudioClip) -> Bool {
             guard let range, audio.file.hasPrefix("voice/"), let interval = outputRange(audio, connected: audio.isConnected) else { return true }
@@ -874,22 +929,34 @@ public extension Project {
     }
 
     mutating func moveLayer(_ id: UUID, toStart source: Double, propagate: Bool = true) {
-        guard source.isFinite, let layer = layers.first(where: { $0.id == id.uuidString }),
-              let range = outputRange(layer, connected: true), let requested = TimeMap(clips).outputTime(atSource: source) else { return }
-        let neighbours = layers.filter { $0.track == layer.track && $0.id != layer.id }.compactMap { outputRange($0, connected: true) }
+        guard source.isFinite, let output = TimeMap(clips).outputTime(atSource: source) else { return }
+        moveLayer(id, toOutput: output, propagate: propagate)
+    }
+
+    mutating func moveLayer(_ id: UUID, toOutput requested: Double, track: Int? = nil, propagate: Bool = true) {
+        guard requested.isFinite, requested >= 0, var layer = layers.first(where: { $0.id == id.uuidString }),
+              let range = outputRange(layer, connected: true), track == nil || track! >= 0 else { return }
+        let destination = track ?? layer.track
+        let neighbours = layers.filter { $0.track == destination && $0.id != layer.id }.compactMap { outputRange($0, connected: true) }
         let lower = neighbours.filter { $0.end <= range.start + 1e-9 }.map(\.end).max() ?? 0
-        let upper = min(TimeMap(clips).outputDuration,
-                        (neighbours.filter { $0.start >= range.end - 1e-9 }.map(\.start).min() ?? .infinity) - (range.end - range.start))
+        let upper = (neighbours.filter { $0.start >= range.end - 1e-9 }.map(\.start).min() ?? .infinity) - (range.end - range.start)
         let start = min(max(requested, lower), upper)
-        guard abs(start - range.start) > 1e-9 else { return }
+        guard abs(start - range.start) > 1e-9 || destination != layer.track else { return }
         let before = self
+        extendAudioClock(toOutput: start)
+        layer.track = destination
         editLayer(layer, in: range.start...range.end, moveBy: start - range.start, propagate: propagate)
         if checkInvariants() != nil { self = before }
     }
 
     mutating func resizeLayer(_ id: UUID, edge: Edge, to source: Double, mediaDuration: Double? = nil, propagate: Bool = true) {
-        guard source.isFinite, let layer = layers.first(where: { $0.id == id.uuidString }),
-              let range = outputRange(layer, connected: true), let requested = TimeMap(clips).outputTime(atSource: source) else { return }
+        guard source.isFinite, let output = TimeMap(clips).outputTime(atSource: source) else { return }
+        resizeLayer(id, edge: edge, toOutput: output, mediaDuration: mediaDuration, propagate: propagate)
+    }
+
+    mutating func resizeLayer(_ id: UUID, edge: Edge, toOutput requested: Double, mediaDuration: Double? = nil, propagate: Bool = true) {
+        guard requested.isFinite, requested >= 0, let layer = layers.first(where: { $0.id == id.uuidString }),
+              let range = outputRange(layer, connected: true) else { return }
         let neighbours = layers.filter { $0.track == layer.track && $0.id != layer.id }.compactMap { outputRange($0, connected: true) }
         let before = self
         var changed = connectedOnOutput(layer)!
@@ -904,6 +971,7 @@ public extension Project {
                             layer.kind == .video ? range.start + (mediaDuration ?? .infinity) - layer.mediaStart : .infinity)
             changed.end = max(min(requested, upper), range.start + 0.5)
         }
+        extendAudioClock(toOutput: changed.start)
         if propagate {
             if changed.start > range.start { editLayer(layer, in: range.start...changed.start, moveBy: nil, propagate: true) }
             if changed.end < range.end, let current = layers.first(where: { $0.id == layer.id }) {

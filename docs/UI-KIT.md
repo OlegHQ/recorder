@@ -322,6 +322,18 @@ Live waveforms stay outside project.json until the take commits in one undo step
 older take files remain for undo. `--selftest voiceover [m4a] --keep-fixture` exercises the synthetic-file path and
 writes `/tmp/recorder-voiceover-*.png`. Real-microphone capture and latency remain a HUMAN gate.
 
+Media import: Edit ▸ Add Media… uses a native image/movie/audio picker. File drops use the preview playhead or
+timeline drop time; image paste uses the same validation/copy/one-undo path. The document status shows the current
+import while large files copy off the main thread. Audio uses free Audio lanes, never Mic/System; video sound
+stays linked to its layer. Owned copies remain available after undo.
+Layer lanes sit below Camera, highest first, with image/video thumbnail strips, fade ramps/handles and dark labels.
+Body/edge drags share the connected output clock; vertical moves choose another layer lane, Option leaves sound
+alone, Command bypasses snapping and Escape cancels. Dashed idle spans on Layer 1 open an image picker;
+missing files show a labelled hatch. Headers retain compact mode and native vertical scrolling. Layer selection,
+focus, clipboard and accessibility use the real editor model. `--selftest timeline-png <png> --layers` renders
+the import fixture; `media-import` also captures minimum-size, compact and missing-media states.
+Layer preview/export rendering and the detailed layer inspector remain T-647…T-649.
+
 Project opening preserves the editor’s layout from the first frame: top bar, preview status, inspector and timeline. Preparation happens off the UI thread, with no artificial minimum wait. Ready controls reveal over 160 ms; Reduce Motion switches immediately. Preview loading remains labelled until the first video frame arrives.
 
 ## gallery-advanced / September 2026

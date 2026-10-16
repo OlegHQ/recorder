@@ -367,6 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(item("Cut", "x", action: #selector(NSText.cut(_:))))
         edit.addItem(item("Copy", "c", action: #selector(NSText.copy(_:))))
         edit.addItem(item("Paste", "v", action: #selector(NSText.paste(_:))))
+        edit.addItem(item("Add Media…", action: #selector(EditorWindowController.addMedia(_:))))
         edit.addItem(item("Split", "c", [], action: #selector(EditorWindowController.splitAtPlayhead(_:))))
         edit.addItem(item("Link / Unlink Audio", "l", action: #selector(EditorWindowController.toggleAudioLink(_:))))
         edit.addItem(item("Record / Re-record Voiceover", "r", [.shift], action: #selector(EditorWindowController.recordVoiceover(_:))))

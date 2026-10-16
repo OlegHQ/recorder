@@ -981,6 +981,11 @@ enum SelfTest {
         "timeline-png": { @MainActor args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             guard let outPath = args.first else { throw Fail(description: "usage: timeline-png <out.png>") }
+            if args.contains("--layers") {
+                try await SelfTest.cases["media-import"]!([])
+                try Data(contentsOf: URL(fileURLWithPath: "/tmp/recorder-layers-timeline.png")).write(to: URL(fileURLWithPath: outPath), options: .atomic)
+                return
+            }
 
             var project = Project(
                 title: "Fixture",
@@ -2878,6 +2883,97 @@ enum SelfTest {
             // Sanity range for real speech/PCM samples (not silence, not a byte-swap artifact like 2.3e-38).
             guard (0.001...1.5).contains(max) else { throw Fail(description: "max \(max) outside 0.001...1.5 (byte order / decode bug?)") }
         },
+        "media-import": { @MainActor args in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("media-import-" + UUID().uuidString)
+            let package = root.appendingPathComponent("Media validation.recorder")
+            try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+            defer { if !args.contains("--keep-fixture") { try? FileManager.default.removeItem(at: root) } }
+            let png = root.appendingPathComponent("diagram.png"), silent = root.appendingPathComponent("silent.mov")
+            let sound = root.appendingPathComponent("sound.mov"), music = root.appendingPathComponent("music.m4a")
+            guard let context = CGContext(data: nil, width: 640, height: 360, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  let destination = CGImageDestinationCreateWithURL(png as CFURL, UTType.png.identifier as CFString, 1, nil) else { throw Fail(description: "PNG fixture") }
+            context.setFillColor(CGColor(red: 0.82, green: 0.89, blue: 0.94, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 640, height: 360))
+            context.setFillColor(CGColor(gray: 0.12, alpha: 1)); context.fill(CGRect(x: 60, y: 70, width: 220, height: 200)); context.fill(CGRect(x: 340, y: 70, width: 240, height: 90))
+            CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+            try check(CGImageDestinationFinalize(destination), "write PNG")
+            try await synthesizeGradientMovie(at: silent, width: 160, height: 90, fps: 5, frameCount: 20)
+            try synthesizeSineM4A(at: music, duration: 4)
+            let movie = AVURLAsset(url: silent), tone = AVURLAsset(url: music)
+            let composition = AVMutableComposition()
+            let videoTrack = try await movie.loadTracks(withMediaType: .video)[0]
+            let audioTrack = try await tone.loadTracks(withMediaType: .audio)[0]
+            let range = CMTimeRange(start: .zero, duration: CMTime(seconds: 4, preferredTimescale: 600))
+            try composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)!.insertTimeRange(range, of: videoTrack, at: .zero)
+            try composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)!.insertTimeRange(range, of: audioTrack, at: .zero)
+            let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough)!
+            try await exporter.export(to: sound, as: .mov)
+            let events = EventLog(events: [InputEvent(t: 5, k: .key), InputEvent(t: 12, k: .down), InputEvent(t: 20, k: .move)])
+            let original = Project(title: "Media validation", source: Source(pixelWidth: 640, pixelHeight: 360, duration: 20), clips: [Clip(sourceStart: 0, sourceEnd: 20)])
+            let model = EditorModel(packageURL: package, project: original, events: events)
+            let sources = [png, sound, silent, music]
+            let positions = [1.0, 6, 6, 7]
+            for (index, url) in sources.enumerated() {
+                let before = model.project, steps = model.undoStepCount
+                _ = try await model.importMedia(url, atOutput: positions[index])
+                let after = model.project
+                try check(model.undoStepCount == steps + 1 && model.mediaImportStatus == nil, "one import undo/status")
+                model.undo(); try check(model.project == before, "undo import")
+                model.redo(); try check(model.project == after, "redo import")
+            }
+            let files = try FileManager.default.contentsOfDirectory(at: package.appendingPathComponent("media"), includingPropertiesForKeys: nil)
+            try check(files.count == 4 && model.project.layers.count == 3 && model.project.audioClips.count == 2 && model.project.audioTracks.count == 2, "four copied files / expected layers and audio tracks")
+            for source in sources {
+                let data = try Data(contentsOf: source)
+                try check(files.contains { (try? Data(contentsOf: $0)) == data }, "copied bytes differ")
+            }
+            try check(model.project.layers[0].start == 0.25 && model.project.layers[0].end == 4.75, "image fills idle slot")
+            let linked = model.project.audioClips.first { $0.link == .layer }
+            try check(linked?.layer == model.project.layers.first { $0.file == linked?.file }?.id && model.project.audioTracks.allSatisfy { $0.name.hasPrefix("Audio ") }, "video sound linked / extra audio lanes")
+            let before = model.project, steps = model.undoStepCount
+            let corrupt = root.appendingPathComponent("broken.mov")
+            try Data("not media".utf8).write(to: corrupt)
+            var rejected = false
+            do { _ = try await model.importMedia(corrupt, atOutput: 1) } catch { rejected = true }
+            try check(rejected && model.project == before && model.undoStepCount == steps && (try FileManager.default.contentsOfDirectory(atPath: package.appendingPathComponent("media").path)).count == 4, "corrupt file mutated project/package")
+            model.saveNow()
+            try check(try Project.load(from: package.appendingPathComponent("project.json")) == model.project, "saved import round trip")
+            let pasteboard = NSPasteboard.withUniqueName()
+            pasteboard.writeObjects([png as NSURL])
+            try check(EditorModel.mediaFiles(on: pasteboard) == [png] && EditorModel.canPasteMedia(pasteboard), "file pasteboard")
+            pasteboard.clearContents(); pasteboard.writeObjects([NSImage(contentsOf: png)!])
+            try check(model.pasteMedia(pasteboard, window: nil), "image pasteboard entry")
+            for _ in 0..<200 {
+                if model.undoStepCount == steps + 1 { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try check(model.undoStepCount == steps + 1 && model.project.layers.count == 4, "clipboard image not imported")
+            model.undo(); try check(model.project == before, "clipboard import undo")
+            pasteboard.releaseGlobally()
+            model.beginGesture()
+            rejected = false
+            do { _ = try await model.importMedia(png, atOutput: 0) } catch { rejected = true }
+            model.cancelGesture()
+            try check(rejected && model.project == before && model.undoStepCount == steps, "active gesture import guard")
+            let retainedCount = try FileManager.default.contentsOfDirectory(atPath: package.appendingPathComponent("media").path).count
+            rejected = false
+            do { _ = try await model.importMedia(silent, atOutput: 19.8) } catch { rejected = true }
+            try check(rejected && model.project == before && (try FileManager.default.contentsOfDirectory(atPath: package.appendingPathComponent("media").path)).count == retainedCount, "short import copy cleanup")
+            let trapped = root.appendingPathComponent("trapped.recorder"), outside = root.appendingPathComponent("outside")
+            try FileManager.default.createDirectory(at: trapped, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: trapped.appendingPathComponent("media"), withDestinationURL: outside)
+            let trappedModel = EditorModel(packageURL: trapped, project: original, events: events)
+            rejected = false
+            do { _ = try await trappedModel.importMedia(png, atOutput: 1) } catch { rejected = true }
+            try check(rejected && trappedModel.project == original && trappedModel.undoStepCount == 0 && (try FileManager.default.contentsOfDirectory(atPath: outside.path)).isEmpty, "escaped media directory")
+            try await TimelineView.runLayerUISelfTest(model: model)
+            try JSONEncoder().encode(events).write(to: package.appendingPathComponent("events.json"))
+            model.saveNow()
+            if args.contains("--keep-fixture") { print("Media import fixture: \(package.path)") }
+            print("media-import: PNG, video with/without sound, audio, owned copies, idle slot, one undo each, clipboard, corrupt media, layer gestures and thumbnails verified")
+        },
         "voiceover": { @MainActor args in
             let keep = args.contains("--keep-fixture")
             let package = FileManager.default.temporaryDirectory.appendingPathComponent("voiceover-test-" + UUID().uuidString + ".recorder")
@@ -3749,6 +3845,7 @@ private func makeTimelineOpsFixture(hasCamera: Bool = false) throws -> (model: E
 
     let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 900, height: 160))
     view.model = model
+    view.setFrameSize(CGSize(width: 900, height: view.contentHeight + 26))
     view.geometry.pxPerSecond = 40
     view.geometry.scrollX = 0
     let gutter = TimelineView.gutter
@@ -3789,7 +3886,7 @@ private func runTimelineOpsSelfTest() async throws {
         guard abs(model.project.zooms[0].start - 4.55) < 0.01 else {
             throw TimelineOpsFail(description: "Snap off still snapped a move")
         }
-        view.setFrameSize(NSSize(width: 900, height: 182))
+        view.setFrameSize(NSSize(width: 900, height: view.contentHeight + 26))
         view.setZoom(sliderValue: 0.5)
         let before = model.project
         let r = view.overviewRect
@@ -3879,7 +3976,7 @@ private func runAccessibilitySelfTest(model: EditorModel, view: TimelineView) th
     }
     let children = allChildren.filter { $0.accessibilityRole() == .button }
     // One element for the clip, one for the zoom (no camera ⇒ no layout lane; no masks in the fixture).
-    guard children.count == 2 else { throw TimelineOpsFail(description: "expected 2 accessibility children, got \(children.count)") }
+    guard children.count == 2 + model.idleSlots.count else { throw TimelineOpsFail(description: "expected clip, zoom and idle-slot accessibility children, got \(children.count)") }
 
     for child in children {
         guard child.accessibilityRole() == .button else { throw TimelineOpsFail(description: "block isn't role .button: \(child.accessibilityRole()?.rawValue ?? "nil")") }
@@ -4220,19 +4317,19 @@ private func runZoomBlockSelfTest(model: EditorModel, view: TimelineView, px: (D
 
     // Snapping: the *raw mouse position* (not the resulting start) is what's compared to the
     // candidates, so grab a known 0.2 s inside the block's leading edge (safely past the 0.15 s
-    // edge-hit-test zone) and drag until the mouse itself is 0.05 s from the playhead candidate
+    // edge-hit-test zone) and drag until the mouse itself is 0.05 s below the playhead candidate
     // (5.2) — well within the 0.15 s threshold — so it should snap exactly onto it.
     model.playhead = 5.2
     let beforeSnapMove = model.project.zooms.first { $0.id == zoomB.id }!
     let grabOffset = 0.2
     view.mouseDown(with: synthMouse(.leftMouseDown, CGPoint(x: px(beforeSnapMove.start + grabOffset), y: zoomLaneY)))
-    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY)))
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.2 - 0.05), y: zoomLaneY)))
     guard let snapped = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(snapped.start - (5.2 - grabOffset)) < 0.01 else {
         throw TimelineOpsFail(description: "move didn't snap onto the playhead: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
     }
     // ⌘ held disables snapping — the same near-candidate drag should now land at the raw position.
-    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY), modifiers: .command))
-    guard let unsnapped = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(unsnapped.start - (5.25 - grabOffset)) < 0.01 else {
+    view.mouseDragged(with: synthMouse(.leftMouseDragged, CGPoint(x: px(5.2 - 0.05), y: zoomLaneY), modifiers: .command))
+    guard let unsnapped = model.project.zooms.first(where: { $0.id == zoomB.id }), abs(unsnapped.start - (5.15 - grabOffset)) < 0.01 else {
         throw TimelineOpsFail(description: "⌘ should have disabled snapping: \(String(describing: model.project.zooms.first { $0.id == zoomB.id }))")
     }
     view.mouseUp(with: synthMouse(.leftMouseUp, CGPoint(x: px(5.2 + 0.05), y: zoomLaneY), modifiers: .command))

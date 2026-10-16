@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import ImageIO
 import Observation
 import QuartzCore
 import RecorderCore
@@ -11,6 +12,7 @@ import SwiftUI
 enum Lane: CaseIterable, Hashable, Sendable {
     case clip, camera, zoom, keys, layout, mask, text, window
     case audio(Int)
+    case layer(Int)
 
     static let allCases: [Lane] = [.clip, .camera, .zoom, .keys, .layout, .mask, .text, .window]
 }
@@ -115,6 +117,7 @@ final class TimelineView: NSView {
     }
 
     @objc func paste(_ sender: Any?) {
+        if !canPasteSelection, model?.pasteMedia(clipboardPasteboard, window: window) == true { return }
         guard canPasteSelection, let clipboard = Self.clipboard, let model else { NSSound.beep(); return }
         var trial = model.project
         guard let selection = trial.pasteSelection(clipboard.content, atOutput: model.playhead) else { NSSound.beep(); return }
@@ -149,7 +152,11 @@ final class TimelineView: NSView {
             let name = model.project.audioTracks.indices.contains(track) ? model.project.audioTracks[track].name : model.voiceover.trackName
             return name == "Mic" ? 0 : name == "System" ? 1 : name.hasPrefix("Voiceover ") ? 2 : 3
         }
-        return Lane.allCases + tracks.sorted { order($0) == order($1) ? $0 < $1 : order($0) < order($1) }.map(Lane.audio)
+        var layerTracks = Set((dragKindIsLayer ? dragProject?.layers ?? model.project.layers : model.project.layers).map(\.track))
+        if !model.idleSlots.isEmpty { layerTracks.insert(0) }
+        if mediaDragActive { layerTracks.insert((layerTracks.max() ?? -1) + 1) }
+        return [.clip, .camera] + layerTracks.sorted(by: >).map(Lane.layer) + Array(Lane.allCases.dropFirst(2))
+            + tracks.sorted { order($0) == order($1) ? $0 < $1 : order($0) < order($1) }.map(Lane.audio)
     }
     private var timelineDuration: Double {
         model.map { max($0.timeMap.outputDuration, $0.project.exportDuration,
@@ -206,8 +213,18 @@ final class TimelineView: NSView {
         case resizeBlock(id: UUID, lane: Lane, edge: RecorderCore.Edge)
         case audio(id: UUID, edge: RecorderCore.Edge?, grabOffset: Double)
         case audioFade(id: UUID, edge: RecorderCore.Edge)
+        case layer(id: UUID, edge: RecorderCore.Edge?, grabOffset: Double)
+        case layerFade(id: UUID, edge: RecorderCore.Edge)
     }
     private var dragIgnoresLinks = false
+    private var mediaDragActive = false
+    private var layerThumbnails: [String: [Int: CGImage]] = [:]
+    private var loadingThumbnails: Set<String> = []
+    private var failedThumbnails: Set<String> = []
+    private var dragKindIsLayer: Bool {
+        if case .layer = dragKind { return true }
+        return false
+    }
     private var audioHeaderButtons: [Int: (volume: NSButton, mute: NSButton, record: NSButton)] = [:]
     private var volumePopover: NSPopover?
     private var hoverX: CGFloat?
@@ -251,7 +268,12 @@ final class TimelineView: NSView {
     private var splitOptionHeld = false
     private var isSplitMode: Bool {
         splitModeSticky || (splitOptionHeld && !lanes.contains { lane in
-            if case .audio = lane, let hoverY { return laneRow(lane).contains(CGPoint(x: gutterWidth + 1, y: hoverY)) }
+            if let hoverY {
+                switch lane {
+                case .audio, .layer: return laneRow(lane).contains(CGPoint(x: gutterWidth + 1, y: hoverY))
+                default: break
+                }
+            }
             return false
         })
     }
@@ -293,6 +315,8 @@ final class TimelineView: NSView {
         case .resizeBlock: return "resizeBlock"
         case .audio: return "audio"
         case .audioFade: return "audioFade"
+        case .layer: return "layer"
+        case .layerFade: return "layerFade"
         }
     }
 
@@ -300,6 +324,7 @@ final class TimelineView: NSView {
         super.init(frame: frameRect)
         geometry.width = max(0, frameRect.width - gutterWidth)
         wantsLayer = true
+        registerForDraggedTypes([.fileURL])
         layer?.backgroundColor = Theme.bgPanel.cgColor
         for (button, name) in [(fullZoomButton, "Zoom"), (fullKeysButton, "Keys")] {
             button.isBordered = false
@@ -446,7 +471,7 @@ final class TimelineView: NSView {
         case .layout: return hasLayoutLane ? Self.layoutHeight : 0
         case .mask, .text: return Self.maskHeight
         case .window: return model?.project.windowCount ?? 1 > 1 ? Self.maskHeight : 0
-        case .audio: return 36
+        case .audio, .layer: return 36
         }
     }
 
@@ -493,6 +518,7 @@ final class TimelineView: NSView {
         drawRuler()
         drawClipLane(project, timeMap)
         drawCameraLane(project, timeMap)
+        drawMediaLayers(project)
         drawZoomLane(project, timeMap)
         drawClickTicks(project, timeMap)
         drawEmptyLaneGhost()
@@ -573,10 +599,18 @@ final class TimelineView: NSView {
             let clipCount: Int = p.clips.filter { !$0.isEmpty }.count
             return [clipCount, p.cameraClips.count, p.zooms.count, p.keystrokeClips.count, p.layouts.count, p.masks.count, p.texts.count, p.windowShots.count]
         } ?? [Int](repeating: 0, count: Lane.allCases.count)
-        for (i, lane) in lanes.enumerated() {
+        for lane in lanes {
             let row = laneRow(lane)
             guard row.height > 0 else { continue }
             if case .audio(let track) = lane { drawAudioHeader(track, row: row); continue }
+            if case .layer(let track) = lane {
+                if !compactTrackHeaders {
+                    ("Layer \(track + 1)" as NSString).draw(at: CGPoint(x: 22, y: row.midY - 7), withAttributes: [.font: Theme.labelFont, .foregroundColor: Theme.textPrimary])
+                }
+                Theme.mask.setFill(); CGRect(x: compactTrackHeaders ? 6 : 10, y: row.midY - 5, width: 3, height: 10).fill()
+                continue
+            }
+            let i = Lane.allCases.firstIndex(of: lane)!
             colors[lane]?.setFill()
             CGRect(x: compactTrackHeaders ? 6 : 10, y: row.midY - 5, width: 3, height: 10).fill()
             if compactTrackHeaders { continue }
@@ -637,6 +671,9 @@ final class TimelineView: NSView {
             .flatMap { visibleSegments(start: $0.1, end: $0.2, project: model.project, timeMap: model.timeMap) }
         for audio in model.project.audioClips where UUID(uuidString: audio.id).map(model.selection.contains) ?? false {
             segments += model.project.audioSegments(audio).map { (outStart: $0.output.start, outEnd: $0.output.end, tornLeft: false, tornRight: false) }
+        }
+        for layer in model.project.layers where UUID(uuidString: layer.id).map(model.selection.contains) ?? false {
+            if let start = model.timeMap.outputTime(atSource: layer.start) { segments.append((outStart: start, outEnd: start + layer.end - layer.start, tornLeft: false, tornRight: false)) }
         }
         guard let start = segments.map(\.outStart).min(), let end = segments.map(\.outEnd).max() else { return nil }
         return start...end
@@ -1181,9 +1218,10 @@ final class TimelineView: NSView {
         for audio in project.audioClips where UUID(uuidString: audio.id) != excludingBlock {
             for segment in project.audioSegments(audio) { candidates += [segment.output.start, segment.output.end] }
         }
-        for layer in project.layers {
+        for layer in project.layers where UUID(uuidString: layer.id) != excludingBlock {
             if let start = timeMap.outputTime(atSource: layer.start) { candidates += [start, start + layer.end - layer.start] }
         }
+        for slot in model.idleSlots { candidates += [slot.start, slot.end] }
         return candidates
     }
 
@@ -1228,6 +1266,13 @@ final class TimelineView: NSView {
         if p.y <= Self.rulerHeight, abs(p.x - playheadX) <= 6 { return .playhead }
 
         if let hit = hitClipLane(p, model) { return hit }
+        for layer in model.project.layers {
+            guard let id = UUID(uuidString: layer.id), let rect = mediaLayerRect(layer), rect.contains(p) else { continue }
+            let zone = edgeZone(width: rect.width)
+            if p.x <= rect.minX + zone { return .blockEdge(id, .leading) }
+            if p.x >= rect.maxX - zone { return .blockEdge(id, .trailing) }
+            return .blockBody(id)
+        }
         if model.project.source.hasCamera, let hit = hitBlockLane(p, model, lane: .camera, blocks: model.project.cameraClips.map { ($0.id, $0.start, $0.end) }) { return hit }
         if let hit = hitBlockLane(p, model, lane: .zoom, blocks: model.project.zooms.map { ($0.id, $0.start, $0.end) }) { return hit }
         if let hit = hitBlockLane(p, model, lane: .keys, blocks: model.project.keystrokeClips.map { ($0.id, $0.start, $0.end) }) { return hit }
@@ -1373,6 +1418,7 @@ final class TimelineView: NSView {
         if model.project.texts.contains(where: { $0.id == key }) { return .text }
         if model.project.windowShots.contains(where: { $0.id == key }) { return .window }
         if let audio = model.project.audioClips.first(where: { $0.id == key }) { return .audio(audio.track) }
+        if let layer = model.project.layers.first(where: { $0.id == key }) { return .layer(layer.track) }
         return nil
     }
 
@@ -1652,6 +1698,187 @@ final class TimelineView: NSView {
 
     // MARK: - Keyboard (⌘=/⌘- anchored at the playhead, ⇧Z = fit, C/S = split — SPEC §7.3)
 
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard model?.voiceover.isActive != true, model?.mediaImportStatus == nil,
+              !EditorModel.mediaFiles(on: sender.draggingPasteboard).isEmpty else { return [] }
+        mediaDragActive = true
+        enclosingScrollView?.superview?.needsLayout = true
+        needsDisplay = true
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { draggingEntered(sender) }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) { endMediaDrag() }
+    override func draggingEnded(_ sender: NSDraggingInfo) { endMediaDrag() }
+
+    private func endMediaDrag() {
+        mediaDragActive = false
+        enclosingScrollView?.superview?.needsLayout = true
+        needsDisplay = true
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { endMediaDrag() }
+        guard let model, !model.voiceover.isActive, model.mediaImportStatus == nil else { return false }
+        let files = EditorModel.mediaFiles(on: sender.draggingPasteboard)
+        guard !files.isEmpty else { return false }
+        let point = convert(sender.draggingLocation, from: nil)
+        let time = max(0, geometry.output(forX: geometryX(point)))
+        let track = lanes.compactMap { lane -> Int? in
+            if case .layer(let track) = lane, laneRow(lane).contains(point) { return track }
+            return nil
+        }.first ?? 0
+        model.addMediaFiles(files, atOutput: time, track: track, window: window)
+        return true
+    }
+
+    private func mediaLayerRect(_ layer: LayerBlock) -> CGRect? {
+        guard let model, let start = model.timeMap.outputTime(atSource: layer.start) else { return nil }
+        let row = laneRow(.layer(layer.track))
+        return CGRect(x: x(forOutput: start), y: row.minY + 3, width: CGFloat((layer.end - layer.start) * geometry.pxPerSecond), height: row.height - 6)
+    }
+
+    private func layerFadeHandle(_ layer: LayerBlock, edge: RecorderCore.Edge) -> CGRect? {
+        guard let rect = mediaLayerRect(layer), rect.width >= 24 else { return nil }
+        return CGRect(x: edge == .leading ? rect.minX + 9 : rect.maxX - 15, y: rect.minY + 2, width: 6, height: 6)
+    }
+
+    private func loadLayerThumbnail(_ layer: LayerBlock, at tick: Int) {
+        guard let model else { return }
+        let key = layer.file + "@\(tick)"
+        guard layerThumbnails[layer.file]?[tick] == nil, !loadingThumbnails.contains(key), !failedThumbnails.contains(key) else { return }
+        let package = model.packageURL
+        let url = package.appendingPathComponent(layer.file).standardizedFileURL.resolvingSymlinksInPath()
+        guard url.path.hasPrefix(package.standardizedFileURL.resolvingSymlinksInPath().path + "/"), FileManager.default.fileExists(atPath: url.path) else { return }
+        loadingThumbnails.insert(key)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .utility) { () -> (CGImage?, Double?) in
+                if layer.kind == .image {
+                    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return (nil, nil) }
+                    let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 160] as CFDictionary)
+                    return (image, nil)
+                }
+                let asset = AVURLAsset(url: url)
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true; generator.maximumSize = CGSize(width: 160, height: 90)
+                let duration = try? await asset.load(.duration).seconds
+                let image = try? await generator.image(at: CMTime(seconds: Double(tick) / 10, preferredTimescale: 600)).image
+                return (image, duration)
+            }.value
+            guard let self, self.model?.packageURL == package else { return }
+            self.loadingThumbnails.remove(key)
+            if let image = result.0 { self.layerThumbnails[layer.file, default: [:]][tick] = image }
+            else { self.failedThumbnails.insert(key) }
+            if let duration = result.1, duration.isFinite { self.mediaDurations[layer.file] = duration }
+            self.needsDisplay = true
+        }
+    }
+
+    private func drawMediaLayers(_ project: Project) {
+        guard let model else { return }
+        let row = laneRow(.layer(0))
+        for slot in model.idleSlots where row.height > 0 {
+            let rect = CGRect(x: x(forOutput: slot.start), y: row.minY + 3, width: CGFloat((slot.end - slot.start) * geometry.pxPerSecond), height: row.height - 6)
+            guard rect.maxX >= gutterWidth, rect.minX <= bounds.width else { continue }
+            Theme.textTertiary.setStroke()
+            let path = NSBezierPath(rect: rect.insetBy(dx: 1, dy: 1)); path.setLineDash([4, 3], count: 2, phase: 0); path.stroke()
+            if rect.width > 90 {
+                ("+ Add image" as NSString).draw(at: CGPoint(x: max(gutterWidth + 6, rect.minX + 8), y: rect.midY - 6), withAttributes: [.font: Theme.captionFont, .foregroundColor: Theme.textSecondary])
+            }
+        }
+        for layer in project.layers {
+            guard let rect = mediaLayerRect(layer), rect.maxX >= gutterWidth, rect.minX <= bounds.width else { continue }
+            let color = layer.kind == .image ? Theme.mask : Theme.zoom
+            drawBlock(rect, fill: color, tornLeft: false, tornRight: false, label: nil, selected: UUID(uuidString: layer.id).map(model.selection.contains) ?? false)
+            NSGraphicsContext.saveGraphicsState()
+            rect.clip()
+            let url = model.packageURL.appendingPathComponent(layer.file).standardizedFileURL.resolvingSymlinksInPath()
+            let missing = !url.path.hasPrefix(model.packageURL.standardizedFileURL.resolvingSymlinksInPath().path + "/") || !FileManager.default.fileExists(atPath: url.path)
+            if missing { drawAudioHatch(rect) }
+            else {
+                var pixel = rect.minX + floor(max(0, gutterWidth - rect.minX) / 54) * 54
+                while pixel < min(bounds.width, rect.maxX) {
+                    let tick = layer.kind == .image ? 0 : Int(((layer.mediaStart + Double((pixel - rect.minX) / geometry.pxPerSecond)) * 10).rounded())
+                    loadLayerThumbnail(layer, at: tick)
+                    if let image = layerThumbnails[layer.file]?[tick] {
+                        NSImage(cgImage: image, size: .zero).draw(in: CGRect(x: pixel, y: rect.minY + 10, width: 52, height: rect.height - 10), from: .zero, operation: .sourceOver, fraction: 0.85, respectFlipped: true, hints: nil)
+                    }
+                    pixel += 54
+                }
+            }
+            color.withAlphaComponent(0.92).setFill(); CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 12).fill()
+            let label = missing ? "Missing media" : String(format: "%@ · %.1f s", layer.kind == .image ? "Image" : "Video", layer.end - layer.start)
+            (label as NSString).draw(at: CGPoint(x: max(rect.minX + 18, gutterWidth + 4), y: rect.minY), withAttributes: [.font: Theme.captionFont, .foregroundColor: Theme.mediaMatte])
+            let fadeIn = CGFloat((layer.fadeIn ?? 0) * geometry.pxPerSecond), fadeOut = CGFloat((layer.fadeOut ?? 0) * geometry.pxPerSecond)
+            Theme.mediaMatte.withAlphaComponent(0.35).setStroke()
+            for (start, end) in [(CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: min(rect.maxX, rect.minX + fadeIn), y: rect.minY)),
+                                 (CGPoint(x: max(rect.minX, rect.maxX - fadeOut), y: rect.minY), CGPoint(x: rect.maxX, y: rect.maxY))] {
+                let ramp = NSBezierPath(); ramp.move(to: start); ramp.line(to: end); ramp.stroke()
+            }
+            if UUID(uuidString: layer.id).map(model.selection.contains) == true || hoverY.map({ laneRow(.layer(layer.track)).contains(CGPoint(x: gutterWidth + 1, y: $0)) }) == true {
+                Theme.mediaMatte.setFill()
+                for edge in [RecorderCore.Edge.leading, .trailing] { layerFadeHandle(layer, edge: edge)?.fill() }
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        if mediaDragActive, let track = lanes.compactMap({ lane -> Int? in if case .layer(let track) = lane { return track }; return nil }).max() {
+            let row = laneRow(.layer(track))
+            ("Drop media here" as NSString).draw(at: CGPoint(x: gutterWidth + 10, y: row.midY - 7), withAttributes: [.font: Theme.labelFont, .foregroundColor: Theme.textSecondary])
+        }
+    }
+
+    private func beginLayerDrag(at point: CGPoint, event: NSEvent) -> Bool {
+        guard let model else { return false }
+        let id: UUID, edge: RecorderCore.Edge?
+        switch hitTest(at: point) {
+        case .blockBody(let block): id = block; edge = nil
+        case .blockEdge(let block, let side): id = block; edge = side
+        default: return false
+        }
+        guard let layer = model.project.layers.first(where: { $0.id == id.uuidString }), let start = model.timeMap.outputTime(atSource: layer.start) else { return false }
+        if isSplitMode { return false }
+        selectBlock(id, addToSelection: event.modifierFlags.contains(.shift))
+        if event.modifierFlags.contains(.shift) { return true }
+        dragProject = model.project; dragOrigin = mediaLayerRect(layer); model.beginGesture()
+        for side in [RecorderCore.Edge.leading, .trailing] {
+            if layerFadeHandle(layer, edge: side)?.insetBy(dx: -3, dy: -3).contains(point) == true { dragKind = .layerFade(id: id, edge: side); return true }
+        }
+        dragKind = .layer(id: id, edge: edge, grabOffset: geometry.output(forX: geometryX(point)) - start)
+        return true
+    }
+
+    private func updateLayerDrag(id: UUID, edge: RecorderCore.Edge?, grabOffset: Double, point: CGPoint, snapDisabled: Bool) {
+        guard let model, var project = dragProject, let layer = project.layers.first(where: { $0.id == id.uuidString }) else { return }
+        let raw = geometry.output(forX: geometryX(point)) - (edge == nil ? grabOffset : 0)
+        let (output, snapped) = snappedOutput(raw, excludingBlock: id, disabled: snapDisabled)
+        if let edge {
+            project.resizeLayer(id, edge: edge, toOutput: max(0, output), mediaDuration: mediaDurations[layer.file] ?? (layer.kind == .video ? layer.mediaStart + layer.end - layer.start : nil), propagate: !dragIgnoresLinks)
+        } else {
+            let track = lanes.compactMap { lane -> Int? in
+                if case .layer(let track) = lane, laneRow(lane).contains(point) { return track }; return nil
+            }.first ?? layer.track
+            project.moveLayer(id, toOutput: max(0, output), track: track, propagate: !dragIgnoresLinks)
+        }
+        if project.checkInvariants(mediaDurations: mediaDurations) == nil { model.update { $0 = project } }
+        snapGuideX = snapped ? x(forOutput: output) : nil
+        trimChip = (x: point.x, text: String(format: "%.2f s", output))
+        needsDisplay = true
+    }
+
+    private func updateLayerFade(id: UUID, edge: RecorderCore.Edge, point: CGPoint) {
+        guard let model, let layer = model.project.layers.first(where: { $0.id == id.uuidString }), let start = model.timeMap.outputTime(atSource: layer.start) else { return }
+        let time = geometry.output(forX: geometryX(point))
+        let length = min(3, layer.end - layer.start, max(0, ((edge == .leading ? time - start : start + layer.end - layer.start - time) * 10).rounded() / 10))
+        model.update { project in
+            guard let index = project.layers.firstIndex(where: { $0.id == id.uuidString }) else { return }
+            if edge == .leading { project.layers[index].fadeIn = length > 0 ? length : nil }
+            else { project.layers[index].fadeOut = length > 0 ? length : nil }
+        }
+        trimChip = (x: point.x, text: String(format: "fade %.2f s", length))
+        needsDisplay = true
+    }
+
     override func keyDown(with event: NSEvent) {
         if let voiceover = model?.voiceover, voiceover.isActive {
             voiceover.handleRecordingKey(event)
@@ -1761,6 +1988,11 @@ final class TimelineView: NSView {
         }
         guard p.x >= gutterWidth, p.y <= bounds.height - 26 else { return }
         if beginAudioDrag(at: p, event: event) { return }
+        if beginLayerDrag(at: p, event: event) { return }
+        if laneRow(.layer(0)).contains(p), let slot = model?.idleSlots.first(where: { x(forOutput: $0.start) <= p.x && x(forOutput: $0.end) >= p.x }) {
+            model?.chooseMedia(in: window, atOutput: slot.start, slot: slot)
+            return
+        }
         if case .blockBody = hitTest(at: p) {
             dragOrigin = blockRect(at: p)
         } else if case .blockEdge = hitTest(at: p) {
@@ -1823,7 +2055,7 @@ final class TimelineView: NSView {
                     case .mask: id = project.addMask(atSource: source, kind: .blur, opacity: 1)
                     case .text: id = project.addText(atSource: source)
                     case .window: id = project.addWindowShot(atSource: source, window: (project.windowIndex(atSource: source) + 1) % project.windowCount)
-                    case .clip, .audio: break
+                    case .clip, .audio, .layer: break
                     }
                 }
                 guard let id else { model.cancelGesture(); return }
@@ -1915,7 +2147,7 @@ final class TimelineView: NSView {
                     project.resizeLayout(id, edge: .leading, to: min(anchor, source))
                     project.resizeLayout(id, edge: .trailing, to: max(anchor, source))
                     project.resizeLayout(id, edge: .leading, to: min(anchor, source))
-                case .clip, .audio: break
+                case .clip, .audio, .layer: break
                 }
             }
             needsDisplay = true
@@ -1932,6 +2164,10 @@ final class TimelineView: NSView {
             updateAudioDrag(id: id, edge: edge, grabOffset: offset, point: p, snapDisabled: snapDisabled)
         case .audioFade(let id, let edge):
             updateAudioFade(id: id, edge: edge, point: p)
+        case .layer(let id, let edge, let offset):
+            updateLayerDrag(id: id, edge: edge, grabOffset: offset, point: p, snapDisabled: snapDisabled)
+        case .layerFade(let id, let edge):
+            updateLayerFade(id: id, edge: edge, point: p)
         case nil:
             break
         }
@@ -1966,6 +2202,10 @@ final class TimelineView: NSView {
             model?.commitGesture(edge == nil ? "Move Audio" : "Trim Audio")
         case .audioFade:
             model?.commitGesture("Audio Fade")
+        case .layer(_, let edge, _):
+            model?.commitGesture(edge == nil ? "Move Layer" : "Trim Layer")
+        case .layerFade:
+            model?.commitGesture("Layer Fade")
         case .scrub, nil:
             dragKind = nil
             return
@@ -2007,7 +2247,7 @@ final class TimelineView: NSView {
         default: break
         }
         switch dragKind {
-        case .moveClip, .trimClip, .moveBlock, .resizeBlock, .createBlock, .audio, .audioFade:
+        case .moveClip, .trimClip, .moveBlock, .resizeBlock, .createBlock, .audio, .audioFade, .layer, .layerFade:
             model?.cancelGesture()
         case .scrub, nil:
             dragKind = nil
@@ -2093,6 +2333,7 @@ final class TimelineView: NSView {
         case .audio(let track):
             guard let model else { return "Audio" }
             return model.project.audioTracks.indices.contains(track) ? model.project.audioTracks[track].name : model.voiceover.trackName
+        case .layer(let track): return "Layer \(track + 1)"
         }
     }
 
@@ -2109,7 +2350,7 @@ final class TimelineView: NSView {
         case .mask: model.edit("Add Mask") { newID = $0.addMask(atSource: s, kind: .mask) }
         case .text: newID = model.addText(atSource: s)
         case .window: model.edit("Add Window Shot") { newID = $0.addWindowShot(atSource: s, window: ($0.windowIndex(atSource: s) + 1) % $0.windowCount) }
-        case .clip, .audio: break
+        case .clip, .audio, .layer: break
         }
         if let newID { selectBlock(newID, addToSelection: false) }
     }
@@ -2151,6 +2392,7 @@ final class TimelineView: NSView {
         case .text: return model.project.texts.first { $0.id == id.uuidString }?.start
         case .window: return model.project.windowShots.first { $0.id == id.uuidString }?.start
         case .audio: return model.project.audioClips.first { $0.id == id.uuidString }?.start
+        case .layer: return model.project.layers.first { $0.id == id.uuidString }?.start
         case .clip: return nil
         }
     }
@@ -2181,7 +2423,7 @@ final class TimelineView: NSView {
             case .mask: project.moveMask(id, toStart: toStart)
             case .text: project.moveText(id, toStart: toStart)
             case .window: project.moveWindowShot(id, toStart: toStart)
-            case .clip, .audio: break
+            case .clip, .audio, .layer: break
             }
         }
         needsDisplay = true
@@ -2209,7 +2451,7 @@ final class TimelineView: NSView {
             case .mask: project.resizeMask(id, edge: edge, to: source)
             case .text: project.resizeText(id, edge: edge, to: source)
             case .window: project.resizeWindowShot(id, edge: edge, to: source)
-            case .clip, .audio: break
+            case .clip, .audio, .layer: break
             }
         }
         needsDisplay = true
@@ -2236,7 +2478,7 @@ final class TimelineView: NSView {
                   let block = trial.texts.first(where: { $0.id == id.uuidString }) else { return nil }
             return (block.start, block.end)
         case .window: return model?.project.previewWindowShotPlacement(atSource: s)
-        case .clip, .audio: return nil
+        case .clip, .audio, .layer: return nil
         }
     }
 
@@ -2251,6 +2493,7 @@ final class TimelineView: NSView {
         case .text: return Theme.text
         case .window: return Theme.clip
         case .audio: return Theme.audio
+        case .layer: return Theme.mask
         }
     }
 
@@ -2265,7 +2508,7 @@ final class TimelineView: NSView {
         case .mask: return "+ Mask"
         case .text: return "+ Text"
         case .window: return "+ Window"
-        case .audio: return ""
+        case .audio, .layer: return ""
         }
     }
 
@@ -2480,6 +2723,23 @@ final class TimelineView: NSView {
                                          label: { "Window \($0.window + 1)" },
                                          nudge: { [weak self] id, frames in self?.nudgeWindowShot(id, frames: frames) })
         }
+        for layer in model.project.layers {
+            guard let id = UUID(uuidString: layer.id), let rect = mediaLayerRect(layer), let start = model.timeMap.outputTime(atSource: layer.start) else { continue }
+            let label = "\(layer.kind.rawValue) layer \(layer.track + 1), \(axTime(start)) to \(axTime(start + layer.end - layer.start)) seconds"
+            let element = axElement(frame: rect, label: label) { [weak self] frames in
+                guard let model = self?.model else { return }
+                model.edit("Move Layer") { $0.moveLayer(id, toOutput: max(0, start + Double(frames) * Self.axFrameSeconds)) }
+            }
+            element.press = { [weak self] in self?.selectBlock(id, addToSelection: false) }
+            elements.append(element)
+        }
+        for slot in model.idleSlots {
+            let row = laneRow(.layer(0))
+            let rect = CGRect(x: x(forOutput: slot.start), y: row.minY, width: CGFloat((slot.end - slot.start) * geometry.pxPerSecond), height: row.height)
+            let element = axElement(frame: rect, label: "Add image in idle span, \(axTime(slot.start)) to \(axTime(slot.end)) seconds", nudge: nil)
+            element.press = { [weak self] in self?.model?.chooseMedia(in: self?.window, atOutput: slot.start, slot: slot) }
+            elements.append(element)
+        }
         for audio in model.project.audioClips {
             let segments = model.project.audioSegments(audio)
             guard let first = segments.first, let last = segments.last, let id = UUID(uuidString: audio.id) else { continue }
@@ -2612,6 +2872,92 @@ final class TimelineView: NSView {
 }
 
 extension TimelineView {
+    @MainActor static func runLayerUISelfTest(model: EditorModel) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }
+        _ = NSApplication.shared
+        let baseline = model.project
+        guard let image = baseline.layers.first(where: { $0.kind == .image }), let video = baseline.layers.first(where: { $0.kind == .video && $0.track == 0 }),
+              let imageID = UUID(uuidString: image.id), let videoID = UUID(uuidString: video.id) else { throw Fail(description: "layer UI fixtures") }
+        let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 1100, height: 500))
+        view.model = model
+        let toolbar = TimelineToolbar(frame: .zero); toolbar.timelineView = view
+        let container = TimelineContainerView(toolbar: toolbar, timeline: view)
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1100, height: 500), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = container
+        defer { window.close() }
+        container.layoutSubtreeIfNeeded(); view.geometry.pxPerSecond = 40
+        func point(_ time: Double, track: Int = 0) -> CGPoint { CGPoint(x: view.x(forOutput: time), y: view.laneMidY(.layer(track)) + 5) }
+        func event(_ type: NSEvent.EventType, _ point: CGPoint, _ modifiers: NSEvent.ModifierFlags = [.command]) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: modifiers, timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        func drag(_ start: CGPoint, _ end: CGPoint, _ modifiers: NSEvent.ModifierFlags = [.command]) {
+            view.mouseDown(with: event(.leftMouseDown, start, modifiers))
+            view.mouseDragged(with: event(.leftMouseDragged, end, modifiers))
+            view.mouseUp(with: event(.leftMouseUp, end, modifiers))
+        }
+        try check(view.hitTest(at: point(2)) == .blockBody(imageID), "image hit test")
+        let steps = model.undoStepCount
+        let originalSlots = model.idleSlots
+        drag(point(7), point(13, track: 1))
+        try check(model.project.layers.first { $0.id == video.id }?.track == 1 && model.project.layers.first { $0.id == video.id }?.start == 12, "vertical layer move")
+        try check(model.project.audioClips.first { $0.layer == video.id }?.start == 12 && model.undoStepCount == steps + 1, "linked sound / one gesture undo")
+        try check(model.idleSlots != originalSlots, "idle slots follow moved layers")
+        let moved = model.project; model.undo(); try check(model.project == baseline && model.selection == [videoID], "move undo / selection")
+        model.redo(); try check(model.project == moved && model.selection == [videoID], "move redo / selection"); model.undo()
+        try check(model.idleSlots == originalSlots, "idle-slot cache follows undo")
+        try check(view.canFocusSelection && view.selectedOutputRange == 6...10, "layer focus range")
+        drag(point(6), point(7))
+        try check(model.project.layers.first { $0.id == video.id }?.mediaStart == 1 && model.project.audioClips.first { $0.layer == video.id }?.mediaStart == 1, "leading trim media / linked sound")
+        model.undo(); try check(model.project == baseline, "trim undo")
+        drag(point(7), point(8), [.command, .option])
+        try check(model.project.audioClips == baseline.audioClips && model.project.layers.first { $0.id == video.id }?.start == 7, "Option move preserves sound")
+        model.undo()
+        view.mouseDown(with: event(.leftMouseDown, point(7)))
+        view.mouseDragged(with: event(.leftMouseDragged, point(8)))
+        view.cancelOperation(nil)
+        try check(model.project == baseline && model.undoStepCount == steps, "Escape cancels layer gesture")
+        let handle = view.layerFadeHandle(image, edge: .leading)!
+        drag(CGPoint(x: handle.midX, y: handle.midY), CGPoint(x: view.x(forOutput: 1.05), y: handle.midY))
+        try check(abs((model.project.layers.first { $0.id == image.id }?.fadeIn ?? 0) - 0.8) < 1e-9 && model.undoStepCount == steps + 1, "layer fade handle")
+        model.undo()
+        model.selection = [videoID]
+        view.performSplit(atOutput: 8, target: .blockBody(videoID))
+        try check(model.project.layers.count == baseline.layers.count + 1 && model.project.audioClips.count == baseline.audioClips.count + 1, "layer blade splits linked sound")
+        model.undo(); try check(model.project == baseline, "blade undo")
+        let pasteboard = NSPasteboard.withUniqueName()
+        view.clipboardPasteboard = pasteboard
+        model.selection = [videoID]; model.playhead = 14
+        view.copy(nil); view.paste(nil)
+        let pasted = model.project.layers.first { $0.start == 14 }
+        try check(pasted != nil && model.project.audioClips.contains { $0.layer == pasted?.id } && model.selection == pasted.flatMap { UUID(uuidString: $0.id) }.map { [$0] } ?? [], "video layer clipboard with linked sound")
+        model.undo(); try check(model.project == baseline, "layer clipboard undo")
+        pasteboard.releaseGlobally(); model.playhead = 0
+        model.selection = [imageID]
+        let labels = (view.accessibilityChildren() ?? []).compactMap { ($0 as? NSAccessibilityElement)?.accessibilityLabel() }
+        try check(labels.contains { $0.hasPrefix("image layer") } && labels.contains { $0.hasPrefix("Add image in idle span") }, "layer and idle-slot accessibility")
+        func render(_ name: String) throws {
+            container.layoutSubtreeIfNeeded(); view.needsDisplay = true; view.displayIfNeeded()
+            guard let bitmap = container.bitmapImageRepForCachingDisplay(in: container.bounds) else { throw Fail(description: "layer PNG bitmap") }
+            container.cacheDisplay(in: container.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/recorder-layers-\(name).png"))
+        }
+        try render("loading")
+        for _ in 0..<200 {
+            if view.loadingThumbnails.isEmpty && view.layerThumbnails.count >= 3 { break }
+            try await Task.sleep(for: .milliseconds(20))
+            view.displayIfNeeded()
+        }
+        try check(view.layerThumbnails.count >= 3 && view.failedThumbnails.isEmpty, "image/video thumbnail cache")
+        try render("timeline")
+        model.edit("Missing fixture") { project in project.layers[0].file = "media/missing.png" }
+        try render("missing"); model.undo()
+        window.setContentSize(CGSize(width: 600, height: 360)); container.layoutSubtreeIfNeeded()
+        try render("minimum")
+        view.toggleCompactTrackHeaders(); try render("compact")
+        try check(model.project == baseline, "layer UI left project mutated")
+    }
+
     @MainActor static func runAudioUISelfTest() throws {
         struct Fail: Error, CustomStringConvertible { let description: String }
         func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }
@@ -3112,6 +3458,13 @@ extension TimelineView {
                 }
             }
         }
+        for layer in project.layers {
+            let partners = project.audioClips.filter { $0.link == .layer && $0.layer == layer.id }
+            if UUID(uuidString: layer.id).map({ model?.selection.contains($0) == true }) == true {
+                for audio in partners { project.audioSegments(audio).forEach { outline(audioRect(audio, output: $0.output)) } }
+            }
+            if partners.contains(where: { audio in selectedAudio.contains { $0.id == audio.id } }), let rect = mediaLayerRect(layer) { outline(rect) }
+        }
     }
 }
 
@@ -3120,6 +3473,13 @@ extension TimelineView {
 /// the exact `EditorModel`/`TimelineOps` call the matching drag would make — one undo step each.
 private final class TimelineBlockAXElement: NSAccessibilityElement {
     var nudge: ((Int) -> Void)?
+    var press: (() -> Void)?
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let press else { return false }
+        press()
+        return true
+    }
 
     override func accessibilityPerformIncrement() -> Bool {
         guard let nudge else { return false }

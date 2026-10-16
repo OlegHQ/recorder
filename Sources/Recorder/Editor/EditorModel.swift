@@ -15,6 +15,9 @@ import RecorderCore
     }
     private(set) var previewPlaybackEnd: Double?
     @ObservationIgnored lazy var voiceover = VoiceoverRecorder(model: self)
+    var mediaImportStatus: String?
+    @ObservationIgnored lazy var recordingIdleRanges = idleRanges(events: events.events + [InputEvent(t: project.source.duration, k: .move)])
+    @ObservationIgnored var idleSlotCache: (clips: [Clip], layers: [LayerBlock], ranges: [TimeRange])?
     var selection: Set<UUID> = [] {
         didSet { if selection != oldValue { inspectorShowsProject = false; previewShowsResult = false; stopEffectPreview() } }
     }
@@ -134,6 +137,7 @@ import RecorderCore
     var undoStepCount: Int { undoStack.count }
 
     private var gestureSnapshot: Project?
+    var isEditingGesture: Bool { gestureSnapshot != nil }
     private var autosaveWork: DispatchWorkItem?
     private(set) var saveStatus = "Saved"
     private(set) var saveError: String?
@@ -228,7 +232,7 @@ import RecorderCore
         gestureSnapshot = nil
         let ids = Set(project.zooms.map(\.id) + project.layouts.map(\.id) + project.masks.map(\.id)
                       + project.keystrokeClips.map(\.id) + project.cameraClips.map(\.id)
-                      + project.audioClips.map(\.id) + project.texts.map(\.id) + project.windowShots.map(\.id))
+                      + project.audioClips.map(\.id) + project.layers.map(\.id) + project.texts.map(\.id) + project.windowShots.map(\.id))
         selection = selection.filter { ids.contains($0.uuidString) }
         selectedClips = selectedClips.filter { project.clips.indices.contains($0) }
     }

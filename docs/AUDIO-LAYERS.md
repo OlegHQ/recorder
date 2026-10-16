@@ -315,7 +315,7 @@ T-640 merges; T-648 needs T-643). T-650 last.
   - Verify: `make test FILTER=takePlacement` (AC-VO-1); `--selftest voiceover <m4a>` feeds a synthetic file through the
     commit path (placement, original gain 0, one undo step, take replaced on re-record); HUMAN: AC-VO-2 via LaunchServices.
   - Machine checks pass; real-microphone latency/AC-VO-2 confirmation is still required. `voiceover <m4a> --keep-fixture` prints a disposable package path; open it with `open -n -a build/Recorder.app <package>`, select Mic, then ⇧R. The test's labelled synthetic input is not evidence of real-device capture.
-- [ ] **T-646 Media import + layer lanes (Core + UI)**
+- [x] **T-646 Media import + layer lanes (Core + UI)**
   - Do: Core `idleRanges`, layer add/move/resize ops on the generic block engine; §4.5 import for all three kinds
     (drop, ⌘V, Add Media…, idle slot), copy into `media/`, video sound as a `layer`-linked clip, audio files on extra
     tracks; layer lanes with thumbnail strips, fade handles, idle slots, vertical lane change, missing-file state.

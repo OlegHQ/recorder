@@ -46,6 +46,16 @@ public struct EventLog: Codable, Sendable {
     public func clicks() -> [InputEvent] { events.filter { $0.k == .down && $0.b == 0 } }
 }
 
+public func idleRanges(events: [InputEvent], minDuration: Double = 3) -> [TimeRange] {
+    guard minDuration.isFinite, minDuration >= 0,
+          let end = events.map(\.t).filter({ $0.isFinite && $0 >= 0 }).max() else { return [] }
+    let boundaries = [0] + events.filter { $0.k == .key || $0.k == .typing || $0.k == .down }
+        .map(\.t).filter { $0.isFinite && $0 >= 0 }.sorted() + [end]
+    return zip(boundaries, boundaries.dropFirst()).compactMap { start, end in
+        end - start >= minDuration && end - start > 0.5 ? TimeRange(start: start + 0.25, end: end - 0.25) : nil
+    }
+}
+
 /// SPEC "Edit ▸ Speed Up Typing": runs of `.typing` events with a gap < 1 s between consecutive
 /// events, kept only where the run spans > 3 s. `Edit ▸ Speed Up Typing` splits clips around these
 /// ranges and sets them to 2x (not here).

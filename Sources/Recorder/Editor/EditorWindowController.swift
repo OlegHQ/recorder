@@ -309,7 +309,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
             let title = model.project.title
             if !titleField.isEditable { titleField.stringValue = title }
             window?.title = title
-            saveStatusButton.title = model.saveStatus
+            saveStatusButton.title = model.mediaImportStatus ?? model.saveStatus
             saveStatusButton.contentTintColor = model.saveError == nil ? Theme.textSecondary : .systemRed
             saveStatusButton.toolTip = model.saveError ?? "Changes save automatically. Click to save now."
         } onChange: { [weak self] in
@@ -503,6 +503,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
     @objc func cut(_ sender: Any?) { coreTimelineView.cut(sender) }
     @objc func copy(_ sender: Any?) { coreTimelineView.copy(sender) }
     @objc func paste(_ sender: Any?) { coreTimelineView.paste(sender) }
+    @objc func addMedia(_ sender: Any?) { model.chooseMedia(in: window) }
 
     @objc func splitAtPlayhead(_ sender: Any?) {
         coreTimelineView.menuSplitAtPlayhead()
@@ -613,7 +614,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSMenu
         case #selector(cut(_:)), #selector(copy(_:)):
             return !isTextEditing && coreTimelineView.canCopySelection
         case #selector(paste(_:)):
-            return !isTextEditing && coreTimelineView.canPasteSelection
+            return !isTextEditing && (coreTimelineView.canPasteSelection || EditorModel.canPasteMedia(.general))
+        case #selector(addMedia(_:)):
+            return model.mediaImportStatus == nil
         case #selector(splitAtPlayhead), #selector(addZoomAtPlayhead), #selector(selectInspectorTab(_:)):
             return !isTextEditing
         case #selector(removeSelected):
