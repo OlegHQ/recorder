@@ -929,7 +929,8 @@ PLAN T-640…T-650.
   Unlink/relink per clip; an out-of-sync clip shows a red offset chip with
   Move into Sync.
 - **Connected.** Unlinked audio, voiceover takes, audio files and all layers ride the video clock (ripple carries them),
-  are never cut by video edits, and are pushed to another lane instead of overlapping.
+  are never cut by video edits, and are pushed to another lane instead of overlapping. Automatic lane changes preserve
+  audio track volume and mute settings.
 - **Voiceover.** Record at the playhead or re-record the selected audio clip (pre-roll 1.5 s, auto-stop, original piece
   muted). Project audio muted while recording. Takes go to `voice/<id>.m4a`; a new take replaces the old one in that range.
 - **Layers.** `Project.layers`: image or video blocks on Layer lanes, Card/Full/Corner/Free placement, Dim/Blur

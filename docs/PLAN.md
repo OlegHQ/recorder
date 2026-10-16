@@ -131,14 +131,14 @@ Lanes: **A** T-640→T-645 · **L** T-646→T-649 (after T-640 merges; T-648 nee
 
 | Scope | Tasks | Done |
 |---|---|---|
-| Core model + links | T-640…T-642 | 2/3 |
+| Core model + links | T-640…T-642 | 3/3 |
 | Audio lanes + voiceover | T-643…T-645 | 0/3 |
 | Media layers + import | T-646…T-649 | 0/4 |
 | Docs | T-650 | 0/1 |
 
 - [x] **T-640 Audio/layer model + legacy derivation (Core)** — AUDIO-LAYERS §6
 - [x] **T-641 Linked audio edits (Core)** — AUDIO-LAYERS §6
-- [ ] **T-642 Connected blocks settle (Core)** — AUDIO-LAYERS §6
+- [x] **T-642 Connected blocks settle (Core)** — AUDIO-LAYERS §6
 - [ ] **T-643 Composition + mix for N audio tracks** — AUDIO-LAYERS §6
 - [ ] **T-644 Audio lanes UI** — AUDIO-LAYERS §6
 - [ ] **T-645 Voiceover recording** — AUDIO-LAYERS §6
@@ -902,3 +902,5 @@ T-622 · 2026-10-15 · live (Screen Recording + Accessibility granted): new `eve
 T-640 · 2026-10-16 · Added AudioTrack/AudioClip/LayerBlock, additive version-3 project keys, legacy Mic/System derivation and TimedBlock media advancement. Verified `make test FILTER=audioModel` 4/4 and `make test` 90/90 (including AC-PRJ-1/2), both with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`: the selected Xcode 6.4 compiler otherwise loads the Makefile's incompatible CLT 6.3 Testing framework. Tests cover populated JSON/disk round trips, explicit disabled fades, legacy cuts/2×/gaps/media in-points/link defaults, empty clip preservation, output-time overlaps, track/link/gain/rect checks and known media bounds. `checkInvariants(mediaDurations:)` accepts known imported-file durations; recorded audio uses source.duration. App composition/UI wiring remains T-641…T-649. Existing agentpack.toml/pack.lock conflicts preserved; task commit uses a separate index.
 
 T-641 · 2026-10-16 · Extracted shared applyLinkedEdit; screen audio follows video with Link layers off, camera/layer audio edits propagate both ways, layer splits repoint sound, and propagate:false preserves partners. Added unlinkAudio/linkAudio, syncOffset/moveIntoSync, output-clock conversion and linked-audio video clipboard handling. Verified with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`: `make test FILTER=linkedAudio` 12/12 (500 fixed-seed video/camera/layer edits, sync, split/delete/move/speed, unlink/relink, partial partners, Option overrides, mixed clocks and clipboard); `make test` 102/102; `make app CONFIG=debug`; `--selftest timeline-ops` OK. The expanded random sequence caught floating-point slivers and hidden camera references; fixed in the shared slicer and sync lookup. Clarification: Option-delete of a video layer preserves and detaches its audio rather than leaving an invalid dangling link (AUDIO-LAYERS §4.1). Connected settling, composition and UI remain T-642 onward. Existing config conflicts preserved; task commit uses a separate index.
+
+T-642 · 2026-10-16 · Added settleConnected after video edits/clock conversion: deleted anchors move to the deletion boundary, later collisions reuse free higher lanes or create them, and connected clips/layers retain their ids, output lengths, media ranges and settings. Clip moves carry connected anchors and linked layer sound when Link layers and propagation are enabled. Audio lane changes skip Mic/System, preserve volume/mute, and reserve future blocks rather than displacing them. Verified regressions fail before the fix (deletion rolled back; moves left media behind); with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, `make test FILTER=connected` 8/8 (500 seeded video edits, ripple/gaps/endpoints, mixed clocks, half-open anchors, lane reuse/creation/mute and idempotence), `make test` 110/110, `make app CONFIG=debug`, `--selftest timeline-ops` and `timeline-clipboard` OK. Core model/links roadmap 3/3; composition and UI remain T-643 onward. Existing config conflicts preserved; task commit uses a separate index.

@@ -540,6 +540,241 @@ private func linkedAudioFixture() -> Project {
     #expect(project.checkInvariants() == nil)
 }
 
+private func connectedFixture() -> Project {
+    var project = Project(source: Source(duration: 20, hasCamera: true, hasMic: true, hasSystemAudio: true),
+        clips: [Clip(sourceStart: 0, sourceEnd: 4), Clip(sourceStart: 4, sourceEnd: 8),
+                Clip(sourceStart: 8, sourceEnd: 12), Clip(sourceStart: 12, sourceEnd: 20)])
+    let video = LayerBlock(kind: .video, start: 5, end: 11, file: "media/video.mov", mediaStart: 2,
+                           rect: NormRect(x: 0.18, y: 0.2, w: 0.64, h: 0.5))
+    project.layers = [video, LayerBlock(kind: .image, start: 13, end: 15, file: "media/image.png", rect: NormRect())]
+    project.audioTracks += [AudioTrack(name: "Voiceover 1", volume: 0.8), AudioTrack(name: "Audio 1")]
+    project.audioClips += [AudioClip(start: 5, end: 11, mediaStart: 1, mediaRate: 1.25, file: "voice/take.m4a", track: 2,
+                                    gain: 0.6, fadeIn: 0.2, fadeOut: 0.4),
+                           AudioClip(start: 5, end: 11, mediaStart: 2, file: video.file, track: 3,
+                                     link: .layer, layer: video.id, gain: 0.9, fadeIn: 0.3, fadeOut: 0.5)]
+    project.audioClips.sort { $0.start < $1.start }
+    return project
+}
+
+@Test func connectedRippleDeletePreservesTakesAndLayers() throws {
+    for linked in [false, true] {
+        var project = connectedFixture()
+        project.linkVideoEdits = linked
+        let connected = project.audioClips.filter { $0.link == nil || $0.link == .layer }, layers = project.layers
+        project.deleteClips([1])
+        #expect(project.clips.count == 3 && TimeMap(project.clips).outputDuration == 16)
+        for original in connected {
+            let actual = try #require(project.audioClips.first { $0.id == original.id })
+            #expect(actual.start == 8 && actual.end - actual.start == original.end - original.start)
+            #expect(TimeMap(project.clips).outputTime(atSource: actual.start) == 4)
+            #expect(actual.mediaStart == original.mediaStart && actual.mediaRate == original.mediaRate && actual.gain == original.gain)
+            #expect(actual.fadeIn == original.fadeIn && actual.fadeOut == original.fadeOut && actual.link == original.link && actual.layer == original.layer)
+        }
+        #expect(project.layers.count == layers.count && Set(project.layers.map(\.id)) == Set(layers.map(\.id)))
+        #expect(project.layers.first { $0.id == layers[0].id }?.start == 8)
+        #expect(project.layers.first { $0.id == layers[1].id }?.track != 0)
+        #expect(project.checkInvariants() == nil)
+    }
+    var project = connectedFixture()
+    project.rippleDelete = false
+    let audio = project.audioClips.filter { $0.link == nil || $0.link == .layer }, layers = project.layers
+    project.deleteClips([1])
+    #expect(project.clips[1].isEmpty && TimeMap(project.clips).outputDuration == 20)
+    #expect(project.layers == layers && project.audioClips.filter { $0.link == nil || $0.link == .layer } == audio)
+}
+
+@Test func connectedClipMoveCarriesLayerAndSound() throws {
+    for linked in [false, true] {
+        for propagate in [false, true] {
+            var project = connectedFixture()
+            project.linkVideoEdits = linked
+            project.liftClip(2)
+            let original = project
+            let selected = project.placeClip(1, start: 8, end: 12, moving: true, propagate: propagate)
+            #expect(project.clips[selected].sourceStart == 8 && project.clips[selected].mediaIn == 4)
+            let shift = linked && propagate ? 4.0 : 0
+            for originalAudio in original.audioClips where originalAudio.link == nil || originalAudio.link == .layer {
+                let actual = try #require(project.audioClips.first { $0.id == originalAudio.id })
+                #expect(actual.start == originalAudio.start + shift && actual.end == originalAudio.end + shift)
+                #expect(actual.mediaStart == originalAudio.mediaStart && actual.mediaRate == originalAudio.mediaRate)
+            }
+            #expect(project.layers.first { $0.id == original.layers[0].id }?.start == 5 + shift)
+            #expect(project.layers.first { $0.id == original.layers[1].id }?.start == 13)
+            #expect(project.checkInvariants() == nil)
+        }
+    }
+    var project = connectedFixture()
+    let soundIndex = try #require(project.audioClips.firstIndex { $0.link == .layer })
+    project.audioClips[soundIndex].start = 9; project.audioClips[soundIndex].end = 15
+    let sound = project.audioClips[soundIndex]
+    project.liftClip(2)
+    _ = project.placeClip(1, start: 8, end: 12, moving: true)
+    let moved = try #require(project.audioClips.first { $0.id == sound.id })
+    #expect(moved.start == 13 && project.syncOffset(moved) == 4)
+}
+
+@Test func connectedCollisionsReuseFreeExtraTracksOrCreateThem() throws {
+    for reuse in [false, true] {
+        var project = connectedFixture()
+        let later = AudioClip(start: 12, end: 15, file: "voice/second.m4a", track: 2)
+        project.audioClips.append(later)
+        if reuse { project.audioTracks.append(AudioTrack(name: "Audio 2", volume: 0.8)) }
+        project.deleteClips([2])
+        #expect(project.clips.count == 3)
+        let moved = try #require(project.audioClips.first { $0.id == later.id })
+        #expect(moved.track == 4 && moved.start == later.start && moved.end == later.end)
+        #expect(project.audioTracks.count == 5)
+        #expect(project.audioTracks[moved.track].name == (reuse ? "Audio 2" : "Voiceover 2"))
+        #expect(project.audioTracks[moved.track].volume == 0.8 && !project.audioTracks[moved.track].muted)
+        #expect(project.layers[1].track == 1)
+        #expect(project.checkInvariants() == nil)
+    }
+}
+
+@Test func connectedSplitsTrimsAndSpeedNeverCutOrRetimeMedia() throws {
+    var project = connectedFixture()
+    let original = project
+    let didSplit = project.split(atOutput: 6)
+    #expect(didSplit && project.layers == original.layers)
+    #expect(project.audioClips.filter { $0.link == nil || $0.link == .layer } == original.audioClips.filter { $0.link == nil || $0.link == .layer })
+    project.setSpeed(0, 2)
+    #expect(project.clips[0].speed == 2)
+    _ = project.placeClip(1, start: 4.5, end: 6)
+    #expect(project.layers.count == original.layers.count)
+    for audio in original.audioClips where audio.link == nil || audio.link == .layer {
+        var actual = try #require(project.audioClips.first { $0.id == audio.id })
+        #expect(actual.end - actual.start == audio.end - audio.start)
+        actual.start = audio.start; actual.end = audio.end; actual.track = audio.track
+        #expect(actual == audio)
+    }
+    #expect(project.checkInvariants() == nil)
+}
+
+@Test func connectedSettleMapsDeletedEndpointsAndIsIdempotent() throws {
+    var project = connectedFixture()
+    let early = AudioClip(start: 1, end: 3, file: "voice/early.m4a", track: 4)
+    project.audioTracks.append(AudioTrack(name: "Voiceover 2", volume: 0.8))
+    project.audioClips.append(early)
+    project.clips = [Clip(sourceStart: 4, sourceEnd: 8)]
+    project.settleConnected()
+    let actual = try #require(project.audioClips.first { $0.id == early.id })
+    #expect(actual.start == 4 && actual.end == 6 && actual.mediaStart == early.mediaStart)
+    #expect(project.layers.first { $0.kind == .image }?.start == 8)
+    #expect(project.checkInvariants() == nil)
+    let settled = project
+    project.settleConnected()
+    #expect(project == settled)
+    project.clips = []
+    let empty = project
+    project.settleConnected()
+    #expect(project == empty)
+}
+
+@Test func connectedLanePushReservesFutureBlocksAndPreservesMute() throws {
+    var project = connectedFixture()
+    project.audioTracks += [AudioTrack(name: "Audio 2", volume: 0.8), AudioTrack(name: "Audio 3", volume: 0.8)]
+    let later = AudioClip(start: 12, end: 15, file: "voice/second.m4a", track: 2)
+    let reserved = AudioClip(start: 13, end: 14, file: "media/music.m4a", track: 4)
+    project.audioClips += [later, reserved]
+    project.deleteClips([2])
+    #expect(project.audioClips.first { $0.id == later.id }?.track == 5)
+    #expect(project.audioClips.first { $0.id == reserved.id } == reserved)
+    #expect(project.audioTracks.count == 6 && project.checkInvariants() == nil)
+
+    project = Project(source: Source(duration: 10, hasMic: true),
+        clips: [Clip(sourceStart: 0, sourceEnd: 4), Clip(sourceStart: 4, sourceEnd: 6), Clip(sourceStart: 6, sourceEnd: 10)],
+        audioTracks: [AudioTrack(name: "Mic", volume: 1.2, muted: true), AudioTrack(name: "System")],
+        audioClips: [AudioClip(start: 1, end: 5, mediaStart: 1, file: "mic.m4a"),
+                     AudioClip(start: 6, end: 10, mediaStart: 6, file: "mic.m4a", link: .screen)])
+    let linked = project.audioClips[1]
+    project.deleteClips([1])
+    let pushed = try #require(project.audioClips.first { $0.id == linked.id })
+    #expect(pushed.track == 2 && pushed.link == .screen && project.syncOffset(pushed) == 0)
+    #expect(project.audioTracks[2].name == "Audio 1" && project.audioTracks[2].volume == 1.2 && project.audioTracks[2].muted)
+    #expect(project.checkInvariants() == nil)
+}
+
+@Test func connectedMoveUsesHalfOpenAnchorsAndMixedClockOffsets() throws {
+    var project = connectedFixture()
+    let boundary = LayerBlock(kind: .image, start: 8, end: 9, file: "media/boundary.png", track: 2, rect: NormRect())
+    project.layers.insert(boundary, at: 1)
+    project.liftClip(2)
+    _ = project.placeClip(1, start: 8, end: 12, moving: true)
+    #expect(project.layers.first { $0.id == boundary.id }?.start == 8)
+    #expect(project.checkInvariants() == nil)
+
+    project = connectedFixture()
+    project.setSpeed(0, 2); project.setSpeed(1, 2)
+    project.liftClip(2)
+    let original = project
+    let oldMap = TimeMap(project.clips)
+    let offset = try #require(oldMap.outputTime(atSource: project.layers[0].start))
+        - (try #require(oldMap.outputTime(atSource: project.clips[1].sourceStart)))
+    let selection = project.moveClips([1], byOutput: 2)
+    let moved = try #require(selection.first)
+    let newMap = TimeMap(project.clips)
+    let start = try #require(newMap.outputTime(atSource: project.clips[moved].sourceStart))
+    #expect(start == 4 && project.clips[moved].speed == 2 && project.clips[moved].mediaIn == 4)
+    for layer in original.layers {
+        let actual = try #require(project.layers.first { $0.id == layer.id })
+        #expect(abs((actual.end - actual.start) - (layer.end - layer.start)) < 1e-9)
+        if layer.kind == .video {
+            #expect(abs((try #require(newMap.outputTime(atSource: actual.start))) - start - offset) < 1e-9)
+            let sound = try #require(project.audioClips.first { $0.layer == actual.id })
+            #expect(project.syncOffset(sound) == 0)
+        }
+    }
+    let voice = try #require(project.audioClips.first { $0.link == nil })
+    #expect(voice.mediaRate == 1.25 && voice.start == 4.5 && voice.end - voice.start == 6)
+    #expect(project.checkInvariants() == nil)
+}
+
+@Test func connectedRandomVideoEditsNeverLoseMedia() throws {
+    var generator = LinkedAudioRandom(state: 642)
+    var project = connectedFixture(), changedCount = 0
+    for iteration in 0..<500 {
+        if iteration % 25 == 0 { project = connectedFixture() }
+        if iteration % 7 == 0 { project.linkVideoEdits.toggle(); project.rippleDelete.toggle() }
+        let before = project
+        let index = Int.random(in: project.clips.indices, using: &generator)
+        switch Int.random(in: 0..<9, using: &generator) {
+        case 0: project.deleteClips([index])
+        case 1: _ = project.split(atOutput: Double.random(in: 0...TimeMap(project.clips).outputDuration, using: &generator))
+        case 2: project.setSpeed(index, [0.5, 1, 2].randomElement(using: &generator)!)
+        case 3: _ = project.moveClips([index], byOutput: Double.random(in: -3...3, using: &generator))
+        case 4: _ = project.placeClip(index, start: project.clips[index].sourceStart + 0.2, end: project.clips[index].sourceEnd)
+        case 5: project.liftClip(index)
+        case 6: _ = project.removeClip(index)
+        case 7: project.trimClip(index, edge: .leading, toSource: project.clips[index].sourceStart + 0.2)
+        default: project.restoreCut(afterClip: index - 1)
+        }
+        if project != before { changedCount += 1 }
+        let connected = project.audioClips.filter { $0.link == nil || $0.link == .layer }
+        let original = before.audioClips.filter { $0.link == nil || $0.link == .layer }
+        #expect(Set(connected.map(\.id)) == Set(original.map(\.id)), "iteration \(iteration)")
+        for audio in original {
+            var actual = try #require(connected.first { $0.id == audio.id })
+            #expect(abs((actual.end - actual.start) - (audio.end - audio.start)) < 1e-9)
+            #expect(project.audioTracks[actual.track].volume == before.audioTracks[audio.track].volume)
+            #expect(project.audioTracks[actual.track].muted == before.audioTracks[audio.track].muted)
+            actual.start = audio.start; actual.end = audio.end; actual.track = audio.track
+            #expect(actual == audio)
+        }
+        #expect(Set(project.layers.map(\.id)) == Set(before.layers.map(\.id)))
+        for layer in before.layers {
+            var actual = try #require(project.layers.first { $0.id == layer.id })
+            #expect(abs((actual.end - actual.start) - (layer.end - layer.start)) < 1e-9)
+            actual.start = layer.start; actual.end = layer.end; actual.track = layer.track
+            #expect(actual == layer)
+        }
+        #expect(project.checkInvariants() == nil, "iteration \(iteration)")
+        let settled = project
+        project.settleConnected()
+        #expect(project == settled)
+    }
+    #expect(changedCount > 100)
+}
+
 private struct LinkedAudioRandom: RandomNumberGenerator {
     var state: UInt64
     mutating func next() -> UInt64 { state = state &* 6364136223846793005 &+ 1442695040888963407; return state }

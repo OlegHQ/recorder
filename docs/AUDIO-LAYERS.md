@@ -156,6 +156,8 @@ video edits, sped with the clip).
   a removed range) moves to the deletion point; (2) if two blocks on one lane now overlap in output time, the later one
   moves to the next lane of the same kind with free space (audio: extra tracks only, never Mic/System); a new lane/track
   is created if none exists. Never deletes.
+  Reused audio tracks must have the same volume/mute settings; new tracks inherit them. Layer-linked sound is carried
+  with its video layer even when its own anchor is outside the moved screen clip.
 
 ### 4.3 Timeline (TimelineView)
 
@@ -285,7 +287,7 @@ T-640 merges; T-648 needs T-643). T-650 last.
     linked clips propagate to partners; `unlinkAudio`, `linkAudio(_:to:)`, `syncOffset`, `moveIntoSync`; ⌥ variant =
     `propagate: false`.
   - Verify: `make test FILTER=linkedAudio` (AC-AU-2 property loop, AC-AU-4, split/delete/move/speed cases); `timeline-ops`.
-- [ ] **T-642 Connected blocks settle (Core)**
+- [x] **T-642 Connected blocks settle (Core)**
   - Do: §4.2 `settleConnected()` at the end of `split`, `placeClip`, `deleteClips`, `liftClip`, `setSpeed`,
     `useOutputClock`; connected blocks carried by clip moves; lane push creates lanes/tracks (never Mic/System).
   - Verify: `make test FILTER=connected` (AC-AU-3: ripple delete under a take, a clip move carrying a video layer and its

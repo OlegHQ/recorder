@@ -41,6 +41,7 @@ public extension Project {
         right.fadeOut = clip.fadeOut
         clips.insert(right, at: i + 1)
         editLinkedLayers(in: s...s, moveBy: 0)
+        settleConnected()
         guard checkInvariants() == nil else { self = before; return false }
         assert(checkInvariants() == nil)
         return true
@@ -88,12 +89,78 @@ public extension Project {
         }
     }
 
+    mutating func settleConnected() {
+        guard !clips.isEmpty, audioClips.allSatisfy({ audioTracks.indices.contains($0.track) }) else { return }
+        let timeline = clips, map = TimeMap(clips)
+        func settleAnchor<Block: TimedBlock>(_ block: inout Block) {
+            guard block.start.isFinite, map.outputTime(atSource: block.start) == nil else { return }
+            let length = block.end - block.start
+            block.start = timeline.first(where: { $0.sourceStart > block.start })?.sourceStart ?? timeline.last!.sourceEnd
+            block.end = block.start + length
+        }
+        for index in layers.indices { settleAnchor(&layers[index]) }
+        for index in audioClips.indices where audioClips[index].isConnected { settleAnchor(&audioClips[index]) }
+
+        func settle<Block: TimedBlock>(_ blocks: inout [Block], track: WritableKeyPath<Block, Int>, ranges: [TimeRange?],
+                                      candidates: (Block) -> [Int], create: (Block) -> Int) {
+            let order = blocks.indices.sorted {
+                let first = ranges[$0]?.start ?? .infinity, second = ranges[$1]?.start ?? .infinity
+                return first == second ? $0 < $1 : first < second
+            }
+            var ends: [Int: Double] = [:]
+            for index in order {
+                guard let range = ranges[index] else { continue }
+                let original = blocks[index][keyPath: track]
+                if range.start < (ends[original] ?? -.infinity) - 1e-9 {
+                    let available = candidates(blocks[index]).first { candidate in
+                        blocks.indices.allSatisfy { other in
+                            guard other != index, blocks[other][keyPath: track] == candidate, let occupied = ranges[other] else { return true }
+                            return occupied.end <= range.start + 1e-9 || occupied.start >= range.end - 1e-9
+                        }
+                    }
+                    blocks[index][keyPath: track] = available ?? create(blocks[index])
+                }
+                ends[blocks[index][keyPath: track]] = range.end
+            }
+            blocks.sort { $0.start < $1.start }
+        }
+
+        var tracks = audioTracks
+        let audioRanges = audioClips.map { outputRange($0, connected: $0.isConnected) }
+        settle(&audioClips, track: \.track, ranges: audioRanges, candidates: { audio in
+            let original = tracks[audio.track]
+            return tracks.indices.filter {
+                $0 > audio.track && tracks[$0].name != "Mic" && tracks[$0].name != "System"
+                    && tracks[$0].volume == original.volume && tracks[$0].muted == original.muted
+            }
+        }, create: { audio in
+            let original = tracks[audio.track]
+            let prefix = original.name.hasPrefix("Voiceover ") ? "Voiceover" : "Audio"
+            var number = 1
+            while tracks.contains(where: { $0.name == "\(prefix) \(number)" }) { number += 1 }
+            tracks.append(AudioTrack(name: "\(prefix) \(number)", volume: original.volume, muted: original.muted))
+            return tracks.count - 1
+        })
+        audioTracks = tracks
+
+        var layerTracks = Set(layers.map(\.track)).sorted()
+        let layerRanges = layers.map { outputRange($0, connected: true) }
+        settle(&layers, track: \.track, ranges: layerRanges, candidates: { layer in
+            layerTracks.filter { $0 > layer.track }
+        }, create: { _ in
+            let track = (layerTracks.last ?? -1) + 1
+            layerTracks.append(track)
+            return track
+        })
+    }
+
     /// Lift video without changing the timing of any other lane.
     mutating func liftClip(_ i: Int, propagate: Bool = true) {
         guard clips.indices.contains(i), !clips[i].isEmpty else { return }
         let before = self
         if propagate { editLinkedLayers(in: clips[i].sourceStart...clips[i].sourceEnd, moveBy: nil) }
         clips[i].isGap = true
+        settleConnected()
         if checkInvariants() != nil { self = before }
     }
 
@@ -104,6 +171,7 @@ public extension Project {
             liftClip(i, propagate: propagate)
             if rippleDelete && clips.count > 1 && clips[i].isEmpty { clips.remove(at: i) }
         }
+        settleConnected()
         if checkInvariants() != nil { self = before }
     }
 
@@ -171,6 +239,7 @@ public extension Project {
             moved.clockSpeed = 1
             return moved
         }
+        settleConnected()
     }
 
     /// Clipboard content uses output seconds relative to the selection, with media in-points
@@ -347,6 +416,7 @@ public extension Project {
             var gap = Clip(sourceStart: videoEnd, sourceEnd: end); gap.isGap = true
             result.clips.append(gap)
         }
+        result.settleConnected()
         guard !pastedClips.isEmpty || !pastedIDs.isEmpty, result.checkInvariants() == nil else { return nil }
         self = result
         return (pastedClips, pastedIDs)
@@ -457,6 +527,20 @@ public extension Project {
         if propagate {
             if moving, abs(a - old.sourceStart) > 1e-8 {
                 editLinkedLayers(in: old.sourceStart...old.sourceEnd, moveBy: a - old.sourceStart)
+                if linkVideoEdits {
+                    let movedLayers = Set(layers.filter { $0.start >= old.sourceStart && $0.start < old.sourceEnd }.map(\.id))
+                    for index in layers.indices where movedLayers.contains(layers[index].id) {
+                        layers[index].start += a - old.sourceStart; layers[index].end += a - old.sourceStart
+                    }
+                    for index in audioClips.indices where audioClips[index].isConnected {
+                        let audio = audioClips[index]
+                        let carried = audio.link == .layer ? audio.layer.map { movedLayers.contains($0) } ?? false
+                            : audio.start >= old.sourceStart && audio.start < old.sourceEnd
+                        if carried {
+                            audioClips[index].start += a - old.sourceStart; audioClips[index].end += a - old.sourceStart
+                        }
+                    }
+                }
             } else if !moving {
                 if a > old.sourceStart { editLinkedLayers(in: old.sourceStart...a, moveBy: nil) }
                 if b < old.sourceEnd { editLinkedLayers(in: b...old.sourceEnd, moveBy: nil) }
@@ -464,6 +548,7 @@ public extension Project {
                 if linkVideoEdits { resizeLinkedAudio(.camera, from: old.sourceStart...old.sourceEnd, to: a...b) }
             }
         }
+        settleConnected()
         guard checkInvariants() == nil else { self = before; return i }
         return selected
     }
@@ -913,6 +998,7 @@ public extension Project {
         let before = self
         if propagate { editLinkedLayers(in: clips[i].sourceStart...clips[i].sourceEnd, moveBy: nil) }
         clips.remove(at: i)
+        settleConnected()
         guard checkInvariants() == nil else { self = before; return false }
         assert(checkInvariants() == nil)
         return true
@@ -942,6 +1028,7 @@ public extension Project {
             resizeLinkedAudio(.screen, from: old.sourceStart...old.sourceEnd, to: clips[i].sourceStart...clips[i].sourceEnd)
             if linkVideoEdits { resizeLinkedAudio(.camera, from: old.sourceStart...old.sourceEnd, to: clips[i].sourceStart...clips[i].sourceEnd) }
         }
+        settleConnected()
         guard checkInvariants() == nil else { self = before; return }
         assert(checkInvariants() == nil)
     }
@@ -952,6 +1039,7 @@ public extension Project {
     /// clip at speed 1. No-op if there is no cut there.
     mutating func restoreCut(afterClip i: Int) {
         guard i >= -1 && i < clips.count else { return }
+        defer { settleConnected(); assert(checkInvariants() == nil) }
         let gapIndex = i + 1
         if clips.indices.contains(gapIndex), clips[gapIndex].isEmpty {
             let gap = clips[gapIndex]
@@ -990,7 +1078,6 @@ public extension Project {
         } else {
             clips.insert(Clip(sourceStart: leftBound, sourceEnd: rightBound, speed: 1), at: rightIndex)
         }
-        assert(checkInvariants() == nil)
     }
 
     private mutating func mergeContiguousVideo() {
@@ -1061,6 +1148,7 @@ public extension Project {
             }
             audioClips.sort { $0.start < $1.start }
         }
+        settleConnected()
         guard checkInvariants() == nil else { self = before; return }
         assert(checkInvariants() == nil)
     }
@@ -1105,6 +1193,7 @@ public extension Project {
         right.fadeOut = clip.fadeOut
         clips.insert(right, at: i + 1)
         editLinkedLayers(in: s...s, moveBy: 0)
+        settleConnected()
         if checkInvariants() != nil { self = before }
     }
 
