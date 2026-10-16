@@ -137,7 +137,7 @@ Lanes: **A** T-640→T-645 · **L** T-646→T-649 (after T-640 merges; T-648 nee
 |---|---|---|
 | Core model + links | T-640…T-642 | 3/3 |
 | Audio lanes + voiceover | T-643…T-645 | 2/3 |
-| Media layers + import | T-646…T-649 | 3/4 · T-649 machine checks pass; HUMAN pending |
+| Media layers + import | T-646…T-649 | 4/4 |
 | Docs | T-650 | 1/1 |
 
 - [x] **T-640 Audio/layer model + legacy derivation (Core)** — AUDIO-LAYERS §6
@@ -150,16 +150,18 @@ Lanes: **A** T-640→T-645 · **L** T-646→T-649 (after T-640 merges; T-648 nee
 - [x] **T-646 Media import + layer lanes (Core + UI)** — AUDIO-LAYERS §6
 - [x] **T-647 Image layer render pass** — AUDIO-LAYERS §6
 - [x] **T-648 Video layer playback** — AUDIO-LAYERS §6
-- [~] **T-649 Layer inspector + direct manipulation** — AUDIO-LAYERS §6
-  - Machine implementation/checks complete; HUMAN pending: select an image layer, choose Card + Dim and View result,
-    then play a video layer and judge both against the prototype. Try the paused rectangle handles and Escape.
+- [x] **T-649 Layer inspector + direct manipulation** — AUDIO-LAYERS §6
+  - Verified on the v0.3.1 release source: layerEdits 5/5, inspector-panels, layer-rect and fixture parity (32 times,
+    maxDelta=0). Native handles/resize/nudges/snapping/Escape/undo, context commands, immutable replacement and selected
+    video playback pass. Inspected fresh Card + Dim and video result screenshots. User accepted visual deviations;
+    the remaining prototype-comparison gate is waived, not represented as a human-performed comparison.
     Native artifacts: `/tmp/recorder-t649-editor-{selected,minimum,video,missing}.png` and
     `/tmp/recorder-t649-panel-{default,minimum,bottom,corner,missing}.png`; disposable package `/tmp/LayersFixture.recorder`.
 - [x] **T-650 Docs + snapshot** — AUDIO-LAYERS §6
   - SPEC §5 documents immutable `voice/`/`media/`, additive version-3 audio/layer keys, legacy derivation and
     connected output timing. Snapshots include complete track/clip/layer metadata, missing-file flags, export
     duration and audio/layer inspector selection. Verified `snapshot` in debug/release, `make test` 129/129,
-    `make app` release and strict bundle signature verification. T-645/T-649 HUMAN checks remain pending.
+    `make app` release and strict bundle signature verification. T-645 real-microphone HUMAN checks remain pending.
 
 ---
 
@@ -968,3 +970,5 @@ T-418 · 2026-10-16 · Reviewed SPEC §7.2/7.3; make test 129/129 and native tim
 T-509 · 2026-10-16 · Installer regression fixtures pass native certificate rejection, successful replacement, signature/quit/replace/restore failures, current/legacy permission-reset handling and certificate generation without Keychain mutation. Added assembled-release background-persistence smoke; updated signing guidance without claiming permission migration fixed. Clean clone passes all 129 Core tests. Initial v0.3.0 CI/release stopped before publication on an older compiler's ambiguous CGFloat/Double blur expression; explicitly converting output size to Double fixes the shared compositor without changing its math. Rechecked 129/129, debug app and LayersFixture parity maxDelta=0 over 32 times locally. Retain the failed tag as history; publish the corrected candidate as v0.3.1 only after signed/notarized pipeline checks. Clean release build and DMG verification are in progress; full v1.0/HUMAN acceptance is not claimed. Existing config conflicts preserved.
 
 T-509 · 2026-10-16 · Published v0.3.1 from 650a31d: CI run 38948201893 and Release run 38948201717 both succeed. Clean detached-tag release build passes strict codesign, version 0.3.1, background-persistence, export-colors and export-sheet. Independently downloaded the public 8,881,873-byte universal DMG; hdiutil checksum, app/DMG stapled tickets and Gatekeeper Notarized Developer ID assessments pass. Verified x86_64 + arm64 and version; the readonly-mounted signed app passes real-editor backdrop persistence/undo and owned-child SIGKILL recovery. SHA-256 493784fdc1fe859a0a530a85433c766168d9ed28b8e514476f770e92db885900 matches GitHub asset digest. Published release notes explicitly disclose real-device permission migration, mic latency, Intel hardware, VoiceOver and extended-duration performance limits; no full v1.0 acceptance claim. Did not replace the user's installed app, quit their Recorder copies or reset TCC. Existing config conflicts preserved.
+
+T-649 · 2026-10-16 · Applied the user's explicit acceptance of visual deviations to the remaining prototype-comparison gate, without claiming a human performed it. Re-ran make test FILTER=layerEdits (5/5), inspector-panels, layer-rect and LayersFixture parity (32 times, maxDelta=0) against the v0.3.1 release source; inspected fresh native selected Card + Dim and video-result screenshots. Native rectangle gestures/Escape/one-undo, playback, menus and immutable replacement pass. Marked T-649 complete in both trackers; Media layers + import 4/4. No app-source change or new release needed; real-mic/permission/performance gates remain unverified. Existing config conflicts preserved.

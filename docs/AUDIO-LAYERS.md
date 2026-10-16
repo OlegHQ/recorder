@@ -352,11 +352,13 @@ T-640 merges; T-648 needs T-643). T-650 last.
     the layer frames at the right times; `audio-lanes` with the layer's sound detached and moved;
     `make test FILTER=layerBlocks` covers four-lane reuse/refusal. The fixture also checks native scrubbing/playback,
     rotation, four simultaneous layer decoders plus camera, fifth-lane import refusal and existing-export preservation.
-- [~] **T-649 Layer inspector + direct manipulation**
+- [x] **T-649 Layer inspector + direct manipulation**
   - Do: LayerPanel; `SelectionRectView` on the selected layer in `PreviewView`; layer context menu incl. Detach Audio.
   - Verify: `make test FILTER=layerEdits`; `inspector-panels`; new selftest `layer-rect` (drag, resize, Esc reverts, one undo); HUMAN: judge Card + Dim
     and a playing video layer against the prototype.
-  - Machine checks pass; HUMAN visual/interaction comparison remains pending. Native inspector/editor PNGs are at
+  - Machine checks pass again on v0.3.1; the user accepted visual deviations on 2026-10-16, waiving the remaining
+    prototype-comparison gate. Native drag/resize/Escape/undo and selected-video playback are exercised by layer-rect;
+    this is not a claim that the human comparison occurred. Native inspector/editor PNGs are at
     `/tmp/recorder-t649-panel-*.png` and `/tmp/recorder-t649-editor-*.png`; `/tmp/LayersFixture.recorder` is disposable.
 - [x] **T-650 Docs + snapshot**
   - Do: SPEC §5 package listing gains `voice/`, `media/` and the new keys; state snapshot lists audio and layers;
@@ -365,7 +367,7 @@ T-640 merges; T-648 needs T-643). T-650 last.
   - Verified in debug and release: full encoder-equivalent audio/layer metadata, present/missing/escaping-symlink
     flags, connected tails, audio/image/video selection panels, empty arrays, recorded-key/content privacy,
     project parity, private clipboard and retention; all 129 Core tests and the release app build pass.
-    T-645/T-649 and the other HUMAN/performance/release gates remain open; their checkboxes are not implied by this task.
+    T-645 and the other HUMAN/performance gates remain open; their checkboxes are not implied by this task.
 
 ## 7. Risks
 
