@@ -9,6 +9,10 @@ import Observation
 
     static let shared = RecordingSettings()
 
+    static func restoredDeviceID(_ savedID: String?, availableIDs: [String]) -> String? {
+        savedID.flatMap { availableIDs.contains($0) ? $0 : nil }
+    }
+
     var mode: Mode { didSet { UserDefaults.standard.set(mode.rawValue, forKey: Keys.mode) } }
     var cameraID: String? { didSet { UserDefaults.standard.set(cameraID, forKey: Keys.cameraID) } }
     var micID: String? { didSet { UserDefaults.standard.set(micID, forKey: Keys.micID) } }

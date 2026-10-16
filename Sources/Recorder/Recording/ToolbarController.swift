@@ -60,6 +60,13 @@ final class ToolbarController: NSObject {
             return
         }
 
+        let settings = RecordingSettings.shared
+        settings.cameraID = RecordingSettings.restoredDeviceID(settings.cameraID, availableIDs: AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
+            mediaType: .video, position: .unspecified).devices.map(\.uniqueID))
+        settings.micID = RecordingSettings.restoredDeviceID(settings.micID, availableIDs: AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices.map(\.uniqueID))
+
         let view = ToolbarHostingView(rootView: ToolbarView(
             onClose: { [weak self] in self?.handleEscape() },
             onSelectMode: { [weak self] mode in self?.selectMode(mode) },

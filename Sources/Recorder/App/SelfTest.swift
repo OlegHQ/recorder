@@ -2764,6 +2764,20 @@ enum SelfTest {
         // T-207b/T-204: builds the status menu in both states and the global hotkey table (no live
         // status item / window needed) and checks them against SPEC §4.7/§8's titles, order and key
         // equivalents, that no two hotkeys share a binding, and every menu item has a target and action.
+        "device-selection": { _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let cases: [(String?, [String], String?)] = [
+                (nil, ["connected"], nil), ("connected", ["connected"], "connected"),
+                ("connected", ["other", "connected"], "connected"),
+                ("unplugged", ["connected"], nil), ("unplugged", [], nil),
+            ]
+            for (saved, available, expected) in cases {
+                guard RecordingSettings.restoredDeviceID(saved, availableIDs: available) == expected else {
+                    throw Fail(description: "Saved device must be retained only while available")
+                }
+            }
+            print("device-selection: off/connected/unplugged restoration verified without opening devices or changing saved settings")
+        },
         "menus": { @MainActor _ in
             struct Fail: Error, CustomStringConvertible { let description: String }
 
