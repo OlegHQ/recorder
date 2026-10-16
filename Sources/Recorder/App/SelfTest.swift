@@ -1366,7 +1366,9 @@ enum SelfTest {
                 case "cursor": initialTab = .cursor
                 case "camera": initialTab = .camera; project.source.hasCamera = true
                 case "camera-empty": initialTab = .camera
-                case "audio": initialTab = .audio; project.source.hasMic = true; project.source.hasSystemAudio = true
+                case "audio":
+                    initialTab = .audio; project.source.hasMic = true; project.source.hasSystemAudio = true
+                    project.audioTracks = [AudioTrack(name: "Mic"), AudioTrack(name: "System")]
                 case "audio-empty": initialTab = .audio
                 case "animations": initialTab = .animations
                 case "keys": initialTab = .keys
@@ -1542,16 +1544,17 @@ enum SelfTest {
             }
 
             // --- Audio tab (T-504): Microphone volume drag == one undo step, autosaved. ---
+            await model.edit("Fixture microphone") { $0.audioTracks = [AudioTrack(name: "Mic")] }
             let beforeMicVolume = await model.project
             await model.beginGesture()
             for i in 0..<10 {
                 let v = 0.9 - Double(i) / 10
-                await model.update { $0.audio.micVolume = v }
+                await model.update { $0.audioTracks[0].volume = v }
             }
             await model.commitGesture("Microphone volume")
             let afterMicVolume = await model.project
-            guard afterMicVolume.audio.micVolume != beforeMicVolume.audio.micVolume else {
-                throw Fail(description: "microphone volume drag didn't change audio.micVolume")
+            guard afterMicVolume.audioTracks[0].volume != beforeMicVolume.audioTracks[0].volume else {
+                throw Fail(description: "microphone volume drag didn't change track volume")
             }
             await model.undo()
             guard await model.project == beforeMicVolume else {
@@ -1559,7 +1562,7 @@ enum SelfTest {
             }
             await model.redo()
             try await Task.sleep(nanoseconds: 700_000_000)
-            guard try Project.load(from: projectURL).audio.micVolume == afterMicVolume.audio.micVolume else {
+            guard try Project.load(from: projectURL).audioTracks[0].volume == afterMicVolume.audioTracks[0].volume else {
                 throw Fail(description: "autosave didn't persist the microphone volume edit")
             }
 
@@ -3051,7 +3054,7 @@ enum SelfTest {
                     model.undo()
                     guard model.project == fixture else { throw Fail(message: "undo changed original") }
                     model.saveNow()
-                    let (composition, _, _, _) = try await makeComposition(package: package, project: result)
+                    let (composition, _, _) = try await makeComposition(package: package, project: result)
                     guard abs(composition.duration.seconds - TimeMap(fixture.clips).outputDuration) < 0.02 else {
                         throw Fail(message: "move changed playback duration")
                     }
@@ -3281,7 +3284,7 @@ enum SelfTest {
                 guard model.project == moved else { throw Fail.undo }
                 return moved
             }
-            let (movedComposition, _, _, _) = try await makeComposition(package: tmp, project: linked)
+            let (movedComposition, _, _) = try await makeComposition(package: tmp, project: linked)
             guard abs(movedComposition.duration.seconds - 15) < 0.01,
                   let movedCamera = movedComposition.tracks(withMediaType: .video).last?.segments.last,
                   abs(movedCamera.timeMapping.source.start.seconds - 6) < 0.01,
@@ -3290,7 +3293,7 @@ enum SelfTest {
                 var sped = project
                 sped.linkVideoEdits = isLinked
                 sped.setSpeed(0, 2)
-                let (composition, _, _, _) = try await makeComposition(package: tmp, project: sped)
+                let (composition, _, _) = try await makeComposition(package: tmp, project: sped)
                 guard abs(composition.duration.seconds - (isLinked ? 6 : 12)) < 0.01,
                       let camera = composition.tracks(withMediaType: .video).last,
                       abs(camera.timeRange.duration.seconds - (isLinked ? 6 : 12)) < 0.01 else { throw Fail.composition }
@@ -3304,7 +3307,7 @@ enum SelfTest {
                 mixed.clips[1].isGap = true
                 mixed.linkVideoEdits = isLinked
                 _ = mixed.moveClips([2, 3], byOutput: -2)
-                let (composition, _, _, _) = try await makeComposition(package: tmp, project: mixed)
+                let (composition, _, _) = try await makeComposition(package: tmp, project: mixed)
                 guard abs(composition.duration.seconds - 13) < 0.01,
                       let camera = composition.tracks(withMediaType: .video).last,
                       let segment = camera.segments.first(where: { abs($0.timeMapping.source.start.seconds - 6) < 0.01 }),
@@ -3312,7 +3315,7 @@ enum SelfTest {
                       abs(segment.timeMapping.source.duration.seconds - 6) < 0.01,
                       abs(segment.timeMapping.target.duration.seconds - 4) < 0.01 else { throw Fail.composition }
             }
-            let (composition, _, _, _) = try await makeComposition(package: tmp, project: edited)
+            let (composition, _, _) = try await makeComposition(package: tmp, project: edited)
             let tracks = composition.tracks(withMediaType: .video)
             guard tracks.count == 2, abs(composition.duration.seconds - 12) < 0.01,
                   let camera = tracks[1].segments.first(where: { !$0.isEmpty }),
@@ -3329,6 +3332,7 @@ enum SelfTest {
         // T-504: live AVAudioMix rebuild, export volume/mute/denoise/click (see
         // `Render/AudioMixSelfTest.swift`).
         "audio-mix": { args in try await AudioMixSelfTest.run(args) },
+        "audio-lanes": { _ in try await AudioMixSelfTest.runLanes() },
         // T-602 + T-601: writes a persistent `/tmp/M6Fixture.recorder` (real screen.mov, a few
         // low-fps HEVC frames — same lesson as T-504's fixture: a from-scratch H.264 encode measured
         // ~1 s/frame to decode back in this sandboxed environment, HEVC doesn't) with `keys.show`

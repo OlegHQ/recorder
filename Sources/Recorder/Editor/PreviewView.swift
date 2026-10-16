@@ -41,12 +41,12 @@ final class PreviewView: MTKView {
     private var lastCameraClips: [CameraClip] = []
     private var lastWindowShots: [WindowShot] = []
     private var lastClips: [Clip]
-    private var lastAudio: Audio
+    private var lastAudioClips: [AudioClip]
+    private var lastAudioTracks: [AudioTrack]
+    private var lastDuration: Double
 
-    // T-504: the live item's mic/system composition tracks, kept so volumes/mutes can rebuild just
-    // the `AVAudioMix` (`refreshAudioMix`) without a composition rebuild/playback hiccup.
-    private var liveMicTrack: AVMutableCompositionTrack?
-    private var liveSystemTrack: AVMutableCompositionTrack?
+    private var liveAudioTracks: [AVMutableCompositionTrack] = []
+    private var playbackDuration: Double { max(model.timeMap.outputDuration, model.project.exportDuration) }
     // T-504: SOURCE time of the last playback tick's click-sound check — reset on every play start
     // so a big seek/scrub never floods stale clicks (see `playClickSoundIfCrossed`).
     private var lastClickCheckSourceTime: Double?
@@ -103,8 +103,11 @@ final class PreviewView: MTKView {
     init(model: EditorModel, preparedCompositor: Compositor? = nil) {
         self.model = model
         self.lastClips = model.project.clips
+        self.lastCameraClips = model.project.cameraClips
         self.lastWindowShots = model.project.windowShots
-        self.lastAudio = model.project.audio
+        self.lastAudioClips = model.project.audioClips
+        self.lastAudioTracks = model.project.audioTracks
+        self.lastDuration = max(TimeMap(model.project.clips).outputDuration, model.project.exportDuration)
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             fatalError("no Metal device")
         }
@@ -232,13 +235,13 @@ final class PreviewView: MTKView {
 
     /// Coalesced: never queues more than one pending seek (SPEC §6.2 "Scrub").
     func seek(toOutput t: Double) {
-        let clamped = min(max(t, 0), max(model.timeMap.outputDuration, 0))
+        let clamped = min(max(t, 0), playbackDuration)
         model.playhead = clamped
         performSeek(to: clamped)
     }
 
     private func performSeek(to t: Double) {
-        let clamped = min(max(t, 0), max(model.timeMap.outputDuration, 0))
+        let clamped = min(max(t, 0), playbackDuration)
         pendingSeekTime = clamped
         needsDisplay = true
         if !isSeeking { performPendingSeek() }
@@ -265,7 +268,7 @@ final class PreviewView: MTKView {
         guard rate != 0, let player else { pause(); return }
         // Timeline scrubs/clicks only move `model.playhead`, and a lingering hover seek leaves the
         // player elsewhere too — so play always resumes from the playhead (restart if parked at the end).
-        if model.playhead >= model.timeMap.outputDuration - 1.0 / 60 { model.playhead = 0 }
+        if model.playhead >= playbackDuration - 1.0 / 60 { model.playhead = 0 }
         if hoverTime != nil || abs(player.currentTime().seconds - model.playhead) > 1.0 / 120 { performSeek(to: model.playhead) }
         lastClickCheckSourceTime = model.timeMap.sourceTime(atOutput: model.playhead)
         model.isPlaying = true
@@ -339,7 +342,7 @@ final class PreviewView: MTKView {
         case 126, 125:                                           // ↑ ↓: previous / next edit point
             if let t = model.editPoint(from: model.playhead, forward: event.keyCode == 125) { pause(); seek(toOutput: t) }
         case 115: pause(); seek(toOutput: 0)                     // Home
-        case 119: pause(); seek(toOutput: model.timeMap.outputDuration) // End
+        case 119: pause(); seek(toOutput: playbackDuration) // End
         case 38: setRate(-1)                                     // J
         case 40: setRate(0)                                      // K
         case 37: setRate(1)                                      // L
@@ -357,20 +360,27 @@ final class PreviewView: MTKView {
                 guard let self else { return }
                 self.updateZoomTargetOverlay()
                 let clips = self.model.project.clips
-                let audio = self.model.project.audio
-                if clips != self.lastClips || self.model.project.cameraClips != self.lastCameraClips || self.model.project.windowShots != self.lastWindowShots {
+                let audio = self.model.project.audioClips
+                let tracks = self.model.project.audioTracks
+                let timingChanged = audio.count != self.lastAudioClips.count || zip(audio, self.lastAudioClips).contains { current, previous in
+                    var timing = current
+                    timing.gain = previous.gain; timing.fadeIn = previous.fadeIn; timing.fadeOut = previous.fadeOut
+                    return timing != previous
+                }
+                let mixChanged = audio != self.lastAudioClips || tracks != self.lastAudioTracks
+                let rebuild = clips != self.lastClips || self.model.project.cameraClips != self.lastCameraClips
+                    || self.model.project.windowShots != self.lastWindowShots || timingChanged
+                    || tracks.map(\.id) != self.lastAudioTracks.map(\.id) || self.playbackDuration != self.lastDuration
+                self.lastAudioClips = audio; self.lastAudioTracks = tracks; self.lastDuration = self.playbackDuration
+                if rebuild {
                     self.lastWindowShots = self.model.project.windowShots
                     self.lastCameraClips = self.model.project.cameraClips
                     self.lastClips = clips
-                    self.lastAudio = audio
                     self.rebuildComposition()
                 } else {
                     // T-504: volumes/mutes → rebuild ONLY the `AVAudioMix` on the live item, not a
                     // full composition rebuild (no playback hiccup).
-                    if audio != self.lastAudio {
-                        self.lastAudio = audio
-                        self.refreshAudioMix()
-                    }
+                    if mixChanged { self.refreshAudioMix() }
                     self.needsDisplay = true
                 }
                 self.observeProject()
@@ -443,6 +453,7 @@ final class PreviewView: MTKView {
         pause()
         statusObservation = nil
         player = nil
+        liveAudioTracks = []
         cameraPlayer = nil
         screenOutput = nil
         cameraOutput = nil
@@ -472,12 +483,11 @@ final class PreviewView: MTKView {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let (composition, audioMix, micTrack, systemTrack) = try await makeComposition(package: packageURL, project: project)
+                let (composition, _, tracks) = try await makeComposition(package: packageURL, project: project)
                 await MainActor.run {
                     guard self.compositionRevision == revision else { return }
-                    self.liveMicTrack = micTrack
-                    self.liveSystemTrack = systemTrack
-                    self.attach(composition: composition, audioMix: audioMix, resumeSeconds: resumeSeconds)
+                    self.liveAudioTracks = tracks
+                    self.attach(composition: composition, audioMix: makeAudioMix(project: self.model.project, audioTracks: tracks), resumeSeconds: resumeSeconds)
                 }
             } catch {
                 await MainActor.run {
@@ -488,12 +498,11 @@ final class PreviewView: MTKView {
         }
     }
 
-    /// T-504: volumes/mutes changed but `clips` didn't — swap the live item's `AVAudioMix` for a
-    /// freshly built one over the SAME mic/system tracks (`makeAudioMix`, `FrameSource.swift`).
+    /// Refresh mixing on the same composition tracks without replacing the player's item.
     /// `AVPlayerItem.audioMix` takes effect live, no `replaceCurrentItem`/decode restart.
     private func refreshAudioMix() {
         guard let item = player?.currentItem else { return }
-        item.audioMix = makeAudioMix(project: model.project, micTrack: liveMicTrack, systemTrack: liveSystemTrack)
+        item.audioMix = makeAudioMix(project: model.project, audioTracks: liveAudioTracks)
     }
 
     private func attach(composition: AVMutableComposition, audioMix: AVAudioMix, resumeSeconds: Double) {
@@ -942,13 +951,13 @@ struct TransportBar: View {
                 transportButton("backward.frame.fill", label: "Previous frame") { preview.stepFrame(-preview.frameStep) }
                 transportButton(model.isPlaying ? "pause.fill" : "play.fill", label: model.isPlaying ? "Pause" : "Play", primary: true) { preview.togglePlayPause() }
                 transportButton("forward.frame.fill", label: "Next frame") { preview.stepFrame(preview.frameStep) }
-                transportButton("forward.end.fill", label: "Go to end") { preview.seek(toOutput: model.timeMap.outputDuration) }
+                transportButton("forward.end.fill", label: "Go to end") { preview.seek(toOutput: max(model.timeMap.outputDuration, model.project.exportDuration)) }
             }
             Spacer(minLength: 16)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(Self.timecode(model.playhead)).font(Font(Theme.timecodeFont(16)))
                     .foregroundStyle(Theme.textPrimaryColor)
-                Text("/  " + Self.timecode(model.timeMap.outputDuration))
+                Text("/  " + Self.timecode(max(model.timeMap.outputDuration, model.project.exportDuration)))
                     .font(Font(Theme.timecodeFont(11))).foregroundStyle(Theme.textSecondaryColor)
             }.fixedSize()
         }

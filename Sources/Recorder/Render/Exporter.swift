@@ -69,14 +69,13 @@ final class Exporter {
         let project = await model.project
         let outputDuration = project.exportDuration
         guard outputDuration > 0 else { throw ExportError.failed("No media to export.") }
-        try? FileManager.default.removeItem(at: destination)
 
         // T-504: `denoise` is applied EXPORT ONLY (preview always plays the raw mic) — pre-process
         // mic.m4a into a temp file and hand its URL to `makeComposition` as the mic track's source.
         // `// ponytail: no real noise suppression and no preview; add an audio tap if users ask.`
         var micOverrideURL: URL?
         var denoiseTempDir: URL?
-        if project.audio.denoise, project.source.hasMic {
+        if project.audio.denoise, project.audioClips.contains(where: { $0.file == "mic.m4a" }) {
             let micURL = packageURL.appendingPathComponent("mic.m4a")
             if FileManager.default.fileExists(atPath: micURL.path) {
                 let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("recorder-denoise-\(UUID().uuidString)")
@@ -89,7 +88,7 @@ final class Exporter {
         }
         defer { if let denoiseTempDir { try? FileManager.default.removeItem(at: denoiseTempDir) } }
 
-        let (composition, audioMix, _, _) = try await makeComposition(package: packageURL, project: project, micURL: micOverrideURL)
+        let (composition, audioMix, _) = try await makeComposition(package: packageURL, project: project, micURL: micOverrideURL)
 
         // T-504: "Mouse click sound" — mixed into the export audio at each left `.down` event that
         // survives the clip cuts (export only; the preview plays it live via `NSSound`,
@@ -135,7 +134,7 @@ final class Exporter {
             reader.add(o)
             cameraOutput = o
         }
-        let audioTracks = composition.tracks(withMediaType: .audio)
+        let audioTracks = composition.tracks(withMediaType: .audio).filter { $0.segments.contains { !$0.isEmpty } }
         var audioOutput: AVAssetReaderAudioMixOutput?
         if !audioTracks.isEmpty {
             let o = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: nil)
@@ -150,6 +149,7 @@ final class Exporter {
 
         // MARK: Writer
 
+        try? FileManager.default.removeItem(at: destination)
         let writer = try AVAssetWriter(outputURL: destination, fileType: .mp4)
         let codec: AVVideoCodecType = settings.codec == .hevc ? .hevc : .h264
         let bitrate = Self.bitrate(quality: settings.quality, codec: settings.codec, width: width, height: height, fps: settings.fps)
@@ -386,14 +386,13 @@ extension Exporter {
         let project = await model.project
         let outputDuration = project.exportDuration
         guard outputDuration > 0 else { throw ExportError.failed("No media to export.") }
-        try? FileManager.default.removeItem(at: destination)
 
         // SPEC §6.8: "Warn (non-blocking) if duration > 60 s" — GIFs get large fast; export still runs.
         if outputDuration > 60 {
             print("warning: GIF export duration is \(Int(outputDuration))s — SPEC §6.8 recommends keeping GIFs under 60s")
         }
 
-        let (composition, _, _, _) = try await makeComposition(package: packageURL, project: project)
+        let (composition, _, _) = try await makeComposition(package: packageURL, project: project)
 
         guard let device = MTLCreateSystemDefaultDevice(), let commandQueue = device.makeCommandQueue() else {
             throw ExportError.failed("no Metal device")
@@ -431,6 +430,7 @@ extension Exporter {
         }
 
         let totalFrames = max(1, Int((outputDuration * Double(fps)).rounded()))
+        try? FileManager.default.removeItem(at: destination)
         guard let gifDestination = CGImageDestinationCreateWithURL(destination as CFURL, UTType.gif.identifier as CFString, totalFrames, nil) else {
             throw ExportError.failed("failed to create GIF destination")
         }
@@ -648,7 +648,7 @@ enum ExporterSelfTest {
         let outputSize = compositor.outputSize(for: project, longEdge: 960)
         let width = Int(outputSize.width), height = Int(outputSize.height)
 
-        let (composition, audioMix, _, _) = try await makeComposition(package: packageURL, project: project)
+        let (composition, audioMix, _) = try await makeComposition(package: packageURL, project: project)
         let videoTracks = composition.tracks(withMediaType: .video)
         let hasCamera = videoTracks.count > 1
 

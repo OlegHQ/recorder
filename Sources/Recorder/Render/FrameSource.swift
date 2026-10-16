@@ -3,7 +3,10 @@ import CoreVideo
 import Metal
 import RecorderCore
 
-enum FrameSourceError: Error { case missingScreenTrack, trackCreationFailed }
+enum FrameSourceError: Error {
+    case missingScreenTrack, trackCreationFailed
+    case invalidProject(String), invalidMediaPath(String), missingAudioTrack(String)
+}
 
 /// One SDR working space from capture through preview, stills and video encoding.
 enum VideoColor {
@@ -15,22 +18,14 @@ enum VideoColor {
     ]
 }
 
-/// Builds the `AVMutableComposition` from `project.clips` (insert ranges + `scaleTimeRange` per
-/// clip) for screen, camera, mic, system — used by both the preview player (T-306) and the
-/// exporter so clip cuts/speed changes and audio come from the same source (SPEC §6.2, §5).
-/// Track order: video[0] = screen, video[1] = camera (if present); audio[0] = mic, audio[1] = system.
-///
-/// Also returns the mic/system `AVMutableCompositionTrack`s (`nil` when the project has none) so a
-/// caller can rebuild just the `AVAudioMix` later (T-504: `PreviewView.refreshAudioMix` — volumes/
-/// mutes change without a composition rebuild/playback hiccup) via `makeAudioMix` below, without
-/// re-inserting any media.
-///
-/// `micURL`, when given, replaces `mic.m4a` as the mic track's SOURCE (T-504: the exporter's
-/// export-only denoise pass builds a processed temp file and passes it here; preview never does,
-/// so it always plays the raw mic, per the task).
+/// Shared preview/export composition; audio track indices match `Project.audioTracks`.
+/// `micURL` overrides only `mic.m4a` for export cleanup. Assets stay alive through all insertions.
 func makeComposition(package: URL, project: Project, micURL: URL? = nil) async throws
-    -> (composition: AVMutableComposition, audioMix: AVMutableAudioMix,
-        micTrack: AVMutableCompositionTrack?, systemTrack: AVMutableCompositionTrack?) {
+    -> (composition: AVMutableComposition, audioMix: AVMutableAudioMix, audioTracks: [AVMutableCompositionTrack]) {
+    guard project.clips.allSatisfy({ $0.timeScale.isFinite && $0.timeScale > 0 && $0.outputDuration.isFinite && $0.outputDuration > 0 }),
+          project.audioTracks.allSatisfy({ $0.volume.isFinite && (0...2).contains($0.volume) }) else {
+        throw FrameSourceError.invalidProject("Invalid video clock or track volume")
+    }
     let composition = AVMutableComposition()
 
     // Every `AVURLAsset` below is kept alive (a `var …Asset: AVURLAsset?` at function scope, not a
@@ -43,8 +38,8 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
     // alive in an outer scope, fails when it's only reachable via its already-extracted track).
     var screenAssetKeepAlive: AVURLAsset?
     var cameraAssetKeepAlive: AVURLAsset?
-    var micAssetKeepAlive: AVURLAsset?
-    var systemAssetKeepAlive: AVURLAsset?
+    var audioAssets: [String: AVURLAsset] = [:]
+    var audioSources: [String: AVAssetTrack] = [:]
 
     let screenAsset = AVURLAsset(url: package.appendingPathComponent("screen.mov"))
     screenAssetKeepAlive = screenAsset
@@ -66,26 +61,12 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
         }
     }
 
-    var micTrack: AVMutableCompositionTrack?
-    var micSource: AVAssetTrack?
-    if project.source.hasMic {
-        let micAsset = AVURLAsset(url: micURL ?? package.appendingPathComponent("mic.m4a"))
-        micAssetKeepAlive = micAsset
-        micSource = try await micAsset.loadTracks(withMediaType: .audio).first
-        if micSource != nil {
-            micTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+    var audioTracks: [AVMutableCompositionTrack] = []
+    for _ in project.audioTracks {
+        guard let track = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw FrameSourceError.trackCreationFailed
         }
-    }
-
-    var systemTrack: AVMutableCompositionTrack?
-    var systemSource: AVAssetTrack?
-    if project.source.hasSystemAudio {
-        let systemAsset = AVURLAsset(url: package.appendingPathComponent("system.m4a"))
-        systemAssetKeepAlive = systemAsset
-        systemSource = try await systemAsset.loadTracks(withMediaType: .audio).first
-        if systemSource != nil {
-            systemTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-        }
+        audioTracks.append(track)
     }
 
     // Windows 1…N (SPEC "Windows as layers") play through the same one screen track, switched by
@@ -100,13 +81,16 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
 
     let timescale: CMTimeScale = 600
     var cursor = CMTime.zero
+    var outputSeconds = 0.0
     for clip in project.clips {
-        let outputDuration = CMTime(seconds: clip.outputDuration, preferredTimescale: timescale)
+        let outputEnd = CMTime(seconds: outputSeconds + clip.outputDuration, preferredTimescale: timescale)
+        let outputDuration = outputEnd - cursor
+        defer { outputSeconds += clip.outputDuration; cursor = outputEnd }
         guard outputDuration > .zero else { continue }
         // Gaps decode one valid placeholder frame; the compositor draws only the background.
         let mediaDuration = clip.isEmpty ? min(project.source.duration, 1.0 / 30) : clip.mediaDuration
         let range = CMTimeRange(start: CMTime(seconds: clip.isEmpty ? 0 : clip.mediaIn, preferredTimescale: timescale),
-                                duration: CMTime(seconds: mediaDuration, preferredTimescale: timescale))
+                                end: CMTime(seconds: (clip.isEmpty ? 0 : clip.mediaIn) + mediaDuration, preferredTimescale: timescale))
         if project.windowCount > 1 && !clip.isEmpty {
             // One piece per shot boundary inside the clip; the last piece absorbs rounding so the clip stays exact.
             let edges = project.windowShots.flatMap { [$0.start, $0.end] }
@@ -115,9 +99,9 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
             while lo < clip.sourceEnd - 1e-9 {
                 let hi = min(clip.sourceEnd, edges.filter { $0 > lo + 1e-9 }.min() ?? clip.sourceEnd)
                 let piece = CMTimeRange(start: CMTime(seconds: clip.mediaTime(atSource: lo), preferredTimescale: timescale),
-                                        duration: CMTime(seconds: (hi - lo) * clip.speed / clip.timeScale, preferredTimescale: timescale))
-                let pieceOut = hi >= clip.sourceEnd - 1e-9 ? cursor + outputDuration - at
-                    : CMTime(seconds: (hi - lo) / clip.timeScale, preferredTimescale: timescale)
+                                        end: CMTime(seconds: clip.mediaTime(atSource: hi), preferredTimescale: timescale))
+                let pieceOut = hi >= clip.sourceEnd - 1e-9 ? outputEnd - at
+                    : CMTime(seconds: outputSeconds + (hi - clip.sourceStart) / clip.timeScale, preferredTimescale: timescale) - at
                 try screenTrack.insertTimeRange(piece, of: windowSources[project.windowIndex(atSource: lo)], at: at)
                 screenTrack.scaleTimeRange(CMTimeRange(start: at, duration: piece.duration), toDuration: pieceOut)
                 at = at + pieceOut
@@ -127,15 +111,6 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
             try screenTrack.insertTimeRange(range, of: screenSource, at: cursor)
             screenTrack.scaleTimeRange(CMTimeRange(start: cursor, duration: range.duration), toDuration: outputDuration)
         }
-        for (track, source) in [(micTrack, micSource), (systemTrack, systemSource)] {
-            guard let track, let source else { continue }
-            if clip.isEmpty { track.insertEmptyTimeRange(CMTimeRange(start: cursor, duration: outputDuration)) }
-            else {
-                try track.insertTimeRange(range, of: source, at: cursor)
-                track.scaleTimeRange(CMTimeRange(start: cursor, duration: range.duration), toDuration: outputDuration)
-            }
-        }
-        cursor = cursor + outputDuration
     }
 
     // Compose camera independently. Screen cuts and gaps never remove camera footage.
@@ -146,37 +121,75 @@ func makeComposition(package: URL, project: Project, micURL: URL? = nil) async t
                 let lo = max(camera.start, clip.sourceStart), hi = min(camera.end, clip.sourceEnd)
                 guard hi > lo, let out = map.outputTime(atSource: lo) else { continue }
                 let range = CMTimeRange(start: CMTime(seconds: camera.mediaStart + (lo - camera.start) * (camera.mediaRate ?? 1), preferredTimescale: timescale),
-                                        duration: CMTime(seconds: (hi - lo) * (camera.mediaRate ?? 1), preferredTimescale: timescale))
+                                        end: CMTime(seconds: camera.mediaStart + (hi - camera.start) * (camera.mediaRate ?? 1), preferredTimescale: timescale))
                 let at = CMTime(seconds: out, preferredTimescale: timescale)
                 try cameraTrack.insertTimeRange(range, of: cameraSource, at: at)
-                cameraTrack.scaleTimeRange(CMTimeRange(start: at, duration: range.duration),
-                                           toDuration: CMTime(seconds: (hi - lo) / clip.timeScale, preferredTimescale: timescale))
+                let end = CMTime(seconds: out + (hi - lo) / clip.timeScale, preferredTimescale: timescale)
+                cameraTrack.scaleTimeRange(CMTimeRange(start: at, duration: range.duration), toDuration: end - at)
             }
         }
     }
 
-    withExtendedLifetime((screenAssetKeepAlive, cameraAssetKeepAlive, micAssetKeepAlive, systemAssetKeepAlive, windowAssetsKeepAlive)) {}
-
-    let audioMix = makeAudioMix(project: project, micTrack: micTrack, systemTrack: systemTrack)
-    // `audioTimePitchAlgorithm = .spectral` (SPEC §6.2) is a property of the AVPlayerItem/
-    // AVAssetExportSession that plays this composition, not of the composition/mix themselves —
-    // set on the `AVPlayerItem` in `PreviewView.attach` (T-306) and the exporter (T-505).
-    return (composition, audioMix, micTrack, systemTrack)
+    let packageRoot = package.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+    for audio in project.audioClips {
+        guard audioTracks.indices.contains(audio.track), audio.start.isFinite, audio.start >= 0,
+              audio.end.isFinite, audio.end > audio.start, audio.mediaStart.isFinite, audio.mediaStart >= 0,
+              (audio.mediaRate ?? 1).isFinite, (audio.mediaRate ?? 1) > 0, audio.gain.isFinite, (0...2).contains(audio.gain),
+              [audio.fadeIn, audio.fadeOut].compactMap({ $0 }).allSatisfy({ $0.isFinite && $0 >= 0 }) else {
+            throw FrameSourceError.invalidProject("Invalid audio clip \(audio.id)")
+        }
+        let fileURL = package.appendingPathComponent(audio.file).standardizedFileURL.resolvingSymlinksInPath()
+        guard !audio.file.isEmpty, !audio.file.hasPrefix("/"), fileURL.path.hasPrefix(packageRoot) else { throw FrameSourceError.invalidMediaPath(audio.file) }
+        let url = audio.file == "mic.m4a" ? micURL ?? fileURL : fileURL
+        guard FileManager.default.fileExists(atPath: url.path) else { continue }
+        if audioSources[audio.file] == nil {
+            let asset = AVURLAsset(url: url)
+            audioAssets[audio.file] = asset
+            guard let source = try await asset.loadTracks(withMediaType: .audio).first else {
+                throw FrameSourceError.missingAudioTrack(audio.file)
+            }
+            audioSources[audio.file] = source
+        }
+        guard let source = audioSources[audio.file] else { continue }
+        let track = audioTracks[audio.track]
+        for segment in project.audioSegments(audio) {
+            let range = CMTimeRange(start: CMTime(seconds: segment.media.start, preferredTimescale: timescale),
+                                    end: CMTime(seconds: segment.media.end, preferredTimescale: timescale))
+            let at = CMTime(seconds: segment.output.start, preferredTimescale: timescale)
+            let duration = CMTime(seconds: segment.output.end, preferredTimescale: timescale) - at
+            guard range.duration.isNumeric, range.start.isNumeric, range.duration > .zero, at.isNumeric, duration.isNumeric, duration > .zero else {
+                throw FrameSourceError.invalidProject("Unrepresentable audio segment \(audio.id)")
+            }
+            try track.insertTimeRange(range, of: source, at: at)
+            track.scaleTimeRange(CMTimeRange(start: at, duration: range.duration), toDuration: duration)
+        }
+    }
+    let duration = CMTime(seconds: project.exportDuration, preferredTimescale: timescale)
+    if duration > composition.duration {
+        composition.insertEmptyTimeRange(CMTimeRange(start: composition.duration, end: duration))
+    }
+    withExtendedLifetime((screenAssetKeepAlive, cameraAssetKeepAlive, audioAssets, windowAssetsKeepAlive)) {}
+    return (composition, makeAudioMix(project: project, audioTracks: audioTracks), audioTracks)
 }
 
-/// T-504: the volume/mute half of `makeComposition` above, factored out so a live `AVPlayerItem`'s
-/// mix can be rebuilt from the SAME already-built mic/system tracks when only `project.audio`
-/// changes — no composition rebuild, no playback hiccup (`PreviewView.refreshAudioMix`).
-func makeAudioMix(project: Project, micTrack: AVMutableCompositionTrack?, systemTrack: AVMutableCompositionTrack?) -> AVMutableAudioMix {
+/// Gain, fades and track mixing can refresh on the existing player's tracks without rebuilding media.
+func makeAudioMix(project: Project, audioTracks: [AVMutableCompositionTrack]) -> AVMutableAudioMix {
     var inputParameters: [AVMutableAudioMixInputParameters] = []
-    if let micTrack {
-        let params = AVMutableAudioMixInputParameters(track: micTrack)
-        params.setVolume(project.audio.micMuted ? 0 : Float(project.audio.micVolume), at: .zero)
-        inputParameters.append(params)
-    }
-    if let systemTrack {
-        let params = AVMutableAudioMixInputParameters(track: systemTrack)
-        params.setVolume(project.audio.systemMuted ? 0 : Float(project.audio.systemVolume), at: .zero)
+    for (index, track) in audioTracks.enumerated() where project.audioTracks.indices.contains(index) {
+        let params = AVMutableAudioMixInputParameters(track: track)
+        params.audioTimePitchAlgorithm = .spectral
+        params.setVolume(0, at: .zero)
+        let settings = project.audioTracks[index]
+        let volume = settings.muted ? 0 : settings.volume
+        for audio in project.audioClips where audio.track == index {
+            let ramps = project.audioVolumeRamps(audio)
+            for ramp in ramps {
+                let range = CMTimeRange(start: CMTime(seconds: ramp.range.start, preferredTimescale: 600),
+                                        end: CMTime(seconds: ramp.range.end, preferredTimescale: 600))
+                params.setVolumeRamp(fromStartVolume: Float(volume * ramp.start), toEndVolume: Float(volume * ramp.end), timeRange: range)
+            }
+            if let end = ramps.last?.range.end { params.setVolume(0, at: CMTime(seconds: end, preferredTimescale: 600)) }
+        }
         inputParameters.append(params)
     }
     let audioMix = AVMutableAudioMix()
@@ -234,15 +247,15 @@ final class TextureCache {
 
 // MARK: - Selftest `composition <package>` (SPEC §6.2, plan T-305)
 
-/// Prints the built composition's duration; OK when it equals `TimeMap(project.clips).outputDuration` ± 1/60 s.
+/// Checks the composition covers the editing clock and all audio/layer tails within 1/60 s.
 func runCompositionSelfTest(_ args: [String]) async throws {
     guard let packagePath = args.first else { throw SelfTestArgError.usage("composition <package>") }
     let package = URL(fileURLWithPath: packagePath)
     let project = try Project.load(from: package.appendingPathComponent("project.json"))
-    let (composition, _, _, _) = try await makeComposition(package: package, project: project)
+    let (composition, _, _) = try await makeComposition(package: package, project: project)
 
     let actual = composition.duration.seconds
-    let expected = TimeMap(project.clips).outputDuration
+    let expected = max(TimeMap(project.clips).outputDuration, project.exportDuration)
     print("composition duration=\(actual)s expected=\(expected)s")
     guard abs(actual - expected) <= 1.0 / 60.0 else {
         throw SelfTestArgError.usage("duration mismatch: \(actual) vs \(expected)")

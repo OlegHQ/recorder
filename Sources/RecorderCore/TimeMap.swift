@@ -13,8 +13,8 @@ public struct Clip: Codable, Equatable, Sendable {
     /// Separate the timeline clock from playback rate for an unlinked speed edit.
     public var clockSpeed: Double? = nil
     public var timeScale: Double { clockSpeed ?? speed }
-    public var mediaDuration: Double { outputDuration * speed }
-    public func mediaTime(atSource time: Double) -> Double { mediaIn + (time - sourceStart) * speed / timeScale }
+    public var mediaDuration: Double { (sourceEnd - sourceStart) * (speed / timeScale) }
+    public func mediaTime(atSource time: Double) -> Double { mediaIn + (time - sourceStart) * (speed / timeScale) }
     public var mediaIn: Double { mediaStart ?? sourceStart }
     public var isEmpty: Bool { isGap == true }
     public init(sourceStart: Double, sourceEnd: Double, speed: Double = 1) {
@@ -53,9 +53,57 @@ public struct TimeMap: Sendable {
 }
 
 public extension Project {
-    /// End of retained screen/camera media in output time. Interior gaps stay in the export;
-    /// trailing gaps and effect blocks alone do not extend it.
+    func audioSegments(_ audio: AudioClip) -> [(media: TimeRange, output: TimeRange)] {
+        let rate = audio.mediaRate ?? 1
+        guard audio.start.isFinite, audio.end.isFinite, audio.end > audio.start,
+              audio.mediaStart.isFinite, audio.mediaStart >= 0, rate.isFinite, rate > 0 else { return [] }
+        if audio.link != .screen && audio.link != .camera {
+            guard let start = TimeMap(clips).outputTime(atSource: audio.start) else { return [] }
+            let duration = audio.end - audio.start
+            return [(TimeRange(start: audio.mediaStart, end: audio.mediaStart + duration * rate),
+                     TimeRange(start: start, end: start + duration))]
+        }
+        var output = 0.0
+        var segments: [(media: TimeRange, output: TimeRange)] = []
+        for clip in clips {
+            guard clip.timeScale.isFinite, clip.timeScale > 0 else { return [] }
+            let lower = max(audio.start, clip.sourceStart), upper = min(audio.end, clip.sourceEnd)
+            if upper - lower > 1e-9 {
+                let media = audio.mediaStart + (lower - audio.start) * rate
+                let start = output + (lower - clip.sourceStart) / clip.timeScale
+                segments.append((TimeRange(start: media, end: media + (upper - lower) * rate),
+                                 TimeRange(start: start, end: start + (upper - lower) / clip.timeScale)))
+            }
+            output += clip.outputDuration
+        }
+        return segments
+    }
+
+    func audioVolumeRamps(_ audio: AudioClip) -> [(range: TimeRange, start: Double, end: Double)] {
+        let segments = audioSegments(audio)
+        guard let first = segments.first, let last = segments.last, audio.gain.isFinite else { return [] }
+        let duration = last.output.end - first.output.start
+        guard duration.isFinite, duration > 0 else { return [] }
+        let fadeIn = min(duration, max(0, audio.fadeIn?.isFinite == true ? audio.fadeIn! : 0))
+        let fadeOut = min(duration, max(0, audio.fadeOut?.isFinite == true ? audio.fadeOut! : 0))
+        var boundaries = [0.0, duration]
+        if fadeIn + fadeOut > duration { boundaries.append(duration * fadeIn / (fadeIn + fadeOut)) }
+        else {
+            if fadeIn > 0 { boundaries.append(fadeIn) }
+            if fadeOut > 0 { boundaries.append(duration - fadeOut) }
+        }
+        let times = Set(boundaries).sorted()
+        func volume(_ time: Double) -> Double {
+            audio.gain * min(1, fadeIn > 0 ? time / fadeIn : 1, fadeOut > 0 ? (duration - time) / fadeOut : 1)
+        }
+        return zip(times, times.dropFirst()).map { start, end in
+            (TimeRange(start: first.output.start + start, end: first.output.start + end), volume(start), volume(end))
+        }
+    }
+
+    /// End of retained video, audio and layers in output time; trailing gaps and effects alone do not extend it.
     var exportDuration: Double {
+        guard !clips.isEmpty else { return 0 }
         var output = 0.0, end = 0.0
         for clip in clips {
             let duration = clip.outputDuration
@@ -68,6 +116,13 @@ public extension Project {
                 }
             }
             output += duration
+        }
+        for audio in audioClips {
+            if let audioEnd = audioSegments(audio).last?.output.end { end = max(end, audioEnd) }
+        }
+        let map = TimeMap(clips)
+        for layer in layers where layer.end.isFinite && layer.end > layer.start {
+            if let start = map.outputTime(atSource: layer.start) { end = max(end, start + layer.end - layer.start) }
         }
         return end.isFinite ? end : 0
     }

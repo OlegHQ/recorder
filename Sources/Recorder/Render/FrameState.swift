@@ -74,10 +74,12 @@ func makeFrameState(model: EditorModel, outputTime: Double, screen: FrameState.T
         keyChip = FrameState.KeyChipState(label: chip.label, age: chip.age)
     }
     let texts = model.project.texts.filter { sourceTime >= $0.start && sourceTime < $0.end }.map { ($0, $0.wordIndex(atSource: sourceTime)) }
-    let videoVisible = model.project.clipIndex(atOutput: outputTime).map { !model.project.clips[$0].isEmpty } ?? false
-    let cameraVisible = model.project.cameraClips.contains { sourceTime >= $0.start && sourceTime < $0.end }
+    let inTimeline = outputTime >= 0 && outputTime < model.timeMap.outputDuration
+    let videoVisible = inTimeline && (model.project.clipIndex(atOutput: outputTime).map { !model.project.clips[$0].isEmpty } ?? false)
+    let cameraVisible = inTimeline && model.project.cameraClips.contains { sourceTime >= $0.start && sourceTime < $0.end }
     return FrameState(outputSize: size, screen: videoVisible ? screen : nil, camera: cameraVisible ? camera : nil, view: view, prevView: prevView, cursor: cursor,
-                       layoutKind: layoutKind, layoutAmount: layoutAmount, videoOpacity: model.project.videoOpacity(atOutput: outputTime), sourceTime: sourceTime, keyChip: keyChip, texts: texts,
+                       layoutKind: layoutKind, layoutAmount: layoutAmount, videoOpacity: model.project.videoOpacity(atOutput: outputTime), sourceTime: sourceTime,
+                       keyChip: inTimeline ? keyChip : nil, texts: inTimeline ? texts : [],
                        project: model.project)
 }
 

@@ -132,14 +132,14 @@ Lanes: **A** T-640→T-645 · **L** T-646→T-649 (after T-640 merges; T-648 nee
 | Scope | Tasks | Done |
 |---|---|---|
 | Core model + links | T-640…T-642 | 3/3 |
-| Audio lanes + voiceover | T-643…T-645 | 0/3 |
+| Audio lanes + voiceover | T-643…T-645 | 1/3 |
 | Media layers + import | T-646…T-649 | 0/4 |
 | Docs | T-650 | 0/1 |
 
 - [x] **T-640 Audio/layer model + legacy derivation (Core)** — AUDIO-LAYERS §6
 - [x] **T-641 Linked audio edits (Core)** — AUDIO-LAYERS §6
 - [x] **T-642 Connected blocks settle (Core)** — AUDIO-LAYERS §6
-- [ ] **T-643 Composition + mix for N audio tracks** — AUDIO-LAYERS §6
+- [x] **T-643 Composition + mix for N audio tracks** — AUDIO-LAYERS §6
 - [ ] **T-644 Audio lanes UI** — AUDIO-LAYERS §6
 - [ ] **T-645 Voiceover recording** — AUDIO-LAYERS §6
 - [ ] **T-646 Media import + layer lanes (Core + UI)** — AUDIO-LAYERS §6
@@ -904,3 +904,5 @@ T-640 · 2026-10-16 · Added AudioTrack/AudioClip/LayerBlock, additive version-3
 T-641 · 2026-10-16 · Extracted shared applyLinkedEdit; screen audio follows video with Link layers off, camera/layer audio edits propagate both ways, layer splits repoint sound, and propagate:false preserves partners. Added unlinkAudio/linkAudio, syncOffset/moveIntoSync, output-clock conversion and linked-audio video clipboard handling. Verified with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`: `make test FILTER=linkedAudio` 12/12 (500 fixed-seed video/camera/layer edits, sync, split/delete/move/speed, unlink/relink, partial partners, Option overrides, mixed clocks and clipboard); `make test` 102/102; `make app CONFIG=debug`; `--selftest timeline-ops` OK. The expanded random sequence caught floating-point slivers and hidden camera references; fixed in the shared slicer and sync lookup. Clarification: Option-delete of a video layer preserves and detaches its audio rather than leaving an invalid dangling link (AUDIO-LAYERS §4.1). Connected settling, composition and UI remain T-642 onward. Existing config conflicts preserved; task commit uses a separate index.
 
 T-642 · 2026-10-16 · Added settleConnected after video edits/clock conversion: deleted anchors move to the deletion boundary, later collisions reuse free higher lanes or create them, and connected clips/layers retain their ids, output lengths, media ranges and settings. Clip moves carry connected anchors and linked layer sound when Link layers and propagation are enabled. Audio lane changes skip Mic/System, preserve volume/mute, and reserve future blocks rather than displacing them. Verified regressions fail before the fix (deletion rolled back; moves left media behind); with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, `make test FILTER=connected` 8/8 (500 seeded video edits, ripple/gaps/endpoints, mixed clocks, half-open anchors, lane reuse/creation/mute and idempotence), `make test` 110/110, `make app CONFIG=debug`, `--selftest timeline-ops` and `timeline-clipboard` OK. Core model/links roadmap 3/3; composition and UI remain T-643 onward. Existing config conflicts preserved; task commit uses a separate index.
+
+T-643 · 2026-10-16 · Replaced Mic/System insertion with per-track audio clips, cached package audio/video assets, linked/connected timing and linear gain/fade/mute ramps with spectral pitch preservation. Shared Core audio segment/envelope math and absolute media/output boundaries prevent fractional-cut A/V drift; exportDuration includes audio/layer tails. Preview rebuilds for timing/routes and refreshes mixing on the same item; existing Sound controls and composition callers now use audioTracks. Export cleanup still targets mic.m4a only; missing audio is silent and invalid package paths preserve existing destinations. Verified with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`: `make test` 112/112; `make app CONFIG=debug`; new `audio-lanes` OK (legacy segment equality incl. short cuts, 53 fractional-speed cuts, four real tracks from M4A/MOV, detach/move, live item identity, decoded gain/fades/mute/pitch and 7 s tail, missing-media preview/export and traversal rejection); `audio-mix`, `export-range`, `inspector-panels` OK; regenerated M6 fixture and `parity` maxDelta=0 over 8 times. Audio-lane UI remains T-644. Existing config conflicts preserved; task commit uses a separate index.

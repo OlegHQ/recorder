@@ -19,7 +19,7 @@ struct AudioTab: View {
             VStack(alignment: .leading, spacing: 8) {
                 sourceHeading("Microphone", available: hasMic)
                 if hasMic {
-                    volumeRow(title: "Volume", volume: \.audio.micVolume, muted: micMutedBinding,
+                    volumeRow(title: "Volume", volume: "Mic", muted: micMutedBinding,
                               gestureName: "Microphone volume", source: "microphone")
                     Toggle("Reduce rumble & normalize", isOn: denoiseBinding)
                     Button("Split at Pauses") { NSApp.sendAction(#selector(EditorWindowController.splitAtPauses(_:)), to: nil, from: nil) }
@@ -40,7 +40,7 @@ struct AudioTab: View {
             VStack(alignment: .leading, spacing: 8) {
                 sourceHeading("System audio", available: hasSystemAudio)
                 if hasSystemAudio {
-                    volumeRow(title: "Volume", volume: \.audio.systemVolume, muted: systemMutedBinding,
+                    volumeRow(title: "Volume", volume: "System", muted: systemMutedBinding,
                               gestureName: "System volume", source: "system audio")
                 }
             }
@@ -75,10 +75,10 @@ struct AudioTab: View {
         }
     }
 
-    private func volumeRow(title: String, volume: WritableKeyPath<Project, Double>, muted: Binding<Bool>,
+    private func volumeRow(title: String, volume: String, muted: Binding<Bool>,
                             gestureName: String, source: String) -> some View {
         HStack(spacing: 8) {
-            LabeledSlider(title: title, value: fieldBinding(volume), range: 0...1, defaultValue: 1,
+            LabeledSlider(title: title, value: fieldBinding(volume), range: 0...2, defaultValue: 1,
                           onEditingChanged: gesture(gestureName))
             Button {
                 muted.wrappedValue.toggle()
@@ -94,9 +94,12 @@ struct AudioTab: View {
 
     // MARK: - Bindings
 
-    private func fieldBinding(_ keyPath: WritableKeyPath<Project, Double>) -> Binding<Double> {
-        Binding(get: { model.project[keyPath: keyPath] },
-                set: { newValue in model.update { $0[keyPath: keyPath] = newValue } })
+    private func fieldBinding(_ name: String) -> Binding<Double> {
+        Binding(get: { project.audioTracks.first { $0.name == name }?.volume ?? 1 },
+                set: { value in model.update { project in
+                    guard let index = project.audioTracks.firstIndex(where: { $0.name == name }) else { return }
+                    project.audioTracks[index].volume = value
+                } })
     }
 
     private func gesture(_ name: String) -> (Bool) -> Void {
@@ -104,11 +107,21 @@ struct AudioTab: View {
     }
 
     private var micMutedBinding: Binding<Bool> {
-        Binding(get: { project.audio.micMuted }, set: { newValue in model.edit("Mute microphone") { $0.audio.micMuted = newValue } })
+        Binding(get: { project.audioTracks.first { $0.name == "Mic" }?.muted ?? false }, set: { value in
+            model.edit("Mute microphone") { project in
+                guard let index = project.audioTracks.firstIndex(where: { $0.name == "Mic" }) else { return }
+                project.audioTracks[index].muted = value
+            }
+        })
     }
 
     private var systemMutedBinding: Binding<Bool> {
-        Binding(get: { project.audio.systemMuted }, set: { newValue in model.edit("Mute system audio") { $0.audio.systemMuted = newValue } })
+        Binding(get: { project.audioTracks.first { $0.name == "System" }?.muted ?? false }, set: { value in
+            model.edit("Mute system audio") { project in
+                guard let index = project.audioTracks.firstIndex(where: { $0.name == "System" }) else { return }
+                project.audioTracks[index].muted = value
+            }
+        })
     }
 
     private var denoiseBinding: Binding<Bool> {

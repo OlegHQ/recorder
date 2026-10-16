@@ -247,6 +247,10 @@ video edits, sped with the clip).
   `end - start`. Assets are opened once per file and kept alive (see the T-502 comment in `makeComposition`).
 - `makeAudioMix`: per-track input parameters, `volume × gain` per clip, `setVolumeRamp` for fades, 0 for muted tracks.
   Gain/fade/mute edits use `refreshAudioMix` (no rebuild); moves rebuild.
+  Audio fades are linear; overlapping fades use their lower envelope. Audio/video source and output boundaries are
+  converted from shared absolute times, avoiding cumulative rounding drift across fractional-speed cuts. Playback
+  preserves legacy linked pieces shorter than the current editing minimum. Missing audio files stay silent; invalid
+  package paths fail before replacing an existing export.
 - `exportDuration` includes audio clip and layer ends. Export denoise applies to `mic.m4a` only.
 - The state snapshot (§8.1) lists audio tracks/clips and layers (with file names and missing-file flags).
 
@@ -292,7 +296,7 @@ T-640 merges; T-648 needs T-643). T-650 last.
     `useOutputClock`; connected blocks carried by clip moves; lane push creates lanes/tracks (never Mic/System).
   - Verify: `make test FILTER=connected` (AC-AU-3: ripple delete under a take, a clip move carrying a video layer and its
     sound, collision push to a new lane, nothing deleted).
-- [ ] **T-643 Composition + mix for N audio tracks**
+- [x] **T-643 Composition + mix for N audio tracks**
   - Do: §4.7 in `FrameSource.makeComposition`/`makeAudioMix` (any package-relative audio/video file); `exportDuration`;
     PreviewView rebuilds on clip changes and refreshes the mix on gain/fade/mute.
   - Verify: new `--selftest audio-lanes` (AC-AU-1 segment equality on a legacy fixture + AC-AU-5); existing `audio-mix`,
