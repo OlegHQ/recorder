@@ -2,11 +2,12 @@
 
 Push an annotated `vMAJOR.MINOR.PATCH` tag. The release workflow tests the app on
 macOS 15, builds arm64 and x86_64 slices, verifies the universal executable, runs
-background persistence/crash recovery, GPU/color and export-sheet checks in the assembled app, then packages and publishes
+device-selection restore, background persistence/crash recovery, GPU/color and export-sheet checks in the assembled app, then packages and publishes
 `Recorder-<version>-universal.dmg`. A failed export check blocks publication.
 
-The October 2026 audio/media update ships as v0.3.1, not a claim that every v1.0
-acceptance gate passed. Visual deviations are accepted by the user. Real-device
+The October 2026 audio/media update shipped as v0.3.1; v0.3.2 additionally clears
+unavailable saved camera/microphone selections. Neither claims every v1.0 acceptance
+gate passed. Visual deviations are accepted by the user. Real-device
 permission migration, microphone latency, Intel playback and extended-duration
 capture/timeline performance remain manual checks tracked in `docs/PLAN.md`.
 Disclose these limits in release notes. Do not reset local privacy grants or quit
