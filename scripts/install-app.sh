@@ -4,7 +4,10 @@ set -eu
 
 source_app=build/Recorder.app
 destination=/Applications/Recorder.app
-requirement='identifier "space.microapps.recorder" and certificate leaf[subject.CN] = "Recorder Dev"'
+requirement='identifier "space.microapps.recorder" and (certificate leaf[subject.CN] = "Recorder Dev" or (anchor apple generic and certificate leaf[subject.OU] = "7ZH3FYV964"))'
+# Developer ID (team 7ZH3FYV964) is the released app's signer: its privacy grants still match, so never reset them.
+developer_id=0
+codesign -dvv "$source_app" 2>&1 | grep -q '^Authority=Developer ID Application:' && developer_id=1
 codesign --verify --deep --strict -R="$requirement" "$source_app"
 [ ! -L "$destination" ] || { echo "Refusing to replace a symlink: $destination" >&2; exit 1; }
 
@@ -25,7 +28,10 @@ const copies = [];
 });
 copies.forEach(app => app.terminate);
 for (let i = 0; i < 100 && copies.some(app => !app.isTerminated); i++) delay(0.1);
-if (copies.some(app => !app.isTerminated)) throw Error('Recorder did not quit. Save your work, quit all copies, then retry make install.');
+// Still running after 10 s (hung or slow quit): force it; autosave already flushed anything a normal quit would.
+copies.filter(app => !app.isTerminated).forEach(app => app.forceTerminate);
+for (let i = 0; i < 50 && copies.some(app => !app.isTerminated); i++) delay(0.1);
+if (copies.some(app => !app.isTerminated)) throw Error('Recorder could not be force-quit; quit it manually, then retry make install.');
 JXA
 
 if [ -e "$destination" ]; then mv "$destination" "$stage/Previous.app"; fi
@@ -36,8 +42,9 @@ if ! mv "$stage/Recorder.app" "$destination"; then
     fi
     exit 1
 fi
-echo "Installed $destination (Recorder Dev). Existing recordings and settings are untouched."
+echo "Installed $destination. Existing recordings and settings are untouched."
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$destination"
+if [ "$developer_id" -eq 1 ]; then echo 'Signed with Developer ID: existing permissions kept. Run: open /Applications/Recorder.app'; exit 0; fi
 
 failed=0
 for service in ScreenCapture Accessibility Camera Microphone; do

@@ -7,7 +7,13 @@ CLT      := /Library/Developer/CommandLineTools/Library/Developer
 TESTFLAGS := -Xswiftc -F -Xswiftc $(CLT)/Frameworks -Xlinker -F -Xlinker $(CLT)/Frameworks \
              -Xlinker -rpath -Xlinker $(CLT)/Frameworks -Xlinker -rpath -Xlinker $(CLT)/usr/lib
 # Stable identity keeps TCC grants (Screen Recording, Accessibility) across rebuilds. `-` = ad-hoc (grants reset every build).
-SIGN_ID  ?= $(shell security find-identity -p codesigning | grep -q "Recorder Dev" && echo "Recorder Dev" || echo -)
+# A Developer ID in the keychain wins: same signer as the released app, so installs keep its grants. It lives in
+# recorder-signing.keychain (empty password, so it unlocks over SSH; the key is already in plain text in .apple).
+SIGN_KC  := $(HOME)/Library/Keychains/recorder-signing.keychain-db
+DEV_ID   := $(shell security find-identity -v -p codesigning | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+SIGN_ID  ?= $(or $(DEV_ID),$(shell security find-identity -p codesigning | grep -q "Recorder Dev" && echo "Recorder Dev" || echo -))
+# Over SSH the login keychain is locked ("User interaction is not allowed"); unlock it in the terminal first.
+UNLOCK   := kc="$$HOME/Library/Keychains/login.keychain-db"; security show-keychain-info "$$kc" >/dev/null 2>&1 || security unlock-keychain "$$kc"
 CONFIG   ?= release
 GALLERY_PNG ?= build/signal-ui-gallery.png
 
@@ -18,9 +24,10 @@ build:
 # make test                 -> all tests
 # make test FILTER=timeMap  -> one test / suite
 test:
-	swift test $(TESTFLAGS) $(if $(FILTER),--filter $(FILTER))
+	DEVELOPER_DIR=$(CLT:/Library/Developer=) swift test $(TESTFLAGS) $(if $(FILTER),--filter $(FILTER))
 
 app: build
+	@[ ! -e "$(SIGN_KC)" ] || security unlock-keychain -p "" "$(SIGN_KC)"
 	APP="$(APP)" BINARY=".build/$(CONFIG)/Recorder" VERSION="$(VERSION)" BUILD="$(BUILD)" SIGN_ID="$(SIGN_ID)" scripts/assemble-app.sh
 
 run: app
@@ -38,8 +45,8 @@ gallery-png: app
 	open $(GALLERY_PNG)
 
 install:
-	$(MAKE) cert
-	$(MAKE) app APP=build/Recorder.app SIGN_ID="Recorder Dev"
+	$(if $(DEV_ID),,$(MAKE) cert)
+	$(MAKE) app APP=build/Recorder.app SIGN_ID="$(or $(DEV_ID),Recorder Dev)"
 	sh scripts/install-app.sh
 
 uninstall:
@@ -51,7 +58,7 @@ clean:
 # One-time: self-signed code-signing identity in the login keychain (asks for the keychain password once).
 # Remove with: security delete-identity -c "Recorder Dev"
 cert:
-	@set -eu; \
+	@set -eu; $(UNLOCK); \
 	if security find-identity -p codesigning | grep -q '"Recorder Dev"'; then \
 	  echo "Recorder Dev already exists"; \
 	else \
