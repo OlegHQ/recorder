@@ -11,8 +11,49 @@ public enum Edge: Sendable {
 /// clips live) goes only through `TimeMap`. See docs/SPEC.md §7.4.
 public extension Project {
     var videoLayerLanes: [Int] { Set(layers.filter { $0.kind == .video }.map(\.track)).sorted() }
-    private func importedAudioTrack(start: Double, end: Double) -> Int {
+
+    @discardableResult
+    mutating func replaceLayerMedia(_ id: UUID, kind: LayerBlock.Kind, file: String, duration: Double, rect: NormRect, hasAudio: Bool) -> Bool {
+        guard let index = layers.firstIndex(where: { $0.id == id.uuidString }), file.hasPrefix("media/"), !file.split(separator: "/").contains(".."),
+              duration.isFinite, kind == .image || duration >= 0.5 else { return false }
+        let before = self
+        let original = layers[index]
+        let sound = audioClips.first { $0.link == .layer && $0.layer == original.id }
+        let length = kind == .video ? min(original.end - original.start, duration) : original.end - original.start
+        guard let output = TimeMap(clips).outputTime(atSource: original.start) else { return false }
+        layers.remove(at: index)
+        guard let track = freeLayerTrack(kind: kind, start: output, end: output + length, preferred: original.track) else { self = before; return false }
+        var replacement = original
+        replacement.kind = kind; replacement.file = file; replacement.mediaStart = 0; replacement.end = original.start + length; replacement.rect = rect; replacement.track = track
+        layers.append(replacement); layers.sort { $0.start < $1.start }
+        audioClips.removeAll { $0.link == .layer && $0.layer == original.id }
+        if kind == .video, hasAudio {
+            guard let start = TimeMap(clips).outputTime(atSource: original.start),
+                  let audioID = addImportedAudio(file: file, atOutput: start, duration: length, layer: original.id,
+                                                 matching: sound.map { before.audioTracks[$0.track] }) else { self = before; return false }
+            if let sound, let audioIndex = audioClips.firstIndex(where: { $0.id == audioID.uuidString }) {
+                audioClips[audioIndex].gain = sound.gain; audioClips[audioIndex].fadeIn = sound.fadeIn; audioClips[audioIndex].fadeOut = sound.fadeOut
+            }
+        }
+        guard checkInvariants(mediaDurations: kind == .video ? [file: duration] : [:]) == nil else { self = before; return false }
+        return true
+    }
+    private func freeLayerTrack(kind: LayerBlock.Kind, start: Double, end: Double, preferred: Int) -> Int? {
+        func available(_ track: Int) -> Bool {
+            !layers.contains { layer in
+                guard layer.track == track, let range = outputRange(layer, connected: true) else { return false }
+                return range.start < end - 1e-9 && range.end > start + 1e-9
+            }
+        }
+        var track = preferred
+        while !available(track) { track += 1 }
+        if kind == .video, videoLayerLanes.count >= 4, !videoLayerLanes.contains(track) { return videoLayerLanes.first(where: available) }
+        return track
+    }
+
+    private func importedAudioTrack(start: Double, end: Double, matching settings: AudioTrack? = nil) -> Int {
         for track in audioTracks.indices where audioTracks[track].name.hasPrefix("Audio ") {
+            if let settings, audioTracks[track].volume != settings.volume || audioTracks[track].muted != settings.muted { continue }
             if !audioClips.contains(where: { audio in
                 guard audio.track == track, let range = outputRange(audio, connected: audio.isConnected) else { return false }
                 return range.start < end - 1e-9 && range.end > start + 1e-9
@@ -22,16 +63,16 @@ public extension Project {
     }
 
     @discardableResult
-    mutating func addImportedAudio(file: String, atOutput time: Double, duration: Double, layer: String? = nil) -> UUID? {
+    mutating func addImportedAudio(file: String, atOutput time: Double, duration: Double, layer: String? = nil, matching settings: AudioTrack? = nil) -> UUID? {
         guard file.hasPrefix("media/"), !file.split(separator: "/").contains(".."),
               time.isFinite, time >= 0, duration.isFinite, duration >= 0.1 else { return nil }
         let before = self
         extendAudioClock(toOutput: time)
-        let track = importedAudioTrack(start: time, end: time + duration)
+        let track = importedAudioTrack(start: time, end: time + duration, matching: settings)
         if track == audioTracks.count {
             var number = 1
             while audioTracks.contains(where: { $0.name == "Audio \(number)" }) { number += 1 }
-            audioTracks.append(AudioTrack(name: "Audio \(number)"))
+            audioTracks.append(AudioTrack(name: "Audio \(number)", volume: settings?.volume ?? 1, muted: settings?.muted ?? false))
         }
         let start = TimeMap(clips).sourceTime(atOutput: time)
         let id = UUID()
@@ -51,20 +92,7 @@ public extension Project {
         let length = kind == .video ? min(duration, TimeMap(clips).outputDuration - time) : duration
         guard length >= 0.5 else { return nil }
         extendAudioClock(toOutput: time)
-        var track = preferredTrack
-        while layers.contains(where: { layer in
-            guard layer.track == track, let range = outputRange(layer, connected: true) else { return false }
-            return range.start < time + length - 1e-9 && range.end > time + 1e-9
-        }) { track += 1 }
-        if kind == .video, videoLayerLanes.count >= 4, !videoLayerLanes.contains(track) {
-            guard let available = videoLayerLanes.first(where: { lane in
-                !layers.contains { layer in
-                    guard layer.track == lane, let range = outputRange(layer, connected: true) else { return false }
-                    return range.start < time + length - 1e-9 && range.end > time + 1e-9
-                }
-            }) else { self = before; return nil }
-            track = available
-        }
+        guard let track = freeLayerTrack(kind: kind, start: time, end: time + length, preferred: preferredTrack) else { self = before; return nil }
         let start = TimeMap(clips).sourceTime(atOutput: time)
         let id = UUID()
         layers.append(LayerBlock(id: id.uuidString, kind: kind, start: start, end: start + length, file: file, track: track, rect: rect))
@@ -1026,7 +1054,7 @@ public extension Project {
     }
 
     @discardableResult
-    mutating func linkAudio(_ id: UUID, to link: AudioClip.Link) -> Bool {
+    mutating func linkAudio(_ id: UUID, to link: AudioClip.Link, layer targetLayer: String? = nil) -> Bool {
         guard audioClips.contains(where: { $0.id == id.uuidString }) else { return false }
         let before = self
         let otherIDs = Set(audioClips.filter { $0.id != id.uuidString }.map(\.id))
@@ -1043,7 +1071,7 @@ public extension Project {
                     return (TimeRange(start: start, end: start + $0.outputDuration), nil)
                 }
             case .camera: targets = cameraClips.compactMap { camera in outputRange(camera, connected: false).map { ($0, nil) } }
-            case .layer: targets = layers.filter { $0.kind == .video && $0.file == audio.file }.compactMap { layer in
+            case .layer: targets = layers.filter { $0.kind == .video && $0.file == audio.file && (targetLayer == nil || $0.id == targetLayer) }.compactMap { layer in
                 outputRange(layer, connected: true).map { ($0, layer.id) }
             }
             }
@@ -1876,15 +1904,36 @@ public extension Project {
         assert(checkInvariants() == nil)
     }
 
-    /// SPEC §7.3 `⌘D`: "duplicate selected zoom/mask after itself" — a copy of `id`'s block
-    /// (same scale/mode/center/instant/enabled, or opacity/rect for a mask), placed in the free
-    /// gap right after it. Returns the copy's id, or `nil` if `id` isn't a zoom/mask or there's no
-    /// room. Layout isn't in SPEC's keyboard map for `⌘D`.
     @discardableResult
     mutating func duplicateBlock(_ id: UUID) -> UUID? {
         let key = id.uuidString
         let newID = UUID()
-        if let zoom = zooms.first(where: { $0.id == key }) {
+        if let layer = layers.first(where: { $0.id == key }), let range = outputRange(layer, connected: true) {
+            let before = self
+            let length = range.end - range.start
+            extendAudioClock(toOutput: range.end)
+            let start = TimeMap(clips).sourceTime(atOutput: range.end)
+            var copy = layer; copy.id = newID.uuidString; copy.start = start; copy.end = start + length
+            guard let track = freeLayerTrack(kind: layer.kind, start: range.end, end: range.end + length, preferred: layer.track) else { self = before; return nil }
+            copy.track = track
+            layers.append(copy); layers.sort { $0.start < $1.start }
+            for audio in before.audioClips where audio.link == .layer && audio.layer == layer.id {
+                guard let interval = before.outputRange(audio, connected: true) else { continue }
+                let output = interval.start + length
+                extendAudioClock(toOutput: output)
+                var part = audio; part.id = UUID().uuidString; part.layer = copy.id
+                part.start = TimeMap(clips).sourceTime(atOutput: output); part.end = part.start + interval.end - interval.start
+                part.track = importedAudioTrack(start: output, end: output + interval.end - interval.start, matching: audioTracks[audio.track])
+                if part.track == audioTracks.count {
+                    var number = 1
+                    while audioTracks.contains(where: { $0.name == "Audio \(number)" }) { number += 1 }
+                    audioTracks.append(AudioTrack(name: "Audio \(number)", volume: audioTracks[audio.track].volume, muted: audioTracks[audio.track].muted))
+                }
+                audioClips.append(part)
+            }
+            audioClips.sort { $0.start < $1.start }
+            guard checkInvariants() == nil else { self = before; return nil }
+        } else if let zoom = zooms.first(where: { $0.id == key }) {
             guard zooms.addBlock(atSource: zoom.end, length: zoom.end - zoom.start, duration: timelineSourceDuration, minLength: Self.minBlockLength, make: { start, end in
                 Zoom(id: newID.uuidString, start: start, end: end, scale: zoom.scale, mode: zoom.mode, center: zoom.center, instant: zoom.instant, enabled: zoom.enabled)
             }) != nil else { return nil }

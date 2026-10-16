@@ -32,27 +32,27 @@ extension EditorModel {
         return slots
     }
 
-    func chooseMedia(in window: NSWindow?, atOutput time: Double? = nil, slot: TimeRange? = nil, track: Int = 0) {
+    func chooseMedia(in window: NSWindow?, atOutput time: Double? = nil, slot: TimeRange? = nil, track: Int = 0, replacing: UUID? = nil) {
         guard !voiceover.isActive, mediaImportStatus == nil, let window, window.attachedSheet == nil else { return }
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = slot == nil ? [.image, .movie, .audio] : [.image]
-        panel.allowsMultipleSelection = slot == nil
+        panel.allowedContentTypes = replacing != nil ? [.image, .movie] : slot == nil ? [.image, .movie, .audio] : [.image]
+        panel.allowsMultipleSelection = slot == nil && replacing == nil
         panel.canChooseDirectories = false
-        panel.prompt = "Add Media"
+        panel.prompt = replacing == nil ? "Add Media" : "Replace Media"
         let output = time ?? playhead
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let self else { return }
-            self.addMediaFiles(panel.urls, atOutput: output, slot: slot, track: track, window: window)
+            self.addMediaFiles(panel.urls, atOutput: output, slot: slot, track: track, window: window, replacing: replacing)
         }
     }
 
-    func addMediaFiles(_ urls: [URL], atOutput time: Double, slot: TimeRange? = nil, track: Int = 0, window: NSWindow?) {
+    func addMediaFiles(_ urls: [URL], atOutput time: Double, slot: TimeRange? = nil, track: Int = 0, window: NSWindow?, replacing: UUID? = nil) {
         Task { @MainActor in
             for url in urls {
-                do { try await importMedia(url, atOutput: time, slot: slot, track: track) }
+                do { try await importMedia(url, atOutput: time, slot: slot, track: track, replacing: replacing) }
                 catch {
                     let alert = NSAlert()
-                    alert.messageText = "Couldn’t add \(url.lastPathComponent)"
+                    alert.messageText = "Couldn’t \(replacing == nil ? "add" : "replace with") \(url.lastPathComponent)"
                     alert.informativeText = error.localizedDescription
                     if let window, window.isVisible { await alert.beginSheetModal(for: window) }
                     else { NSLog("Media import failed: %@", url.lastPathComponent) }
@@ -94,7 +94,7 @@ extension EditorModel {
     }
 
     @discardableResult
-    func importMedia(_ url: URL, atOutput time: Double, slot: TimeRange? = nil, track: Int = 0) async throws -> UUID {
+    func importMedia(_ url: URL, atOutput time: Double, slot: TimeRange? = nil, track: Int = 0, replacing: UUID? = nil) async throws -> UUID {
         @Sendable func fail(_ message: String) -> NSError { NSError(domain: "Recorder.MediaImport", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
         guard !voiceover.isActive, mediaImportStatus == nil else { throw fail("Finish the current recording or import first.") }
         guard !isEditingGesture else { throw fail("Finish or cancel the current drag before adding media.") }
@@ -156,19 +156,33 @@ extension EditorModel {
         let id: UUID?
         if let kind = copied.kind {
             let canvas = outputSize(aspect: project.output.aspect, croppedSource: CGSize(width: Double(project.source.pixelWidth) * project.crop.w, height: Double(project.source.pixelHeight) * project.crop.h), longEdge: 1000)
-            var width = 0.64, height = 0.64 * (canvas.width / max(1, canvas.height)) / (copied.width / copied.height)
-            if height > 0.8 { width *= 0.8 / height; height = 0.8 }
-            let idle = slot ?? idleSlots.first { $0.start <= time && $0.end > time }
-            let start = kind == .image ? idle?.start ?? time : time
-            let length = kind == .image ? idle.map { $0.end - $0.start } ?? 4 : copied.duration
-            id = trial.addLayer(kind: kind, file: copied.file, atOutput: start, duration: length,
-                                rect: NormRect(x: (1 - width) / 2, y: (1 - height) / 2, w: width, h: height), hasAudio: copied.audio, track: track)
-        } else { id = trial.addImportedAudio(file: copied.file, atOutput: time, duration: copied.duration) }
+            let aspect = copied.width / copied.height
+            if let replacing {
+                guard let old = project.layers.first(where: { $0.id == replacing.uuidString }) else { throw fail("The layer no longer exists.") }
+                var rect = old.rect
+                if rect != NormRect() {
+                    rect.h = min(1, rect.w * canvas.width / canvas.height / aspect)
+                    rect.w = rect.h * canvas.height / canvas.width * aspect
+                    rect.x = min(1 - rect.w, max(0, old.rect.x + (old.rect.w - rect.w) / 2))
+                    rect.y = min(1 - rect.h, max(0, old.rect.y + (old.rect.h - rect.h) / 2))
+                }
+                id = trial.replaceLayerMedia(replacing, kind: kind, file: copied.file, duration: copied.duration, rect: rect, hasAudio: copied.audio) ? replacing : nil
+            } else {
+                let idle = slot ?? idleSlots.first { $0.start <= time && $0.end > time }
+                let start = kind == .image ? idle?.start ?? time : time
+                let length = kind == .image ? idle.map { $0.end - $0.start } ?? 4 : copied.duration
+                id = trial.addLayer(kind: kind, file: copied.file, atOutput: start, duration: length,
+                                    rect: layerPlacementRect(.card, aspect: aspect, canvas: canvas)!, hasAudio: copied.audio, track: track)
+            }
+        } else {
+            guard replacing == nil else { throw fail("Choose an image or video to replace a layer.") }
+            id = trial.addImportedAudio(file: copied.file, atOutput: time, duration: copied.duration)
+        }
         guard let id else {
             if copied.kind == .video, project.videoLayerLanes.count >= 4 { throw fail("Only four layer lanes with video are supported. Choose a free range on an existing video lane.") }
             throw fail("There is not enough timeline or media duration at this position.")
         }
-        edit("Add Media") { $0 = trial }
+        edit(replacing == nil ? "Add Media" : "Replace Media") { $0 = trial }
         committed = true
         isPlaying = false; selectedClips = []; selection = [id]
         return id

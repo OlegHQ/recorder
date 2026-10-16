@@ -16,6 +16,7 @@ import RecorderCore
     private(set) var previewPlaybackEnd: Double?
     @ObservationIgnored lazy var voiceover = VoiceoverRecorder(model: self)
     var mediaImportStatus: String?
+    @ObservationIgnored var layerPlacementTask: Task<Void, Never>?
     @ObservationIgnored lazy var recordingIdleRanges = idleRanges(events: events.events + [InputEvent(t: project.source.duration, k: .move)])
     @ObservationIgnored var idleSlotCache: (clips: [Clip], layers: [LayerBlock], ranges: [TimeRange])?
     var selection: Set<UUID> = [] {
@@ -65,7 +66,8 @@ import RecorderCore
     }
 
     /// Find a retained point inside an effect interval, accounting for cuts and clip speed.
-    func previewTime(start: Double, end: Double) -> Double? {
+    func previewTime(start: Double, end: Double, connected: Bool = false) -> Double? {
+        if connected { return timeMap.outputTime(atSource: start).map { $0 + (end - start) / 2 } }
         for clip in project.clips {
             let lower = max(start, clip.sourceStart), upper = min(end, clip.sourceEnd)
             if upper > lower { return timeMap.outputTime(atSource: (lower + upper) / 2) }
@@ -74,11 +76,11 @@ import RecorderCore
     }
 
     /// Replay the retained effect interval with context on both sides, using output time.
-    func replayEffect(start: Double, end: Double) {
+    func replayEffect(start: Double, end: Double, connected: Bool = false) {
         var output = 0.0
-        var first: Double?
-        var last: Double?
-        for clip in project.clips {
+        var first = connected ? timeMap.outputTime(atSource: start) : nil
+        var last = first.map { $0 + end - start }
+        for clip in project.clips where !connected {
             let lower = max(start, clip.sourceStart), upper = min(end, clip.sourceEnd)
             if upper > lower {
                 if first == nil { first = output + (lower - clip.sourceStart) / clip.timeScale }
@@ -90,7 +92,7 @@ import RecorderCore
         isPlaying = false
         previewShowsResult = true
         playhead = max(0, first - 0.6)
-        previewPlaybackEnd = min(timeMap.outputDuration, last + 1.5)
+        previewPlaybackEnd = min(connected ? project.exportDuration : timeMap.outputDuration, last + 1.5)
         isPlaying = true
     }
 

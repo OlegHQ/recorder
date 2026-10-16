@@ -217,6 +217,12 @@ video edits, sped with the clip).
     track. Default look per D8.
   - **Audio** → unlinked `AudioClip` at the playhead, length = file duration, on the first free extra track (D14).
 - Occupied spot → next lane/track of the same kind (create if needed).
+- Replace Media uses the same validation and owned-copy path, accepts one image or movie, and commits one undo step.
+  It keeps the layer id, anchor and styling, starts the replacement at media time zero, and shortens a video layer
+  if its new file is shorter. Non-Full rectangles keep their centre and width where possible, adapting to the new
+  aspect. Currently linked sound is replaced with the new video's sound, retaining the first linked clip's
+  gain/fades and track volume/mute;
+  detached sound and every previous media file remain untouched for undo.
 - `idleRanges(events:minDuration:) -> [TimeRange]` (Core, beside `typingRanges`): spans with no key and no mouse-down
   for ≥ 3 s, padded inward 0.25 s.
 
@@ -226,6 +232,19 @@ video edits, sped with the clip).
   Backdrop (None / Dim / Blur), Motion (Fade / Scale / Slide), Fade in / Fade out (0–3 s), In front of camera; video adds
   "Sound: linked on Audio 1 · Detach Audio" (or "Detached · Link Back"). Selected layer in the preview gets the
   `SelectionRectView` handles (aspect locked, T-632 snapping, T-620 Esc chain); editing the rect switches to Free.
+- Presets write the existing rectangle, with no additional project keys: Card is centred at 64 % width (maximum
+  80 % height); Full fills the canvas; Corner is 28 % width (maximum 80 % height), using 2 % edge margins and the
+  shared 3×3 position grid. Named presets are inferred from their geometry after undo/reopening; other rects are Free.
+- Layer handles use the output canvas, not the padded screen. They appear only while paused inside the selected
+  layer's interval in Edit region; that preview shows its final rect/opacity without fade/motion offsets. View result
+  and playback restore the actual composition. Selection does not move the playhead; the thumbnail/Go to interval
+  and Replay change do so explicitly. Connected layer previews retain their output-time duration across speed edits.
+  Rectangle drags/nudges are one undo step, Escape rolls them back without deselecting, and reselection/window resize
+  cancels an unfinished drag. Moves snap to canvas/other active layer edges and centres; Command bypasses snapping.
+- Detach Audio changes only the link, never the video or audio position. Link Back targets the selected video only
+  and requires detached sound from the same file overlapping it; absent sound leaves Link Back disabled.
+  Duplicate places a full layer copy immediately after itself on a free lane, copying only its currently linked
+  sound with the same in-points and mix settings. The four-video-lane ceiling also applies to duplicate/replace.
 - Compositor pass after cursor, before camera (`aboveCamera` layers after camera). Opacity = the existing clip-fade
   smoothstep over `fadeIn`/`fadeOut`. Motion: scale 0.94→1, slide +4 % of canvas height → 0, same ramp. Backdrop: `dim`
   = black quad α 0.5 × opacity over screen/cursor; `blur` = the existing background blur kernel on the screen layer, mixed
@@ -333,10 +352,12 @@ T-640 merges; T-648 needs T-643). T-650 last.
     the layer frames at the right times; `audio-lanes` with the layer's sound detached and moved;
     `make test FILTER=layerBlocks` covers four-lane reuse/refusal. The fixture also checks native scrubbing/playback,
     rotation, four simultaneous layer decoders plus camera, fifth-lane import refusal and existing-export preservation.
-- [ ] **T-649 Layer inspector + direct manipulation**
+- [~] **T-649 Layer inspector + direct manipulation**
   - Do: LayerPanel; `SelectionRectView` on the selected layer in `PreviewView`; layer context menu incl. Detach Audio.
-  - Verify: `inspector-panels`; new selftest `layer-rect` (drag, resize, Esc reverts, one undo); HUMAN: judge Card + Dim
+  - Verify: `make test FILTER=layerEdits`; `inspector-panels`; new selftest `layer-rect` (drag, resize, Esc reverts, one undo); HUMAN: judge Card + Dim
     and a playing video layer against the prototype.
+  - Machine checks pass; HUMAN visual/interaction comparison remains pending. Native inspector/editor PNGs are at
+    `/tmp/recorder-t649-panel-*.png` and `/tmp/recorder-t649-editor-*.png`; `/tmp/LayersFixture.recorder` is disposable.
 - [ ] **T-650 Docs + snapshot**
   - Do: SPEC §5 package listing gains `voice/`, `media/` and the new keys; state snapshot lists audio and layers;
     tick the roadmap block in PLAN.md.

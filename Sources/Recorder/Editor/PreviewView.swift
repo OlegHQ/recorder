@@ -75,6 +75,8 @@ final class PreviewView: MTKView {
     private let zoomTargetView = SelectionRectView(frame: .zero)
     private var zoomTargetContentRect: CGRect = .zero
     private var zoomTargetGestureActive = false
+    private let layerRectView = SelectionRectView(frame: .zero)
+    private var layerGestureID: UUID?
 
     // T-601: the mask-rect overlay — owned/created by `EditorWindowController` (`MaskRectOverlay`'s
     // own doc comment: "PreviewView belongs to another lane"), mounted here through this one settable
@@ -148,6 +150,15 @@ final class PreviewView: MTKView {
             self.updateZoomTargetOverlay()
         }
         addSubview(zoomTargetView)
+        layerRectView.isHidden = true
+        layerRectView.allowsCreation = false
+        layerRectView.autoresizingMask = [.width, .height]
+        layerRectView.onChange = { [weak self] rect in self?.layerRectChanged(rect) }
+        layerRectView.onKeyboardEditingChanged = { [weak self] editing in
+            if editing { self?.beginLayerGesture() } else { self?.endLayerGesture() }
+        }
+        layerRectView.onCancelDrag = { [weak self] in self?.cancelLayerGesture() }
+        addSubview(layerRectView)
 
         loadingLabel.font = Theme.headingFont(24)
         loadingLabel.textColor = Theme.textPrimary
@@ -195,7 +206,7 @@ final class PreviewView: MTKView {
     override var acceptsFirstResponder: Bool { true }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if newWindow == nil { pause() }
+        if newWindow == nil { cancelLayerGesture(); pause() }
         if newWindow == nil, model.voiceover.preview === self { model.voiceover.discard() }
         super.viewWillMove(toWindow: newWindow)
     }
@@ -217,9 +228,11 @@ final class PreviewView: MTKView {
     var debugIsSeeking: Bool { isSeeking }
 
     override func setFrameSize(_ newSize: NSSize) {
+        if newSize != frame.size { cancelLayerGesture() }
         super.setFrameSize(newSize)
         needsDisplay = true
         updateZoomTargetOverlay()
+        updateLayerOverlay()
         onResize?(newSize)
     }
 
@@ -235,6 +248,7 @@ final class PreviewView: MTKView {
         didSet {
             guard hoverTime != oldValue else { return }
             needsDisplay = true
+            updateLayerOverlay()
             guard !model.isPlaying else { return }
             performSeek(to: hoverTime ?? model.playhead)
         }
@@ -300,6 +314,7 @@ final class PreviewView: MTKView {
     var voiceoverMonitoringMuted: Bool { player?.isMuted == true }
 
     private func observeVoiceover() {
+        updateLayerOverlay()
         voiceoverHUD.isHidden = !model.voiceover.isActive
         if model.voiceover.isActive { addSubview(voiceoverHUD, positioned: .above, relativeTo: nil) }
         withObservationTracking { _ = model.voiceover.phase } onChange: { [weak self] in
@@ -449,6 +464,8 @@ final class PreviewView: MTKView {
         switch event.keyCode {
         case 53: // Esc (SPEC "Escape"): cancel the open gesture, else keep the selection; never reach the timeline
             if cameraDragActive { cancelOperation(nil) }
+            else if layerGestureID != nil { cancelLayerGesture() }
+            else if !layerRectView.isHidden { return }
             else if zoomTargetGestureActive { zoomTargetView.cancelOperation(nil) }
             else if !zoomTargetView.isHidden || maskOverlayView?.isHidden == false { return }
             else { super.keyDown(with: event) }
@@ -475,6 +492,7 @@ final class PreviewView: MTKView {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.updateZoomTargetOverlay()
+                self.updateLayerOverlay()
                 let clips = self.model.project.clips
                 let audio = self.model.project.audioClips
                 let tracks = self.model.project.audioTracks
@@ -520,6 +538,7 @@ final class PreviewView: MTKView {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.updateZoomTargetOverlay()
+                self.updateLayerOverlay()
                 self.needsDisplay = true
                 self.observeSelection()
             }
@@ -534,6 +553,7 @@ final class PreviewView: MTKView {
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.updateLayerOverlay()
                 if self.window != nil, !self.model.voiceover.isActive {
                     if self.model.isPlaying {
                         // Keep an existing J/K/L playback rate; start only when currently paused.
@@ -551,6 +571,7 @@ final class PreviewView: MTKView {
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.updateLayerOverlay()
                 if !self.model.isPlaying, !self.model.voiceover.isActive, self.hoverTime == nil { self.performSeek(to: self.model.playhead) }
                 self.observePlayhead()
             }
@@ -767,6 +788,11 @@ final class PreviewView: MTKView {
         if isMaskSelected(), let id = model.selection.first {
             state.project.masks.removeAll { $0.id == id.uuidString }
         }
+        if let layer = selectedLayer(), let index = state.layers.firstIndex(where: { $0.block.id == layer.id }) {
+            state.layers[index].rect = layer.rect
+            state.layers[index].opacity = 1
+            state.layers[index].progress = 1
+        }
 
         compositor.render(state, to: drawable.texture, commandBuffer: commandBuffer, viewport: viewportRect)
         capture?(drawable.texture, commandBuffer)
@@ -945,6 +971,58 @@ final class PreviewView: MTKView {
         model.commitGesture("Move Zoom Target")
     }
 
+    private func selectedLayer() -> LayerBlock? {
+        guard !model.inspectorShowsProject, !model.previewShowsResult, !model.isPlaying, !model.voiceover.isActive,
+              hoverTime == nil, model.selectedClips.isEmpty, model.selection.count == 1, let id = model.selection.first,
+              let layer = model.project.layers.first(where: { $0.id == id.uuidString }),
+              let start = model.timeMap.outputTime(atSource: layer.start), model.playhead >= start,
+              model.playhead < start + layer.end - layer.start else { return nil }
+        return layer
+    }
+
+    private func updateLayerOverlay() {
+        if let id = layerGestureID, selectedLayer()?.id != id.uuidString { cancelLayerGesture() }
+        guard let layer = selectedLayer() else { layerRectView.isHidden = true; return }
+        layerRectView.isHidden = false
+        guard layerGestureID == nil, !layerRectView.isDragging else { return }
+        let canvas = viewportRectInBounds()
+        layerRectView.frame = bounds
+        layerRectView.minSize = CGSize(width: 1, height: 1)
+        layerRectView.limit = canvas
+        layerRectView.aspect = layer.rect.w * canvas.width / max(0.001, layer.rect.h * canvas.height)
+        layerRectView.snapTargets = model.project.layerStates(atOutput: model.playhead).filter { $0.block.id != layer.id }
+            .map { CropMapping.viewRect(from: $0.block.rect, imageRect: canvas) }
+        layerRectView.rect = CropMapping.viewRect(from: layer.rect, imageRect: canvas)
+        needsDisplay = true
+    }
+
+    private func beginLayerGesture() {
+        guard layerGestureID == nil, let layer = selectedLayer(), let id = UUID(uuidString: layer.id) else { return }
+        model.beginGesture(); layerGestureID = id
+    }
+
+    private func layerRectChanged(_ rect: CGRect) {
+        if layerRectView.isDragging { beginLayerGesture() }
+        guard let id = layerGestureID, selectedLayer()?.id == id.uuidString else { return }
+        let value = CropMapping.normRect(fromView: rect, imageRect: viewportRectInBounds())
+        model.update { project in
+            if let index = project.layers.firstIndex(where: { $0.id == id.uuidString }) { project.layers[index].rect = value }
+        }
+        needsDisplay = true
+    }
+
+    private func endLayerGesture() {
+        guard layerGestureID != nil else { return }
+        layerGestureID = nil; model.commitGesture("Layer Rectangle"); updateLayerOverlay()
+    }
+
+    private func cancelLayerGesture() {
+        guard layerGestureID != nil else { return }
+        layerGestureID = nil
+        if layerRectView.isDragging { layerRectView.cancelOperation(nil) }
+        model.cancelGesture(); updateLayerOverlay()
+    }
+
     // MARK: - Camera drag (SPEC §6.6 Camera tab, T-502)
 
     /// This view isn't flipped (AppKit default, bottom-left origin/y-up) — mouse points are
@@ -981,6 +1059,8 @@ final class PreviewView: MTKView {
 
     override func cancelOperation(_ sender: Any?) {
         if model.voiceover.isActive { model.voiceover.discard(); return }
+        if layerGestureID != nil { cancelLayerGesture(); return }
+        if !layerRectView.isHidden { return }
         guard cameraDragActive else { super.cancelOperation(sender); return }
         if cameraDidDrag { model.cancelGesture() }
         cameraDragActive = false
@@ -989,6 +1069,7 @@ final class PreviewView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         guard !model.voiceover.isActive else { return }
+        if !layerRectView.isHidden { layerRectView.mouseDown(with: event); return }
         if let maskOverlayView, !maskOverlayView.isHidden {
             cameraDragActive = false
             maskOverlayView.mouseDown(with: event)
@@ -1024,6 +1105,7 @@ final class PreviewView: MTKView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if !layerRectView.isHidden { layerRectView.mouseDragged(with: event); return }
         guard cameraDragActive || zoomTargetView.isHidden else { zoomTargetView.mouseDragged(with: event); return }
         if !cameraDragActive, let maskOverlayView, !maskOverlayView.isHidden { maskOverlayView.mouseDragged(with: event); return }
         guard cameraDragActive else { super.mouseDragged(with: event); return }
@@ -1051,6 +1133,9 @@ final class PreviewView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if !layerRectView.isHidden {
+            layerRectView.mouseUp(with: event); endLayerGesture(); return
+        }
         guard cameraDragActive || zoomTargetView.isHidden else {
             let wasDragging = zoomTargetView.isDragging
             zoomTargetView.mouseUp(with: event)
@@ -1071,6 +1156,146 @@ final class PreviewView: MTKView {
 // MARK: - Selftest `hover-preview <package>` (AC-TL-7)
 
 extension PreviewView {
+    @MainActor static func runLayerRectSelfTest(package: URL) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }
+        try await runLayerEditorSnapshots(package: package)
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent("layer-rect-" + UUID().uuidString + ".recorder")
+        try FileManager.default.copyItem(at: package, to: copy)
+        defer { try? FileManager.default.removeItem(at: copy) }
+        let model = try loadEditorModel(package: copy)
+        defer { model.saveNow() }
+        try await TimelineView.runLayerCommandsSelfTest(model: model)
+        guard var layer = model.project.layers.first(where: { $0.kind == .image }), let id = UUID(uuidString: layer.id) else { throw Fail(description: "Rectangle fixture") }
+        layer.start = 0; layer.end = 4; layer.rect = NormRect(x: 0.2, y: 0.2, w: 0.4, h: 0.4)
+        model.edit("Rectangle fixture") { project in
+            project.layers = [layer]; project.audioClips.removeAll { $0.link == .layer }
+        }
+        model.selection = [id]; model.inspectorShowsProject = false; model.previewShowsResult = false; model.playhead = 0.75
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 700, height: 500), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let view = PreviewView(model: model)
+        window.contentView = view; window.orderFront(nil)
+        defer { window.close() }
+        view.updateLayerOverlay()
+        let baseline = model.project, steps = model.undoStepCount
+        func event(_ type: NSEvent.EventType, _ point: CGPoint, modifiers: NSEvent.ModifierFlags = [.command]) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: modifiers, timestamp: 0,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        func drag(_ start: CGPoint, _ end: CGPoint, modifiers: NSEvent.ModifierFlags = [.command], release: Bool = true) {
+            view.mouseDown(with: event(.leftMouseDown, start, modifiers: modifiers))
+            for fraction in [0.25, 0.5, 0.75, 1] {
+                view.mouseDragged(with: event(.leftMouseDragged, CGPoint(x: start.x + (end.x - start.x) * fraction,
+                                                                       y: start.y + (end.y - start.y) * fraction), modifiers: modifiers))
+            }
+            if release { view.mouseUp(with: event(.leftMouseUp, end, modifiers: modifiers)) }
+        }
+        try check(!view.layerRectView.isHidden, "Selected layer handles")
+        var rect = view.layerRectView.rect
+        drag(CGPoint(x: rect.midX, y: rect.midY), CGPoint(x: rect.midX + 28, y: rect.midY - 14))
+        let moved = model.project
+        let canvas = view.viewportRectInBounds()
+        try check(abs(moved.layers[0].rect.x - 0.2 - 28 / canvas.width) < 1e-8 && abs(moved.layers[0].rect.y - 0.2 - 14 / canvas.height) < 1e-8,
+                  "Layer drag must use output canvas, not padded screen or flipped coordinates")
+        try check(model.undoStepCount == steps + 1 && model.layerPlacement(moved.layers[0], aspect: 16 / 9) == .free, "Drag / Free / one undo")
+        model.undo(); view.updateLayerOverlay(); try check(model.project == baseline, "Rectangle undo")
+        model.redo(); view.updateLayerOverlay(); try check(model.project == moved, "Rectangle redo")
+        model.undo(); view.updateLayerOverlay()
+        rect = view.layerRectView.rect
+        drag(CGPoint(x: rect.maxX, y: rect.maxY), CGPoint(x: rect.maxX + 35, y: rect.maxY + 25))
+        let resized = model.project.layers[0].rect
+        try check(resized.w > layer.rect.w && abs(resized.w / resized.h - layer.rect.w / layer.rect.h) < 1e-8 && model.undoStepCount == steps + 1, "Aspect-locked resize / one undo")
+        model.undo(); view.updateLayerOverlay(); rect = view.layerRectView.rect
+        drag(CGPoint(x: rect.midX, y: rect.midY), CGPoint(x: rect.midX + 25, y: rect.midY), release: false)
+        view.layerRectView.cancelOperation(nil)
+        try check(model.project == baseline && model.undoStepCount == steps && model.selection == [id] && !view.layerRectView.isDragging, "Escape must rollback gesture, preserve selection and add no undo")
+        view.cancelOperation(nil); try check(model.selection == [id], "Second preview Escape must not deselect the timeline")
+        let arrow = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.shift], timestamp: 0, windowNumber: window.windowNumber,
+                                    context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 124)!
+        view.layerRectView.keyDown(with: arrow); view.layerRectView.keyDown(with: arrow)
+        view.layerRectView.keyUp(with: arrow)
+        try check(model.undoStepCount == steps + 1 && abs(model.project.layers[0].rect.x - 0.2 - 20 / canvas.width) < 1e-8, "Held arrow / Shift nudge / one undo")
+        model.undo(); view.updateLayerOverlay()
+        rect = view.layerRectView.rect
+        let target = CGPoint(x: rect.midX + canvas.midX - 3 - rect.minX, y: rect.midY)
+        drag(CGPoint(x: rect.midX, y: rect.midY), target, modifiers: [])
+        try check(abs(view.layerRectView.rect.minX - canvas.midX) < 0.01, "Layer canvas-center snapping")
+        model.undo(); view.updateLayerOverlay(); rect = view.layerRectView.rect
+        drag(CGPoint(x: rect.midX, y: rect.midY), target)
+        try check(abs(view.layerRectView.rect.minX - canvas.midX + 3) < 0.01, "Command bypasses snapping")
+        model.undo(); view.updateLayerOverlay(); rect = view.layerRectView.rect
+        drag(CGPoint(x: rect.midX, y: rect.midY), CGPoint(x: rect.midX - 2000, y: rect.midY + 2000))
+        try check(model.project.layers[0].rect.x >= 0 && model.project.layers[0].rect.y >= 0 && model.project.checkInvariants() == nil, "Layer bounds clamp")
+        model.undo(); view.updateLayerOverlay()
+        rect = view.layerRectView.rect
+        drag(CGPoint(x: rect.midX, y: rect.midY), CGPoint(x: rect.midX + 25, y: rect.midY), release: false)
+        model.selection = []; view.updateLayerOverlay()
+        try check(model.project == baseline && model.undoStepCount == steps && !view.layerRectView.isDragging, "Reselection cancels the open rectangle gesture")
+        model.selection = [id]; view.updateLayerOverlay()
+        model.previewShowsResult = true; view.updateLayerOverlay(); try check(view.layerRectView.isHidden, "View result hides handles")
+        model.previewShowsResult = false; model.playhead = 5; view.updateLayerOverlay(); try check(view.layerRectView.isHidden, "Outside interval hides handles")
+        model.playhead = 0.75; view.setFrameSize(CGSize(width: 500, height: 550)); view.updateLayerOverlay()
+        let mapped = CropMapping.normRect(fromView: view.layerRectView.rect, imageRect: view.viewportRectInBounds())
+        try check(abs(mapped.x - layer.rect.x) + abs(mapped.y - layer.rect.y) + abs(mapped.w - layer.rect.w) + abs(mapped.h - layer.rect.h) < 1e-8, "Resize / letterbox mapping")
+        let oldFile = model.project.layers[0].file, beforeReplace = model.project, replaceSteps = model.undoStepCount
+        let replacement = try await model.importMedia(copy.appendingPathComponent("media/video.mov"), atOutput: 0.75, replacing: id)
+        try check(replacement == id && model.project.layers[0].kind == .video && model.project.audioClips.contains { $0.layer == id.uuidString } && model.undoStepCount == replaceSteps + 1,
+                  "Replace video, linked sound and one undo")
+        let newFile = model.project.layers[0].file
+        model.undo(); try check(model.project == beforeReplace && FileManager.default.fileExists(atPath: copy.appendingPathComponent(newFile).path)
+                               && FileManager.default.fileExists(atPath: copy.appendingPathComponent(oldFile).path), "Replacement undo must retain immutable old and new media")
+        model.redo()
+        model.previewShowsResult = false; model.playhead = 0.75
+        _ = try await view.captureRenderedFrame(atOutput: 0.75)
+        view.updateLayerOverlay(); try check(!view.layerRectView.isHidden, "Video edit handles")
+        view.player?.isMuted = true
+        view.togglePlayPause()
+        try await Task.sleep(for: .milliseconds(700))
+        try check(model.playhead > 1 && view.layerRectView.isHidden, "A selected video plays without edit handles or frozen motion")
+        view.togglePlayPause()
+        let imageReplacement = try await model.importMedia(copy.appendingPathComponent("media/card.png"), atOutput: 0.75, replacing: id)
+        try check(imageReplacement == id && model.project.layers[0].kind == .image && !model.project.audioClips.contains { $0.layer == id.uuidString }, "Replace video with image removes linked sound")
+        let count = try FileManager.default.contentsOfDirectory(atPath: copy.appendingPathComponent("media").path).count
+        let valid = model.project, validSteps = model.undoStepCount
+        var refused = false
+        do { _ = try await model.importMedia(copy.appendingPathComponent("layer-tone.m4a"), atOutput: 0, replacing: id) }
+        catch { refused = true }
+        try check(refused && model.project == valid && model.undoStepCount == validSteps
+                  && (try FileManager.default.contentsOfDirectory(atPath: copy.appendingPathComponent("media").path).count) == count, "Audio-only replacement must fail and clean its copy")
+        print("layer-rect: native drag/resize/nudge, aspect/output mapping, snapping/Command, bounds, Escape, undo/redo, context actions and immutable replacement verified")
+    }
+
+    @MainActor private static func runLayerEditorSnapshots(package: URL) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent("layer-editor-" + UUID().uuidString + ".recorder")
+        try FileManager.default.copyItem(at: package, to: copy)
+        defer { try? FileManager.default.removeItem(at: copy) }
+        guard let window = EditorWindowController.makeOffscreen(package: copy), let capture = window.contentView?.superview else { throw Fail(description: "Layer editor window") }
+        func preview(in view: NSView) -> PreviewView? { (view as? PreviewView) ?? view.subviews.compactMap { preview(in: $0) }.first }
+        guard let view = preview(in: capture) else { throw Fail(description: "Layer editor preview") }
+        defer { view.model.saveNow(); window.close() }
+        window.appearance = NSAppearance(named: .darkAqua); window.orderFront(nil)
+        for (name, width, height, time) in [("selected", 1440.0, 1000.0, 0.75), ("minimum", 1000, 700, 0.75),
+                                          ("video", 1440, 1000, 2.25), ("missing", 1440, 1000, 8.25)] {
+            guard let layer = view.model.project.layers.first(where: { name == "video" ? $0.kind == .video : name == "missing" ? $0.file.contains("missing") : $0.kind == .image }),
+                  let id = UUID(uuidString: layer.id) else { throw Fail(description: "Layer editor selection") }
+            window.setContentSize(CGSize(width: width, height: height))
+            view.model.selection = [id]; view.model.previewShowsResult = name == "video"
+            view.model.playhead = time
+            try await Task.sleep(for: .milliseconds(600))
+            capture.layoutSubtreeIfNeeded()
+            let frame = try await view.captureRenderedFrame(atOutput: time)
+            let overlay = NSImageView(frame: view.bounds)
+            overlay.image = NSImage(cgImage: frame, size: view.bounds.size); overlay.imageScaling = .scaleAxesIndependently
+            view.addSubview(overlay, positioned: .below, relativeTo: view.subviews.first)
+            defer { overlay.removeFromSuperview() }
+            guard let bitmap = capture.bitmapImageRepForCachingDisplay(in: capture.bounds) else { throw Fail(description: "Layer editor bitmap") }
+            capture.cacheDisplay(in: capture.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/recorder-t649-editor-\(name).png"))
+        }
+    }
+
     @MainActor static func runVideoLayersSelfTest(package: URL) async throws {
         struct Fail: Error, CustomStringConvertible { let description: String }
         func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }

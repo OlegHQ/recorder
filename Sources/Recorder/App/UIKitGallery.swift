@@ -626,6 +626,11 @@ private struct GalleryInspectorStudies: View {
                     }.frame(maxWidth: .infinity, alignment: .leading)
                         .modifier(GalleryReveal(enabled: true, order: 1, replay: replay))
                 }.id("keys")
+                if let layer = model.project.layers.first, let id = UUID(uuidString: layer.id) {
+                    TechPanel(index: "07", title: "Media layer") {
+                        LayerPanel(model: model, layerID: id).frame(width: InspectorView.width - 36)
+                    }.frame(width: InspectorView.width).fixedSize(horizontal: false, vertical: true)
+                }
                 if let preparationError {
                     Text(preparationError).foregroundStyle(Theme.dangerColor)
                 }
@@ -642,6 +647,7 @@ private struct GalleryInspectorStudies: View {
             do {
                 try await WorkspaceMedia.prepare(at: url)
                 try Task.checkCancellation()
+                _ = try await fixture.importMedia(url.appendingPathComponent("screen.mov"), atOutput: 0)
                 mediaReady = true
             } catch is CancellationError { }
             catch { preparationError = "Sample unavailable: " + error.localizedDescription }

@@ -1438,6 +1438,7 @@ enum SelfTest {
         // step. Cursor: size/style edits persist via autosave.
         "inspector-panels": { _ in
             try await MainActor.run { try TimelineView.runAudioUISelfTest() }
+            try await LayerPanel.runSelfTest()
             struct Fail: Error, CustomStringConvertible { let description: String }
             let fm = FileManager.default
             let tmp = fm.temporaryDirectory.appendingPathComponent("recorder-selftest-inspector-panels-\(UUID().uuidString)")
@@ -3569,6 +3570,11 @@ enum SelfTest {
         },
         // T-635: a 2-window package (640x360 `screen.mov`, 400x400 `window-1.mov`) with the second window visible
         // for the back half; pointer events are global points. Feed it to `parity`, `export`, `preview-frame`.
+        "layer-rect": { @MainActor args in
+            let package = URL(fileURLWithPath: args.first ?? "/tmp/LayersFixture.recorder")
+            if !FileManager.default.fileExists(atPath: package.path) { try await SelfTest.cases["make-layers-fixture"]!([package.path]) }
+            try await PreviewView.runLayerRectSelfTest(package: package)
+        },
         "make-layers-fixture": { @MainActor args in
             struct Fail: Error, CustomStringConvertible { let description: String }
             let package = URL(fileURLWithPath: args.first ?? "/tmp/LayersFixture.recorder")

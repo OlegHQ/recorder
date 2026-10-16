@@ -1,5 +1,18 @@
 import CoreGraphics
 
+public enum LayerPlacement: String, CaseIterable, Sendable { case card, full, corner, free }
+
+public func layerPlacementRect(_ placement: LayerPlacement, aspect: Double, canvas: CGSize, position: NormPoint = NormPoint(x: 1, y: 1)) -> NormRect? {
+    guard placement != .free, aspect.isFinite, aspect > 0, canvas.width.isFinite, canvas.height.isFinite,
+          canvas.width > 0, canvas.height > 0, position.x.isFinite, position.y.isFinite else { return nil }
+    if placement == .full { return NormRect() }
+    var width = placement == .card ? 0.64 : 0.28
+    var height = width * canvas.width / canvas.height / aspect
+    if height > 0.8 { width *= 0.8 / height; height = 0.8 }
+    if placement == .card { return NormRect(x: (1 - width) / 2, y: (1 - height) / 2, w: width, h: height) }
+    return NormRect(x: 0.02 + (0.96 - width) * min(1, max(0, position.x)), y: 0.02 + (0.96 - height) * min(1, max(0, position.y)), w: width, h: height)
+}
+
 func fadeOpacity(elapsed: Double, duration: Double, fadeIn: Double?, fadeOut: Double?) -> Double {
     func ramp(_ distance: Double, _ seconds: Double?) -> Double {
         guard let seconds, seconds.isFinite, seconds > 0 else { return 1 }

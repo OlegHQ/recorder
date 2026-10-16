@@ -1471,6 +1471,7 @@ final class TimelineView: NSView {
             return clipContextMenu(index: i)
         case .blockBody(let id), .blockEdge(let id, _):
             if model?.project.audioClips.contains(where: { $0.id == id.uuidString }) == true { return audioContextMenu(id: id) }
+            if model?.project.layers.contains(where: { $0.id == id.uuidString }) == true { return layerContextMenu(id: id) }
             if lane(ofBlock: id) == .zoom { return zoomContextMenu(id: id) }
             selectBlock(id, addToSelection: false)
             let menu = NSMenu()
@@ -1510,6 +1511,76 @@ final class TimelineView: NSView {
         item.target = self
         item.representedObject = represented
         return item
+    }
+
+    private struct LayerMenuTarget { let id: UUID; let value: String; var position = NormPoint(x: 1, y: 1) }
+
+    private func layerContextMenu(id: UUID) -> NSMenu {
+        selectBlock(id, addToSelection: false)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        guard let model, let layer = model.project.layers.first(where: { $0.id == id.uuidString }) else { return menu }
+        let placement = NSMenuItem(title: "Placement", action: nil, keyEquivalent: "")
+        let positions = NSMenu()
+        for value in [LayerPlacement.card, .full] {
+            let item = actionItem(value.rawValue.capitalized, action: #selector(menuLayerPlacement(_:)), represented: LayerMenuTarget(id: id, value: value.rawValue))
+            if value == .full { item.state = layer.rect == NormRect() ? .on : .off }
+            positions.addItem(item)
+        }
+        let corner = NSMenuItem(title: "Corner", action: nil, keyEquivalent: "")
+        let grid = NSMenu()
+        for (vertical, row) in [(0.0, "Top"), (0.5, "Middle"), (1.0, "Bottom")] {
+            for (horizontal, column) in [(0.0, "left"), (0.5, "center"), (1.0, "right")] {
+                grid.addItem(actionItem("\(row) \(column)", action: #selector(menuLayerPlacement(_:)),
+                                       represented: LayerMenuTarget(id: id, value: "corner", position: NormPoint(x: horizontal, y: vertical))))
+            }
+        }
+        corner.submenu = grid; positions.addItem(corner); placement.submenu = positions; menu.addItem(placement)
+        let backdrop = NSMenuItem(title: "Backdrop", action: nil, keyEquivalent: "")
+        let backdrops = NSMenu()
+        for value in [LayerBlock.Backdrop.none, .dim, .blur] {
+            let item = actionItem(value.rawValue.capitalized, action: #selector(menuLayerBackdrop(_:)), represented: LayerMenuTarget(id: id, value: value.rawValue))
+            item.state = layer.backdrop == value ? .on : .off; backdrops.addItem(item)
+        }
+        backdrop.submenu = backdrops; menu.addItem(backdrop)
+        let front = actionItem("In Front of Camera", action: #selector(menuLayerOrder(_:)), represented: id)
+        front.state = layer.aboveCamera ? .on : .off; menu.addItem(front)
+        if layer.kind == .video {
+            let detached = model.linkedLayerSound(layer).isEmpty
+            let audio = actionItem(detached ? "Link Back" : "Detach Audio", action: #selector(menuLayerSound(_:)), represented: id)
+            audio.isEnabled = !detached || !model.detachedLayerSound(layer).isEmpty
+            menu.addItem(audio)
+        }
+        menu.addItem(.separator())
+        menu.addItem(actionItem("Replace Media…", action: #selector(menuLayerReplace(_:)), represented: id))
+        menu.addItem(actionItem("Duplicate (⌘D)", action: #selector(menuDuplicateBlock(_:)), represented: id))
+        menu.addItem(actionItem("Remove", action: #selector(menuRemoveBlock(_:)), represented: id))
+        return menu
+    }
+
+    @objc private func menuLayerPlacement(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? LayerMenuTarget, let placement = LayerPlacement(rawValue: target.value) else { return }
+        model?.setLayerPlacement(target.id, placement: placement, aspect: nil, position: target.position)
+    }
+
+    @objc private func menuLayerBackdrop(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? LayerMenuTarget, let value = LayerBlock.Backdrop(rawValue: target.value) else { return }
+        model?.changeLayer(target.id, name: "Layer Backdrop") { $0.backdrop = value }
+    }
+
+    @objc private func menuLayerOrder(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        model?.changeLayer(id, name: "Layer Order") { $0.aboveCamera.toggle() }
+    }
+
+    @objc private func menuLayerSound(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        model?.toggleLayerSound(id)
+    }
+
+    @objc private func menuLayerReplace(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        model?.chooseMedia(in: window, replacing: id)
     }
 
     /// SPEC §7.2 "Context menus": `Clip: Split at Playhead (C) · Speed ▸ · Mute Audio · Remove (⌫)`.
@@ -2361,14 +2432,12 @@ final class TimelineView: NSView {
         addBlock(lane: .zoom, atSource: model.timeMap.sourceTime(atOutput: t))
     }
 
-    /// `⌘D` duplicates every selected zoom/mask right after itself (SPEC §7.3).
     private func duplicateSelection() {
         guard let model, !model.selection.isEmpty else { return }
         var copies: [UUID] = []
-        model.edit("Duplicate") { project in
-            // Sorted so the result doesn't depend on Set order; each copy lands in the gap after its original.
-            for id in model.selection.sorted(by: { $0.uuidString < $1.uuidString }) { if let copy = project.duplicateBlock(id) { copies.append(copy) } }
-        }
+        var project = model.project
+        for id in model.selection.sorted(by: { $0.uuidString < $1.uuidString }) { if let copy = project.duplicateBlock(id) { copies.append(copy) } }
+        if project != model.project { model.edit("Duplicate") { $0 = project } }
         if !copies.isEmpty { model.selectedClip = nil; model.selection = Set(copies) }
     }
 
@@ -2872,6 +2941,46 @@ final class TimelineView: NSView {
 }
 
 extension TimelineView {
+    @MainActor static func runLayerCommandsSelfTest(model: EditorModel) async throws {
+        struct Fail: Error, CustomStringConvertible { let description: String }
+        func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }
+        guard let video = model.project.layers.first(where: { $0.kind == .video }), let id = UUID(uuidString: video.id) else { throw Fail(description: "Layer menu fixture") }
+        let view = TimelineView(frame: CGRect(x: 0, y: 0, width: 1000, height: 500)); view.model = model
+        let original = model.project, steps = model.undoStepCount
+        var menu = view.layerContextMenu(id: id)
+        try check(menu.items.map(\.title) == ["Placement", "Backdrop", "In Front of Camera", "Detach Audio", "", "Replace Media…", "Duplicate (⌘D)", "Remove"], "Video layer context menu")
+        guard let placement = menu.items[0].submenu, let grid = placement.items.last?.submenu else { throw Fail(description: "Placement submenus") }
+        try check(grid.items.count == 9, "Corner menu positions")
+        view.menuLayerPlacement(placement.items[1])
+        try check(model.project.layers.first { $0.id == video.id }?.rect == NormRect() && model.undoStepCount == steps + 1, "Full menu action / one undo")
+        model.undo(); try check(model.project == original, "Full undo")
+        let thumbnail = await model.layerThumbnail(video)
+        try check(thumbnail != nil, "Video thumbnail")
+        model.setLayerPlacement(id, placement: .corner, aspect: thumbnail.map { Double($0.width) / Double($0.height) }, position: NormPoint(x: 0, y: 1))
+        try check(model.project.layers.first { $0.id == video.id }?.rect.x == 0.02, "Corner placement command"); model.undo()
+        let backdrop = menu.items[1].submenu!.items[2]
+        view.menuLayerBackdrop(backdrop)
+        try check(model.project.layers.first { $0.id == video.id }?.backdrop == .blur, "Backdrop menu"); model.undo()
+        view.menuLayerOrder(menu.items[2])
+        try check(model.project.layers.first { $0.id == video.id }?.aboveCamera == !video.aboveCamera, "Camera order menu"); model.undo()
+        let linked = original.audioClips.filter { $0.layer == video.id }
+        try check(!linked.isEmpty, "Linked video fixture")
+        view.menuLayerSound(menu.items[3])
+        try check(model.project.layers == original.layers && model.project.audioClips.filter { $0.layer == video.id }.isEmpty && model.undoStepCount == steps + 1, "Detach menu, no video retime, one undo")
+        menu = view.layerContextMenu(id: id)
+        try check(menu.items[3].title == "Link Back", "Detached menu")
+        view.menuLayerSound(menu.items[3])
+        try check(!model.project.audioClips.filter { $0.layer == video.id }.isEmpty && model.project.layers == original.layers, "Link Back menu")
+        model.undo(); model.undo(); try check(model.project == original, "Sound undo")
+        view.menuDuplicateBlock(menu.items[6])
+        try check(model.project.layers.count == original.layers.count + 1 && model.undoStepCount == steps + 1, "Duplicate menu / one undo")
+        model.undo(); try check(model.project == original, "Duplicate menu undo")
+        menu = view.layerContextMenu(id: id)
+        view.menuRemoveBlock(menu.items[7])
+        try check(!model.project.layers.contains { $0.id == video.id } && !model.project.audioClips.contains { $0.layer == video.id }, "Remove layer and linked sound")
+        model.undo(); try check(model.project == original && model.project.checkInvariants() == nil, "Remove menu undo")
+    }
+
     @MainActor static func runLayerUISelfTest(model: EditorModel) async throws {
         struct Fail: Error, CustomStringConvertible { let description: String }
         func check(_ value: Bool, _ description: String) throws { if !value { throw Fail(description: description) } }

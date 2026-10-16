@@ -17,6 +17,7 @@ struct InspectorView: View {
         case keys(UUID)
         case camera(UUID)
         case audio(UUID)
+        case layer(UUID)
         case clip(Int)
         case zoom(UUID)
         case layout(UUID)
@@ -34,6 +35,7 @@ struct InspectorView: View {
             if model.project.keystrokeClips.contains(where: { $0.id == id.uuidString }) { return .keys(id) }
             if model.project.cameraClips.contains(where: { $0.id == id.uuidString }) { return .camera(id) }
             if model.project.audioClips.contains(where: { $0.id == id.uuidString }) { return .audio(id) }
+            if model.project.layers.contains(where: { $0.id == id.uuidString }) { return .layer(id) }
             if model.project.zooms.contains(where: { $0.id == id.uuidString }) { return .zoom(id) }
             if model.project.layouts.contains(where: { $0.id == id.uuidString }) { return .layout(id) }
             if model.project.masks.contains(where: { $0.id == id.uuidString }) { return .mask(id) }
@@ -48,6 +50,7 @@ struct InspectorView: View {
         case .keys(let id): return "keys-\(id)"
         case .camera(let id): return "camera-\(id)"
         case .audio(let id): return "audio-\(id)"
+        case .layer(let id): return "layer-\(id)"
         case .clip(let index): return "clip-\(index)"
         case .zoom(let id): return "zoom-\(id)"
         case .layout(let id): return "layout-\(id)"
@@ -203,6 +206,7 @@ struct InspectorView: View {
             }.buttonStyle(TechButtonStyle(kind: .danger, compact: true))
         case .clip(let i): ClipPanel(model: model, clipIndex: i)
         case .audio(let id): AudioPanel(model: model, audioID: id)
+        case .layer(let id): LayerPanel(model: model, layerID: id)
         case .zoom(let id): ZoomPanel(model: model, zoomID: id)
         case .layout(let id): LayoutPanel(model: model, layoutID: id)
         case .mask(let id): MaskPanel(model: model, maskID: id)
@@ -274,10 +278,12 @@ struct EffectPreviewControls: View {
     let model: EditorModel
     let start: Double
     let end: Double
+    var connected = false
     var editsRegion = false
     var regionHint = "Preview is unzoomed for region editing."
 
     private var containsPlayhead: Bool {
+        if connected, let output = model.timeMap.outputTime(atSource: start) { return model.playhead >= output && model.playhead < output + end - start }
         let time = model.timeMap.sourceTime(atOutput: model.playhead)
         return time >= start && time < end
     }
@@ -295,12 +301,12 @@ struct EffectPreviewControls: View {
             HStack {
                 Button {
                     if model.previewPlaybackEnd != nil { model.stopEffectPreview() }
-                    else { model.replayEffect(start: start, end: end) }
+                    else { model.replayEffect(start: start, end: end, connected: connected) }
                 } label: {
                     Label(model.previewPlaybackEnd != nil ? "Stop preview" : "Replay change",
                           systemImage: model.previewPlaybackEnd != nil ? "stop.fill" : "play.fill")
                 }.buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
-                .disabled(model.previewTime(start: start, end: end) == nil)
+                .disabled(model.previewTime(start: start, end: end, connected: connected) == nil)
                 Spacer(minLength: 0)
             }
             if !containsPlayhead {
@@ -309,12 +315,12 @@ struct EffectPreviewControls: View {
                         .font(Font(Theme.captionFont)).foregroundStyle(Theme.textSecondaryColor)
                     Spacer(minLength: 4)
                     Button("Go to interval") {
-                        if let time = model.previewTime(start: start, end: end) {
+                        if let time = model.previewTime(start: start, end: end, connected: connected) {
                             model.isPlaying = false
                             model.playhead = time
                         }
                     }.buttonStyle(TechButtonStyle(kind: .secondary, compact: true))
-                    .disabled(model.previewTime(start: start, end: end) == nil)
+                    .disabled(model.previewTime(start: start, end: end, connected: connected) == nil)
                 }
             }
         }
