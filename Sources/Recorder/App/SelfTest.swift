@@ -3558,6 +3558,54 @@ enum SelfTest {
                   abs(camera.timeMapping.source.start.seconds - 5) < 0.01,
                   abs(camera.timeMapping.target.start.seconds - 2) < 0.01 else { throw Fail.composition }
         },
+        "timeline-render-perf": { @MainActor _ in
+            struct Fail: Error, CustomStringConvertible { let description: String }
+            let (model, view, px, py, cleanup) = try makeTimelineOpsFixture()
+            defer { model.saveNow(); cleanup() }
+            model.edit("Long timeline fixture") { project in
+                project.source.duration = 1800
+                project.clips = [Clip(sourceStart: 0, sourceEnd: 1800)]
+                project.zooms = (0..<200).map { index in
+                    Zoom(start: Double(index) * 9 + 2, end: Double(index) * 9 + 5, scale: 2, mode: .manual)
+                }
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+            guard model.timeMap.outputDuration == 1800, model.project.zooms.count == 200,
+                  model.project.checkInvariants() == nil,
+                  let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw Fail(description: "Long timeline fixture/render unavailable")
+            }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let before = model.project, steps = model.undoStepCount
+            let edge = CGPoint(x: px(5) - 2, y: py(view.laneMidY(.zoom)))
+            view.mouseDown(with: synthMouse(.leftMouseDown, edge))
+            var timings: [Double] = []
+            var lastPoint = edge
+            for index in 0..<60 {
+                lastPoint = CGPoint(x: edge.x + CGFloat(index % 10 + 1) / 2, y: edge.y)
+                let started = DispatchTime.now().uptimeNanoseconds
+                view.mouseDragged(with: synthMouse(.leftMouseDragged, lastPoint, modifiers: [.command]))
+                try await Task.sleep(nanoseconds: 1_000_000)
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                timings.append(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+            }
+            guard model.project.zooms[0].start == 2, model.project.zooms[0].end > 5,
+                  model.undoStepCount == steps, let png = bitmap.representation(using: .png, properties: [:]) else {
+                throw Fail(description: "Zoom edge gesture did not update live without intermediate undo entries")
+            }
+            try png.write(to: URL(fileURLWithPath: "/tmp/recorder-t418-timeline.png"))
+            let committed = DispatchTime.now().uptimeNanoseconds
+            view.mouseUp(with: synthMouse(.leftMouseUp, lastPoint, modifiers: [.command]))
+            let commitMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - committed) / 1_000_000
+            guard model.undoStepCount == steps + 1, model.project.checkInvariants() == nil else {
+                throw Fail(description: "Long timeline gesture must commit exactly one valid undo step")
+            }
+            model.undo()
+            guard model.project == before else { throw Fail(description: "Long timeline gesture undo did not restore the project") }
+            let mean = timings.reduce(0, +) / Double(timings.count)
+            print("timeline-render-perf: 1800 s, 200 zooms, 60 edge updates; update/queue/offscreen draw mean=\(mean) ms max=\(timings.max() ?? 0) ms; commit=\(commitMilliseconds) ms")
+            print("Includes a 1 ms queue yield per update; excludes preview decode and presented-frame measurement. Not an AC-TL-3 presentation PASS.")
+        },
         "timeline-ops": { _ in
             try await runTimelineOpsSelfTest()
             try await MainActor.run { try TimelineView.runAudioUISelfTest() }
