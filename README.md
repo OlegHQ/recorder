@@ -14,13 +14,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlegHQ/recorder/releases/latest">Release DMG — known permission issue</a>
+  <a href="https://github.com/olegpustovit/recorder/releases/latest">Release DMG — known permission issue</a>
   &nbsp;·&nbsp; <a href="#installation">Installation</a>
   &nbsp;·&nbsp; <a href="#build-from-source">Build from source</a>
-  &nbsp;·&nbsp; <a href="https://github.com/OlegHQ/recorder/issues">Report an issue</a>
+  &nbsp;·&nbsp; <a href="https://github.com/olegpustovit/recorder/issues">Report an issue</a>
 </p>
 
-![Build status](https://github.com/OlegHQ/recorder/actions/workflows/ci.yml/badge.svg?branch=dev)
+![Build status](https://github.com/olegpustovit/recorder/actions/workflows/ci.yml/badge.svg?branch=dev)
 
 ## From screen to finished clip
 
@@ -52,7 +52,7 @@ permission-detection failure described above.** Passing export/CI checks does no
 establish that permission grants work on an affected user's Mac.
 
 1. Download `Recorder-<version>-universal.dmg` from the
-   [latest release](https://github.com/OlegHQ/recorder/releases/latest).
+   [latest release](https://github.com/olegpustovit/recorder/releases/latest).
 2. Open the DMG and drag **Recorder** into **Applications**.
 3. Eject the DMG. Open **Recorder from Applications**.
 4. Approve the macOS permissions described below.
@@ -132,7 +132,7 @@ Avoid launching a second copy from the DMG or a build folder while troubleshooti
 - **Copy to clipboard:** copies the exported file for pasting into apps that accept
   files. It does not put a playable video into a plain-text field.
 - **Still stuck:** use **Recorder → Copy State Snapshot**, then
-  [open an issue](https://github.com/OlegHQ/recorder/issues) with your app/macOS versions,
+  [open an issue](https://github.com/olegpustovit/recorder/issues) with your app/macOS versions,
   the failing action and any relevant crash report. Review snapshot contents before
   attaching them; snapshots can include images of Recorder’s windows.
 
@@ -141,7 +141,7 @@ Avoid launching a second copy from the DMG or a build folder while troubleshooti
 Install Apple’s Command Line Tools (`xcode-select --install`) and use Swift 6 or later:
 
 ```sh
-git clone https://github.com/OlegHQ/recorder.git
+git clone https://github.com/olegpustovit/recorder.git
 cd recorder
 make app
 open build/Recorder.app
@@ -192,6 +192,6 @@ and [release instructions](docs/RELEASING.md) for more detail.
 
 ## Credits
 
-Created by [Oleg Pustovit](https://github.com/OlegHQ). Source code is
+Created by [Oleg Pustovit](https://github.com/olegpustovit). Source code is
 [MIT licensed](LICENSE). Bundled font and asset notices are in
 [Third-party notices](Resources/THIRD_PARTY_NOTICES.md).

@@ -32,19 +32,19 @@ Keychain Access, export both as a password-protected `.p12`. Check that
 secrets from a terminal without putting their values in shell history:
 
 ```sh
-gh secret set APPLE_CERTIFICATE_BASE64 --repo OlegHQ/recorder < <(base64 < /path/to/DeveloperID.p12)
-gh secret set APPLE_CERTIFICATE_PASSWORD --repo OlegHQ/recorder
-gh secret set APPLE_SIGNING_IDENTITY --repo OlegHQ/recorder
-gh secret set APPLE_ID --repo OlegHQ/recorder
-gh secret set APPLE_TEAM_ID --repo OlegHQ/recorder
-gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo OlegHQ/recorder
+gh secret set APPLE_CERTIFICATE_BASE64 --repo olegpustovit/recorder < <(base64 < /path/to/DeveloperID.p12)
+gh secret set APPLE_CERTIFICATE_PASSWORD --repo olegpustovit/recorder
+gh secret set APPLE_SIGNING_IDENTITY --repo olegpustovit/recorder
+gh secret set APPLE_ID --repo olegpustovit/recorder
+gh secret set APPLE_TEAM_ID --repo olegpustovit/recorder
+gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo olegpustovit/recorder
 ```
 
 Each `gh secret set` without redirected input prompts for the value. The first
 command uses zsh/bash process substitution; replace `/path/to/DeveloperID.p12` with
 the exported file. Never commit or paste the `.p12`, its password, or the app-specific
 password into an issue or chat. Confirm secret names with
-`gh secret list --repo OlegHQ/recorder`, then push a new version tag and check the
+`gh secret list --repo olegpustovit/recorder`, then push a new version tag and check the
 Release workflow. After it succeeds, download the DMG and verify it on a separate
 Mac or user account before changing the installation guidance.
 

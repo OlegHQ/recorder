@@ -65,7 +65,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" "dist/Recorder-$version-universal.dmg#Recorder $version (Universal DMG)" \
             --title "Recorder $version" --generate-notes \
-            --notes 'Created by [Oleg Pustovit](https://github.com/OlegHQ). Developer ID signed and notarized by Apple.'
+            --notes 'Created by [Oleg Pustovit](https://github.com/olegpustovit). Developer ID signed and notarized by Apple.'
 
       - name: Remove signing material
         if: always()
